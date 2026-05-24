@@ -43,6 +43,8 @@ A directional crypto signal bot using ICT methodology:
   - `tradeai.service` — the bot
   - `tradeai-tracker.service` — dashboard on port 8888 (SSH-tunnel only, never public)
   - `tradeai-watchdog.service` — heartbeat monitor + Telegram alerts on freeze
+- **Manual-trigger services (NOT auto-started on boot):**
+  - `tradeai-explorer.service` — autonomous Optuna explorer; survives SSH disconnect and PC shutdown; `sudo systemctl start tradeai-explorer` to begin a session, `stop` for graceful SIGTERM
 - **Dashboard access:** SSH tunnel `LocalForward 8888 127.0.0.1:8888` then `http://localhost:8888` on local PC
 - **Source of truth:** GitHub private repo `leomerjhonparba/tradeai-bot`
 
@@ -275,20 +277,35 @@ cd ~/TradeAI && python3 backtest.py
 ```
 
 ### Autonomous explorer (overnight, 5-18 hours)
+
+**Preferred — systemd manual-trigger (survives SSH disconnect + PC shutdown):**
 ```bash
-# ALWAYS in tmux for survival on disconnect
+# One-time setup per session — edit trial count:
+cp deploy/env.explorer.example .env.explorer
+nano .env.explorer       # EXPLORER_TRIALS=50 (default)
+
+# Start a session (immediately survives any disconnect):
+sudo systemctl start tradeai-explorer
+
+# Watch progress:
+journalctl -u tradeai-explorer -f
+python3 scripts/autonomous_explorer.py --status
+
+# Stop early (clean SIGTERM — finishes current trial, persists state):
+sudo systemctl stop tradeai-explorer
+```
+The service is NOT enabled on boot — it must be started manually each time
+(matches §6 "no auto-scheduler"). Exits 0 when trials exhausted; restarts
+on crash (capped at 3 in 10 min) and resumes from Optuna study DB.
+
+**Legacy fallback — tmux (still works, manual discipline required):**
+```bash
 tmux new -s explorer
 cd ~/TradeAI
 python3 scripts/autonomous_explorer.py --trials 30
 # Detach: Ctrl+B then D
 # Reattach: tmux attach -t explorer
-
-# Check status without attaching:
-python3 scripts/autonomous_explorer.py --status
-
-# Stop early:
-# Attached: Ctrl+C
-# Detached: pkill -f autonomous_explorer.py
+# Stop early — attached: Ctrl+C  |  detached: pkill -f autonomous_explorer.py
 ```
 
 ### Git workflow

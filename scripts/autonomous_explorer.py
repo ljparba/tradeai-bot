@@ -49,6 +49,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -363,7 +364,7 @@ def _params_to_env(params: dict) -> dict:
     return env
 
 
-def _run_backtest(env: dict, timeout_s: int = 1200) -> dict:
+def _run_backtest(env: dict, timeout_s: int = 1800) -> dict:
     """Run backtest.py subprocess and return parsed metrics.
 
     FIX C1 (2026-05-24): captures MAX(backtest_runs.id) BEFORE the subprocess so
@@ -661,7 +662,7 @@ def _eligibility_check(m: dict, pin: dict) -> tuple:
     return True, "all criteria met"
 
 
-def _reproduce(params: dict, original_metrics: dict, timeout_s: int = 1200) -> tuple:
+def _reproduce(params: dict, original_metrics: dict, timeout_s: int = 1800) -> tuple:
     """Run a second backtest with the SAME params. Returns (reproduced: bool, m2: dict, reason: str).
     Cleans up the reproduction's backtest_runs row regardless of outcome (the first run is canonical).
     """
@@ -993,6 +994,26 @@ def run_study(study_name: str, n_trials: int, skip_precache: bool = False):
             f"Baseline pin: Run-{_read_pin_run()}  DSR={guard.pin_dsr}"
         )
 
+        # SIGTERM handler — systemctl stop sends SIGTERM. Calls study.stop()
+        # so Optuna finishes current trial then exits cleanly. A second
+        # SIGTERM forces immediate exit. SIGINT (Ctrl+C) keeps its existing
+        # KeyboardInterrupt path.
+        _term_count = {"n": 0}
+        def _sigterm_handler(signum, _frame):
+            _term_count["n"] += 1
+            if _term_count["n"] >= 2:
+                print(f"\n[explorer] second SIGTERM received — forced exit", flush=True)
+                sys.exit(130)
+            sig_name = {signal.SIGTERM: "SIGTERM"}.get(signum, f"signal_{signum}")
+            print(f"\n[explorer] received {sig_name} — stopping after current trial...", flush=True)
+            guard.pause_reason = f"stopped_by_{sig_name.lower()}"
+            sess["pause_reason"] = guard.pause_reason
+            try:
+                study.stop()
+            except Exception:
+                pass
+        signal.signal(signal.SIGTERM, _sigterm_handler)
+
         try:
             study.optimize(_objective_factory(study_name, guard, sess),
                            n_trials=n_trials, show_progress_bar=False)
@@ -1011,6 +1032,11 @@ def run_study(study_name: str, n_trials: int, skip_precache: bool = False):
         if guard.pause_reason:
             sess["pause_reason"] = guard.pause_reason
             _write_session(sess)
+            _telegram(
+                f"TradeAI Explorer STOPPED ({guard.pause_reason})\n"
+                f"Trials completed: {sess.get('trials_completed')}/{sess.get('trials_planned')}\n"
+                f"Best CPCV: {sess.get('best_cpcv')}  DSR: {sess.get('best_dsr')}"
+            )
         else:
             sess["ended_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             _write_session(sess)
@@ -1185,9 +1211,16 @@ def show_status():
 
 
 def main():
+    # Env-var defaults let systemd EnvironmentFile=.env.explorer drive the
+    # session config without exposing trials/study-name as ExecStart args.
+    _env_trials = int(os.environ.get("EXPLORER_TRIALS", "0") or "0")
+    _env_study  = os.environ.get("EXPLORER_STUDY_NAME", "nightly_explorer")
+
     ap = argparse.ArgumentParser(description="TradeAI Autonomous Explorer — Phase 1 + 2")
-    ap.add_argument("--trials", type=int, default=0)
-    ap.add_argument("--study-name", type=str, default="nightly_explorer")
+    ap.add_argument("--trials", type=int, default=_env_trials,
+                    help="Number of Optuna trials (or EXPLORER_TRIALS env var)")
+    ap.add_argument("--study-name", type=str, default=_env_study,
+                    help="Optuna study name (or EXPLORER_STUDY_NAME env var)")
     ap.add_argument("--list-recent", type=int, default=0, metavar="N")
     ap.add_argument("--best", action="store_true")
     ap.add_argument("--status", action="store_true",

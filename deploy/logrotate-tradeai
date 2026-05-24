@@ -1,0 +1,38 @@
+# TradeAI log rotation — daily rotate, keep 14 days, compress old logs.
+#
+# Install once on the VPS:
+#     sudo cp /home/tradeai/TradeAI/deploy/logrotate-tradeai /etc/logrotate.d/tradeai
+#     sudo chmod 644 /etc/logrotate.d/tradeai
+#     sudo logrotate -d /etc/logrotate.d/tradeai     # dry-run; verifies config
+#
+# Daily cron runs logrotate via /etc/cron.daily/logrotate — no enable step needed.
+#
+# Notes:
+#   - copytruncate is used because the bot/tracker/explorer/watchdog write to logs
+#     via systemd's StandardOutput=append:... — they hold an open file descriptor.
+#     Rotating the file out from under them would mean future writes go to a
+#     deleted inode. copytruncate copies the file then truncates the original
+#     in-place so the existing FD keeps working.
+#   - missingok: explorer.log and watchdog.log may not exist before first session.
+#   - 14 daily rotations + compression = ~14 KB / day after gzip at current
+#     volume (~45 KB/hr × 24 = 1 MB/day raw, ~14 KB compressed).
+
+/home/tradeai/TradeAI/logs/bot.log
+/home/tradeai/TradeAI/logs/tracker.log
+/home/tradeai/TradeAI/logs/explorer.log
+/home/tradeai/TradeAI/logs/watchdog.log
+{
+    # su drops to this user/group before processing — required because the
+    # logs/ directory is group-writable by tradeai (mode 0775), which trips
+    # logrotate's default safety check that refuses to handle non-root-owned
+    # writable parents.
+    su tradeai tradeai
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    create 0644 tradeai tradeai
+}

@@ -1,0 +1,48 @@
+[Unit]
+# TradeAI dead-man's-switch watchdog — sidecar to tradeai.service.
+# Reads data/heartbeat.json every 60s; if the file is older than 10 min,
+# pages the operator via Telegram (and SMTP if configured). Recovery alert
+# fires when the heartbeat resumes.
+#
+# Why a SEPARATE process: a watchdog inside the bot interpreter can never
+# detect kill -9, segfault, or main-loop deadlock. systemd Restart=always
+# on tradeai.service catches crashes but NOT freezes — this fills that gap.
+#
+# Install (one-time):
+#     sudo cp deploy/tradeai-watchdog.service /etc/systemd/system/
+#     sudo systemctl daemon-reload
+#     sudo systemctl enable --now tradeai-watchdog
+#
+# Verify:
+#     systemctl status tradeai-watchdog
+#     journalctl -u tradeai-watchdog -f
+Description=TradeAI Dead-Man's-Switch Watchdog
+After=network-online.target tradeai.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tradeai
+WorkingDirectory=/home/tradeai/TradeAI
+EnvironmentFile=/home/tradeai/TradeAI/.env
+# -u = unbuffered stdout so journalctl shows lines as they happen.
+# --interval 60   = check heartbeat every 60 seconds
+# --staleness 600 = alert if heartbeat is older than 10 minutes
+ExecStart=/usr/bin/python3 -u /home/tradeai/TradeAI/scripts/watchdog.py --interval 60 --staleness 600
+
+# Re-alert cooldown is baked in (900s = 15 min) by the script itself —
+# operator won't get spammed if the bot stays down.
+
+# Restart always — watchdog must be up whenever the bot is up.
+Restart=always
+RestartSec=15
+
+StandardOutput=append:/home/tradeai/TradeAI/logs/watchdog.log
+StandardError=append:/home/tradeai/TradeAI/logs/watchdog.log
+
+# Resource limits — watchdog is essentially idle (sleep + file stat + occasional HTTP)
+MemoryMax=128M
+CPUQuota=20%
+
+[Install]
+WantedBy=multi-user.target

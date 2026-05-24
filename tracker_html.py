@@ -263,6 +263,7 @@ tr:hover td{background:rgba(37,37,56,.45)}
 .status-excellent{background:rgba(34,197,94,.15);color:var(--green)}
 .status-average{background:rgba(234,179,8,.15);color:var(--yellow)}
 .status-weak{background:rgba(239,68,68,.15);color:var(--red)}
+.status-awaiting{background:rgba(148,163,184,.12);color:var(--muted);text-transform:none;letter-spacing:.02em}
 .bot-score-right{flex:1;min-width:200px}
 .bot-bar-wrap{background:var(--dim);border-radius:6px;height:10px;margin-bottom:1rem;overflow:hidden}
 .bot-bar-fill{height:100%;border-radius:6px;transition:width .6s ease;
@@ -3086,19 +3087,29 @@ async function loadIntelligence(){
     const d=await r.json();
     if(!d.ok) throw new Error('DB error in intelligence');
 
-    // Bot Health Score
+    // Bot Health Score — when no signals have closed yet, render an awaiting
+    // state instead of the misleading 10/Weak that the formula produces from
+    // default sel_score=10 on empty data.
     const score=d.bot_score||0;
-    document.getElementById('botScoreNum').textContent=score;
-    document.getElementById('botBarFill').style.width=score+'%';
+    const totalClosed=d.total_closed||0;
     const statusEl=document.getElementById('botScoreStatus');
-    if(score>=70){statusEl.textContent='Excellent';statusEl.className='bot-score-status status-excellent';}
-    else if(score>=45){statusEl.textContent='Average';statusEl.className='bot-score-status status-average';}
-    else{statusEl.textContent='Weak';statusEl.className='bot-score-status status-weak';}
+    if(totalClosed===0){
+      document.getElementById('botScoreNum').textContent='—';
+      document.getElementById('botBarFill').style.width='0%';
+      statusEl.textContent='Awaiting first closed signal';
+      statusEl.className='bot-score-status status-awaiting';
+    } else {
+      document.getElementById('botScoreNum').textContent=score;
+      document.getElementById('botBarFill').style.width=score+'%';
+      if(score>=70){statusEl.textContent='Excellent';statusEl.className='bot-score-status status-excellent';}
+      else if(score>=45){statusEl.textContent='Average';statusEl.className='bot-score-status status-average';}
+      else{statusEl.textContent='Weak';statusEl.className='bot-score-status status-weak';}
+    }
     const bp=d.bot_parts||{};
-    document.getElementById('bpWr').textContent=bp.wr||0;
-    document.getElementById('bpRr').textContent=bp.rr||0;
-    document.getElementById('bpHc').textContent=bp.hc||0;
-    document.getElementById('bpSel').textContent=bp.sel||0;
+    document.getElementById('bpWr').textContent=totalClosed===0?'—':(bp.wr||0);
+    document.getElementById('bpRr').textContent=totalClosed===0?'—':(bp.rr||0);
+    document.getElementById('bpHc').textContent=totalClosed===0?'—':(bp.hc||0);
+    document.getElementById('bpSel').textContent=totalClosed===0?'—':(bp.sel||0);
 
     // ── Adaptive Gate Status Cards ──
     const confFloorEl = document.getElementById('iaConfFloor');

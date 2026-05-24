@@ -21,7 +21,7 @@ echo "[3/7] Creating tradeai user..."
 if ! id tradeai &>/dev/null; then
     useradd -m -s /bin/bash tradeai
     usermod -aG sudo tradeai
-    echo "tradeai ALL=(ALL) NOPASSWD: /bin/systemctl restart tradeai, /bin/systemctl restart tradeai-tracker, /bin/systemctl status tradeai, /bin/systemctl status tradeai-tracker, /bin/journalctl" > /etc/sudoers.d/tradeai
+    echo "tradeai ALL=(ALL) NOPASSWD: /bin/systemctl restart tradeai, /bin/systemctl restart tradeai-tracker, /bin/systemctl restart tradeai-watchdog, /bin/systemctl status tradeai, /bin/systemctl status tradeai-tracker, /bin/systemctl status tradeai-watchdog, /bin/systemctl start tradeai-explorer, /bin/systemctl stop tradeai-explorer, /bin/systemctl status tradeai-explorer, /bin/journalctl" > /etc/sudoers.d/tradeai
     chmod 440 /etc/sudoers.d/tradeai
     echo "  → user 'tradeai' created. Set password next:"
     passwd tradeai
@@ -61,8 +61,21 @@ echo "       cd ~ && git clone <your-github-repo-url> TradeAI"
 echo "  3. Install Python deps:"
 echo "       cd ~/TradeAI && pip install -r requirements.txt --break-system-packages"
 echo "  4. Create .env file (see deploy/env.example)"
+echo "  5a. Configure swap + log rotation (one-time, run as root):"
+echo "       sudo bash deploy/setup_swap.sh"
+echo "       sudo cp deploy/logrotate-tradeai /etc/logrotate.d/tradeai"
+echo "       sudo chmod 644 /etc/logrotate.d/tradeai"
+echo ""
 echo "  5. Install systemd services:"
-echo "       sudo cp deploy/tradeai.service /etc/systemd/system/"
-echo "       sudo cp deploy/tradeai-tracker.service /etc/systemd/system/"
+echo "       sudo cp deploy/tradeai.service          /etc/systemd/system/"
+echo "       sudo cp deploy/tradeai-tracker.service  /etc/systemd/system/"
+echo "       sudo cp deploy/tradeai-watchdog.service /etc/systemd/system/"
+echo "       sudo cp deploy/tradeai-explorer.service /etc/systemd/system/"
 echo "       sudo systemctl daemon-reload"
-echo "       sudo systemctl enable --now tradeai tradeai-tracker"
+echo "       sudo systemctl enable --now tradeai tradeai-tracker tradeai-watchdog"
+echo "     # tradeai-explorer is MANUAL-TRIGGER ONLY — do NOT enable on boot."
+echo "     # To start an Optuna session that survives SSH disconnect:"
+echo "       cp deploy/env.explorer.example .env.explorer  # edit EXPLORER_TRIALS"
+echo "       sudo systemctl start tradeai-explorer"
+echo "       sudo systemctl stop  tradeai-explorer    # graceful early stop"
+echo "       journalctl -u tradeai-explorer -f"

@@ -1,0 +1,50 @@
+[Unit]
+# TradeAI Autonomous Explorer (Phase 1-4) — manual-trigger ONLY.
+# DO NOT enable on boot. Operator starts each session:
+#     sudo systemctl start tradeai-explorer
+#     sudo systemctl stop  tradeai-explorer   (graceful SIGTERM)
+#     sudo systemctl status tradeai-explorer
+#     journalctl -u tradeai-explorer -f
+# Survives SSH disconnect + PC shutdown. Exits 0 when --trials exhausted;
+# systemd then marks the unit "inactive (dead)" and waits for the next
+# manual start.
+Description=TradeAI Autonomous Explorer (manual-trigger Optuna session)
+After=network-online.target tradeai.service
+Wants=network-online.target
+# Restart-rate limiter — must be in [Unit] not [Service] on systemd >= 230.
+StartLimitBurst=3
+StartLimitIntervalSec=600
+
+[Service]
+Type=simple
+User=tradeai
+WorkingDirectory=/home/tradeai/TradeAI
+# Primary env (shared with the bot — TELEGRAM_TOKEN, CHAT_ID, etc.)
+EnvironmentFile=/home/tradeai/TradeAI/.env
+# Optional explorer-specific overrides (EXPLORER_TRIALS, EXPLORER_STUDY_NAME).
+# The "-" prefix means systemd does not fail if the file is absent.
+EnvironmentFile=-/home/tradeai/TradeAI/.env.explorer
+# -u = unbuffered stdout so journalctl shows lines as they happen
+ExecStart=/usr/bin/python3 -u /home/tradeai/TradeAI/scripts/autonomous_explorer.py
+
+# systemctl stop sends SIGTERM → Python handler calls study.stop() so Optuna
+# finishes the current trial then exits cleanly. Give the current trial up
+# to 25 minutes to finish (a single backtest is ~11 min + safety).
+KillSignal=SIGTERM
+TimeoutStopSec=1500
+
+# Restart on crash so a hung-trial timeout doesn't lose the whole session
+# (Optuna study DB persists, so restart resumes from where it left off).
+# Capped at 3 restarts in 10 min — beyond that, operator must investigate.
+Restart=on-failure
+RestartSec=30
+
+StandardOutput=append:/home/tradeai/TradeAI/logs/explorer.log
+StandardError=append:/home/tradeai/TradeAI/logs/explorer.log
+
+# Resource limits — Optuna + backtest combined peak is ~1.5GB
+MemoryMax=4G
+CPUQuota=300%
+
+# NO [Install] section — this service must NOT auto-start on boot.
+# Operator triggers each session deliberately (CLAUDE.md §6: "no auto-scheduler").
