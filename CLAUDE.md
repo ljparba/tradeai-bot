@@ -375,6 +375,45 @@ If you're a new Claude session opening this repo and the operator says "continue
 9. Re-introduce within-fold sr_trial_std proxy (use honest cross-config std only)
 10. Delete the `data/snapshots/` folder
 
+### 13a. Autonomous explorer protection (CRITICAL)
+
+**The autonomous explorer (`autonomous_explorer.py`) may be running in a tmux session
+("explorer", "overnight_v1", etc.) for 5-18 hours per session.** Operator runs these
+unattended overnight; killing one mid-session wastes hours of compute.
+
+**Check FIRST before any backtest-related action:**
+```bash
+pgrep -fa "autonomous_explorer.py"               # is process alive?
+python3 scripts/autonomous_explorer.py --status  # what session, how many trials?
+tmux ls                                          # any running tmux sessions?
+```
+
+**If explorer is RUNNING, do NOT:**
+- Stop the explorer (`pkill`, kill tmux, etc.) unless operator explicitly says so
+- Run `python3 backtest.py` manually (checkpoint corruption + DB race + max_id race)
+- Click "Run Backtest" in dashboard (same conflict)
+- `sudo systemctl restart tradeai` mid-trial (PID file confusion + cycle disruption)
+- Edit `ict_engine.py` / `config.py` / `backtest.py` mid-session (trips code_drift guard, kills session)
+
+**If you MUST edit code while explorer is running:**
+- Save to a feature branch: `git checkout -b fix-X`
+- Commit + push the branch
+- Apply on main only AFTER explorer session ends
+- Or ask operator to pause explorer first
+
+**Acceptable while explorer is running:**
+- Read-only operations (view logs, query DB read-only mode, dashboard browsing)
+- Edit non-code files (CLAUDE.md, docs/, scripts/ other than backtest+autonomous_explorer)
+- Monitor via `python3 scripts/autonomous_explorer.py --status` (lightweight)
+
+**Stop explorer ONLY when:**
+- Operator explicitly says "stop the explorer"
+- Anti-overfit guard tripped (auto-pause; operator notified)
+- 50+ consecutive errors (auto-pause)
+- Session naturally finished (`--trials N` exhausted)
+
+Treat the explorer like a long-running production job, not a casual subprocess.
+
 ---
 
 **End of CLAUDE.md. Future sessions: this is your project brain. Trust it but verify current state via `--status` commands before making changes.**
