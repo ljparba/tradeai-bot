@@ -1,0 +1,49 @@
+====================================================================
+  TRADEAI — ICT BACKTESTING ENGINE  (Phase 4.7)
+  Mode      : Research (BUY+SELL)
+  Strategy  : Liquidity Sweep + MSS + FVG + 5M iFVG Precision
+  Period    : Last 365 days
+  TF Stack  : 4H bias | 1H TP levels | 5M sweep/MSS/FVG (Phase 4.8)
+  Entry win : 72×5M = 4H  |  Outcome: 288×5M = 24H
+  Gates     : 4H=none | 1H=loose | Blocked: CHOPPY, HIGH_VOLATILITY, LIQUIDATION, LOW_VOLATILITY_CHOP, RANGING, TRENDING_BEAR | SELL-ok: TRENDING_BEAR
+  Fees      : RT=0.30% (0.10%/side fee + 0.05%/side slippage)
+  Tokens    : BTC, ETH, XRP, HBAR, AVAX, LINK, BNB, ADA, POL
+====================================================================
+
+Note: VPN required (Binance blocked in Philippines)
+
+[OGD] No backtest_token_weights found — using AE_DEFAULT_WEIGHTS for all tokens
+[BTC] Fetching 365d history... 106561 5M | 8880 1H | 2220 4H bars
+[BTC] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×31819 | weekday=1 blocked×15249 | weekday=2 blocked×14980 | weekday=5 blocked×14974 | regime=CHOPPY blocked×10443 | [DIAG] gates_passed×7805 | [DIAG] disp_fail×7229 | regime=TRENDING_BEAR blocked×4509 | 1H=STRONG_BULL blocks SELL×4334 | 1H=BULL blocks SELL×1246 | [DIAG] disp_ok×576 | FVG quality too low×308 | regime=LOW_VOLATILITY_CHOP blocked×265 | [DIAG] fvg_fail×251 | Setup too old (>ICT_MAX_SETUP_AGE_BARS)×68
+0 signals generated
+[ETH] Fetching 365d history... 106560 5M | 8880 1H | 2220 4H bars
+[ETH] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×32181 | weekday=1 blocked×15261 | weekday=2 blocked×14989 | weekday=5 blocked×14976 | regime=CHOPPY blocked×9797 | [DIAG] gates_passed×7713 | [DIAG] disp_fail×7325 | regime=TRENDING_BEAR blocked×4581 | 1H=STRONG_BULL blocks SELL×4440 | 1H=BULL blocks SELL×1314 | regime=LOW_VOLATILITY_CHOP blocked×431 | [DIAG] disp_ok×388 | FVG quality too low×208 | [DIAG] fvg_fail×142 | 4H DR: DISCOUNT (SELL misaligned)×35
+0 signals generated
+[XRP] Fetching 365d history... 106561 5M | 8880 1H | 2220 4H bars
+[XRP] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×32203 | weekday=1 blocked×15257 | weekday=2 blocked×14983 | weekday=5 blocked×14972 | regime=CHOPPY blocked×11799 | [DIAG] gates_passed×6782 | [DIAG] disp_fail×6299 | regime=TRENDING_BEAR blocked×4471 | 1H=STRONG_BULL blocks SELL×3367 | 1H=BULL blocks SELL×1268 | regime=LOW_VOLATILITY_CHOP blocked×494 | [DIAG] disp_ok×483 | FVG quality too low×275 | [DIAG] fvg_fail×139 | Setup too old (>ICT_MAX_SETUP_AGE_BARS)×76
+0 signals generated
+[HBAR] Fetching 365d history... 106560 5M | 8880 1H | 2220 4H bars
+[HBAR] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×32508 | weekday=1 blocked×15240 | weekday=2 blocked×14970 | weekday=5 blocked×14936 | regime=CHOPPY blocked×11501 | [DIAG] gates_passed×6969 | [DIAG] disp_fail×6591 | regime=TRENDING_BEAR blocked×4253 | 1H=STRONG_BULL blocks SELL×3375 | 1H=BULL blocks SELL×1463 | [DIAG] disp_ok×378 | regime=LOW_VOLATILITY_CHOP blocked×338 | FVG quality too low×197 | [DIAG] fvg_fail×116 | Setup too old (>ICT_MAX_SETUP_AGE_BARS)×106
+0 signals generated
+[AVAX] Fetching 365d history... 106561 5M | 8880 1H | 2220 4H bars
+[AVAX] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×32377 | weekday=1 blocked×15173 | weekday=2 blocked×14724 | weekday=5 blocked×14705 | regime=CHOPPY blocked×10804 | [DIAG] gates_passed×7017 | [DIAG] disp_fail×6215 | regime=TRENDING_BEAR blocked×5578 | 1H=STRONG_BULL blocks SELL×3116 | [DIAG] disp_ok×802 | 1H=BULL blocks SELL×752 | Setup too old (>ICT_MAX_SETUP_AGE_BARS)×556 | [DIAG] fvg_fail×437 | FVG quality too low×286 | 4H DR: PREMIUM (BUY misaligned)×42
+0 signals generated
+[LINK] Fetching 365d history... 106560 5M | 8880 1H | 2220 4H bars
+[LINK] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×33443 | weekday=1 blocked×15160 | weekday=2 blocked×14874 | weekday=5 blocked×14681 | regime=CHOPPY blocked×10740 | [DIAG] gates_passed×6191 | [DIAG] disp_fail×5492 | regime=TRENDING_BEAR blocked×4807 | 1H=STRONG_BULL blocks SELL×3432 | 1H=BULL blocks SELL×803 | [DIAG] disp_ok×699 | Setup too old (>ICT_MAX_SETUP_AGE_BARS)×534 | [DIAG] fvg_fail×319 | FVG quality too low×292 | regime=LOW_VOLATILITY_CHOP blocked×203
+0 signals generated
+[BNB] Fetching 365d history... 106561 5M | 8880 1H | 2220 4H bars
+[BNB] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×32554 | weekday=1 blocked×15259 | weekday=5 blocked×14964 | weekday=2 blocked×14928 | regime=CHOPPY blocked×11616 | [DIAG] gates_passed×6847 | [DIAG] disp_fail×6430 | 1H=STRONG_BULL blocks SELL×4413 | regime=TRENDING_BEAR blocked×3677 | 1H=BULL blocks SELL×872 | [DIAG] disp_ok×417 | regime=LOW_VOLATILITY_CHOP blocked×409 | FVG quality too low×232 | [DIAG] fvg_fail×167 | Setup too old (>ICT_MAX_SETUP_AGE_BARS)×93
+0 signals generated
+[ADA] Fetching 365d history... 106560 5M | 8880 1H | 2220 4H bars
+[ADA] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×33245 | weekday=1 blocked×15263 | weekday=2 blocked×14966 | weekday=5 blocked×14959 | regime=CHOPPY blocked×12003 | [DIAG] gates_passed×6663 | [DIAG] disp_fail×6213 | regime=TRENDING_BEAR blocked×4741 | 1H=STRONG_BULL blocks SELL×2715 | 1H=BULL blocks SELL×833 | [DIAG] disp_ok×450 | FVG quality too low×218 | regime=LOW_VOLATILITY_CHOP blocked×168 | [DIAG] fvg_fail×146 | Setup too old (>ICT_MAX_SETUP_AGE_BARS)×88
+0 signals generated
+[POL] Fetching 365d history... 106561 5M | 8880 1H | 2220 4H bars
+[POL] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×32634 | weekday=1 blocked×15088 | weekday=2 blocked×14957 | weekday=5 blocked×14598 | regime=CHOPPY blocked×12965 | [DIAG] gates_passed×5879 | [DIAG] disp_fail×5101 | regime=TRENDING_BEAR blocked×4501 | 1H=STRONG_BULL blocks SELL×2425 | 1H=BULL blocks SELL×1149 | [DIAG] disp_ok×778 | Setup too old (>ICT_MAX_SETUP_AGE_BARS)×516 | [DIAG] fvg_fail×503 | FVG quality too low×244 | regime=LOW_VOLATILITY_CHOP blocked×164
+0 signals generated
+
+No signals generated — check VPN / Binance connection.
+
+[Walk-Forward] Not enough signals for rolling windows.
+
+[PHASE I-3] No signals - template report skipped.
+[PHASE I-3] Template report → C:\Users\User\Desktop\TradeAI\docs\ict_strategy_variant_learner\template_performance_report.md

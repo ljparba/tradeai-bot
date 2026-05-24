@@ -1,0 +1,131 @@
+# TradeAI — Backtest Regression Gate
+#
+# Roadmap Phase A item #4 (docs/ENTERPRISE_ROADMAP.md §3 / §4).
+# Fails PRs that regress the Run-48 baseline (WR=81.1%, n=37, z=+4.15).
+#
+# Why CI doesn't run a full backtest:
+# - Binance is geo-blocked in several CI regions (Philippines, parts of US).
+# - A full 365-day, 9-token, 4-timeframe backtest takes 30+ minutes against
+#   Binance even with a warm cache; CI runners would 429 or timeout.
+# - The most regression-prone class of bugs (M24: config silently reverted →
+#   0 signals) is statically detectable by --mode=ci, which compares strategy
+#   parameter values against the locked Run-48 baseline.
+#
+# CI therefore runs the deterministic, network-free checks:
+#   1. pytest — 200+ unit tests including the new config and secrets suites
+#   2. backtest_regression.py --mode=ci — strategy-parameter drift
+#   3. backtest_regression.py --mode=lastrun (if data/backtest_results.json
+#      is present in the PR's checkout) — verifies recorded metrics still
+#      meet the baseline floors. Optional because some PRs intentionally
+#      regenerate the JSON.
+#
+# The full backtest gate (--mode=full) is intended to be run LOCALLY by the
+# author before opening the PR. The author commits the resulting JSON;
+# CI's --mode=lastrun then validates it.
+
+name: Backtest Regression Gate
+
+on:
+  pull_request:
+    branches: [main, master]
+    paths:
+      - "**.py"
+      - "config.py"
+      - "requirements.txt"
+      - ".github/workflows/backtest_gate.yml"
+  push:
+    branches: [main, master]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: Unit tests (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run pytest
+        env:
+          # Keep tests deterministic — never let CI accidentally hit LIVE.
+          EXECUTION_MODE: PAPER
+        run: |
+          python -m pytest tests/test_tunebot.py \
+                           tests/test_adaptive_snapshot.py \
+                           tests/test_phase2_data.py \
+                           tests/test_heartbeat.py \
+                           tests/test_state_store.py \
+                           tests/test_backtest_checkpoint.py \
+                           tests/test_labeling.py \
+                           tests/test_config.py \
+                           tests/test_secrets_loader.py \
+                           tests/test_backtest_regression.py \
+                           --tb=short -q
+
+      - name: Run alignment script
+        env:
+          EXECUTION_MODE: PAPER
+        run: python tests/test_tracker_db_alignment.py
+
+  strategy_drift:
+    name: Strategy parameter drift (--mode=ci)
+    runs-on: ubuntu-latest
+    needs: pytest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify strategy params match Run-48 baseline
+        env:
+          EXECUTION_MODE: PAPER
+        run: python scripts/backtest_regression.py --mode=ci
+
+  backtest_lastrun:
+    name: Last-run backtest regression check (optional)
+    runs-on: ubuntu-latest
+    needs: pytest
+    if: hashFiles('data/backtest_results.json') != ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify committed backtest JSON still beats baseline floors
+        env:
+          EXECUTION_MODE: PAPER
+          # Defaults align with the Run-48 baseline minus ~10pp tolerance per
+          # ROADMAP §"Phase A — Exit criteria". Override here to harden.
+          BACKTEST_GATE_MIN_N:      "25"
+          BACKTEST_GATE_MIN_WR_PCT: "72.0"
+          BACKTEST_GATE_MIN_Z:      "2.5"
+        run: python scripts/backtest_regression.py --mode=lastrun

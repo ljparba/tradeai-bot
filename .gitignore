@@ -1,0 +1,51 @@
+# ── Secrets ─────────────────────────────────────────────────
+env.bat
+env.example.bat
+.env
+.env.local
+.env.vault.local
+.env.me
+DOTENV_KEY
+secrets/
+
+# ── Runtime data (lives only on VPS, never in git) ──────────
+data/signals.db
+data/signals.db-journal
+data/signals.db-wal
+data/signals.db-shm
+data/explorer_learning.db
+data/explorer_learning.db-journal
+data/optuna_study.db
+data/optuna_study.db-journal
+data/baseline_pin.json
+data/explorer_session.json
+data/explorer.pid
+data/pareto_archive.json
+data/promotion_log.json
+data/backtest_results.json
+data/ohlcv_cache/
+data/snapshots/
+data/quantstats_cache/
+data/explorer_logs/
+
+# ── Auto-generated backups ──────────────────────────────────
+backups/
+
+# ── Python bytecode + venv ──────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# ── Logs ────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── IDE / OS ────────────────────────────────────────────────
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+*.swp

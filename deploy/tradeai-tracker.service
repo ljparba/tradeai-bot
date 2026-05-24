@@ -1,0 +1,23 @@
+[Unit]
+Description=TradeAI Tracker Dashboard (port 8888)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tradeai
+WorkingDirectory=/home/tradeai/TradeAI
+EnvironmentFile=/home/tradeai/TradeAI/.env
+ExecStart=/usr/bin/python3 /home/tradeai/TradeAI/tracker.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/tradeai/TradeAI/logs/tracker.log
+StandardError=append:/home/tradeai/TradeAI/logs/tracker.log
+
+# Bind to localhost only — dashboard only accessible via SSH tunnel
+Environment="TRACKER_HOST=127.0.0.1"
+
+MemoryLimit=512M
+
+[Install]
+WantedBy=multi-user.target

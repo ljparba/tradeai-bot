@@ -1,0 +1,49 @@
+====================================================================
+  TRADEAI — ICT BACKTESTING ENGINE  (Phase 4.7)
+  Mode      : Research (BUY+SELL)
+  Strategy  : Liquidity Sweep + MSS + FVG + 5M iFVG Precision
+  Period    : Last 365 days
+  TF Stack  : 4H bias | 1H TP levels | 5M sweep/MSS/FVG (Phase 4.8)
+  Entry win : 72×5M = 4H  |  Outcome: 288×5M = 24H
+  Gates     : 4H=none | 1H=loose | Blocked: CHOPPY, HIGH_VOLATILITY, LIQUIDATION, LOW_VOLATILITY_CHOP, RANGING, TRENDING_BEAR | SELL-ok: TRENDING_BEAR
+  Fees      : RT=0.30% (0.10%/side fee + 0.05%/side slippage)
+  Tokens    : BTC, ETH, XRP, HBAR, AVAX, LINK, BNB, ADA, POL
+====================================================================
+
+Note: VPN required (Binance blocked in Philippines)
+
+[OGD] Loaded backtest weights for 10 token(s): ADA, AVAX, BNB, BTC, ETH, HBAR, LINK, POL, SOL, XRP
+[BTC] Fetching 365d history... 106561 5M | 8880 1H | 2220 4H bars
+[BTC] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×31896 | weekday=1 blocked×15260 | weekday=2 blocked×15070 | weekday=5 blocked×14976 | regime=CHOPPY blocked×10299 | regime=TRENDING_BEAR blocked×4516 | 1H=STRONG_BULL blocks SELL×4337 | 1H=BULL blocks SELL×1246 | FVG quality too low×323 | regime=LOW_VOLATILITY_CHOP blocked×265 | [DIAG] fvg_ok×17 | MSS sequence (fired before FVG complete)×17
+0 signals generated
+[ETH] Fetching 365d history... 106561 5M | 8880 1H | 2220 4H bars
+[ETH] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×32230 | weekday=1 blocked×15264 | weekday=2 blocked×15071 | weekday=5 blocked×14976 | regime=CHOPPY blocked×9731 | regime=TRENDING_BEAR blocked×4574 | 1H=STRONG_BULL blocks SELL×4445 | 1H=BULL blocks SELL×1314 | regime=LOW_VOLATILITY_CHOP blocked×431 | FVG quality too low×215 | [DIAG] fvg_ok×45 | MSS sequence (fired before FVG complete)×45
+0 signals generated
+[XRP] Fetching 365d history... 106560 5M | 8880 1H | 2220 4H bars
+[XRP] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×32226 | weekday=1 blocked×15264 | weekday=2 blocked×15067 | weekday=5 blocked×14976 | regime=CHOPPY blocked×11715 | regime=TRENDING_BEAR blocked×4471 | 1H=STRONG_BULL blocks SELL×3378 | 1H=BULL blocks SELL×1275 | regime=LOW_VOLATILITY_CHOP blocked×494 | FVG quality too low×285 | [DIAG] fvg_ok×69 | MSS sequence (fired before FVG complete)×69
+0 signals generated
+[HBAR] Fetching 365d history... 106561 5M | 8880 1H | 2220 4H bars
+[HBAR] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×32509 | weekday=1 blocked×15258 | weekday=2 blocked×15061 | weekday=5 blocked×14954 | regime=CHOPPY blocked×11480 | regime=TRENDING_BEAR blocked×4258 | 1H=STRONG_BULL blocks SELL×3383 | 1H=BULL blocks SELL×1463 | regime=LOW_VOLATILITY_CHOP blocked×338 | FVG quality too low×202 | [DIAG] fvg_ok×65 | MSS sequence (fired before FVG complete)×65
+0 signals generated
+[AVAX] Fetching 365d history... 106560 5M | 8880 1H | 2220 4H bars
+[AVAX] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×32539 | weekday=1 blocked×15224 | weekday=2 blocked×14884 | weekday=5 blocked×14799 | regime=CHOPPY blocked×10814 | regime=TRENDING_BEAR blocked×5616 | 1H=STRONG_BULL blocks SELL×3155 | 1H=BULL blocks SELL×759 | FVG quality too low×295 | [DIAG] fvg_ok×79 | MSS sequence (fired before FVG complete)×79 | regime=LOW_VOLATILITY_CHOP blocked×37
+0 signals generated
+[LINK] Fetching 365d history... 106561 5M | 8880 1H | 2220 4H bars
+[LINK] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×33580 | weekday=1 blocked×15227 | weekday=2 blocked×15008 | weekday=5 blocked×14769 | regime=CHOPPY blocked×10762 | regime=TRENDING_BEAR blocked×4823 | 1H=STRONG_BULL blocks SELL×3465 | 1H=BULL blocks SELL×811 | FVG quality too low×332 | regime=LOW_VOLATILITY_CHOP blocked×203 | [DIAG] fvg_ok×88 | MSS sequence (fired before FVG complete)×88
+0 signals generated
+[BNB] Fetching 365d history... 106560 5M | 8880 1H | 2220 4H bars
+[BNB] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×32508 | weekday=1 blocked×15264 | weekday=2 blocked×15036 | weekday=5 blocked×14975 | regime=CHOPPY blocked×11610 | 1H=STRONG_BULL blocks SELL×4418 | regime=TRENDING_BEAR blocked×3677 | 1H=BULL blocks SELL×877 | regime=LOW_VOLATILITY_CHOP blocked×409 | FVG quality too low×236 | [DIAG] fvg_ok×19 | MSS sequence (fired before FVG complete)×19
+0 signals generated
+[ADA] Fetching 365d history... 106561 5M | 8880 1H | 2220 4H bars
+[ADA] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×33248 | weekday=1 blocked×15264 | weekday=2 blocked×15066 | weekday=5 blocked×14969 | regime=CHOPPY blocked×11943 | regime=TRENDING_BEAR blocked×4752 | 1H=STRONG_BULL blocks SELL×2719 | 1H=BULL blocks SELL×838 | FVG quality too low×222 | regime=LOW_VOLATILITY_CHOP blocked×168 | [DIAG] fvg_ok×88 | MSS sequence (fired before FVG complete)×88
+0 signals generated
+[POL] Fetching 365d history... 106560 5M | 8880 1H | 2220 4H bars
+[POL] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×32743 | weekday=1 blocked×15162 | weekday=2 blocked×15059 | weekday=5 blocked×14708 | regime=CHOPPY blocked×12960 | regime=TRENDING_BEAR blocked×4544 | 1H=STRONG_BULL blocks SELL×2440 | 1H=BULL blocks SELL×1173 | FVG quality too low×255 | regime=LOW_VOLATILITY_CHOP blocked×166 | [DIAG] fvg_ok×31 | MSS sequence (fired before FVG complete)×31 | regime=HIGH_VOLATILITY blocked×12
+0 signals generated
+
+No signals generated — check VPN / Binance connection.
+
+[Walk-Forward] Not enough signals for rolling windows.
+
+[PHASE I-3] No signals - template report skipped.
+[PHASE I-3] Template report → C:\Users\User\Desktop\TradeAI\docs\ict_strategy_variant_learner\template_performance_report.md

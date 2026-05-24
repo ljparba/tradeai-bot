@@ -1,0 +1,322 @@
+====================================================================
+  TRADEAI — ICT BACKTESTING ENGINE  (Phase 4.7)
+  Mode      : Research (BUY+SELL)
+  Strategy  : Liquidity Sweep + MSS + FVG + 5M iFVG Precision
+  Period    : Last 365 days
+  TF Stack  : 4H bias | 1H TP levels | 5M sweep/MSS/FVG (Phase 4.8)
+  Entry win : 72×5M = 4H  |  Outcome: 288×5M = 24H
+  Gates     : 4H=strict | 1H=loose | Blocked: CHOPPY, HIGH_VOLATILITY, LIQUIDATION, LOW_VOLATILITY_CHOP, RANGING, TRENDING_BEAR | SELL-ok: TRENDING_BEAR
+  Fees      : RT=0.30% (0.10%/side fee + 0.05%/side slippage)
+  Tokens    : BTC, ETH, XRP, HBAR, AVAX, LINK, BNB, ADA, POL, TON
+====================================================================
+
+Note: VPN required (Binance blocked in Philippines)
+
+[OGD] Loaded backtest weights for 17 token(s): ADA, AVAX, BNB, BTC, DOGE, DOT, ETH, HBAR, LINK, LTC, NEAR, POL, SOL, STX, SUI, TON, XRP
+[BTC] Fetching 365d history... (cached) 106559 5M | 8879 1H | 2219 4H bars
+[BTC] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×26301 | weekday=1 blocked×12716 | weekday=2 blocked×12715 | weekday=5 blocked×12478 | regime=CHOPPY blocked×8850 | 4H=BULLISH blocks SELL (strict)×4416 | regime=TRENDING_BEAR blocked×3640 | 4H=NEUTRAL blocks SELL (strict)×1004 | regime=LOW_VOLATILITY_CHOP blocked×265 | 4H=NEUTRAL blocks BUY (strict)×203 | FVG quality too low×152 | 1H=BULL blocks SELL×51 | Setup too old (>ICT_MAX_SETUP_AGE_BARS)×44 | 4H=BEARISH blocks BUY (strict)×29 | [DIAG] fvg_ok×11 | 1H=STRONG_BULL blocks SELL×4
+1 signals generated
+[CKPT] saved — 1 tokens done, 1 signals
+[ETH] Fetching 365d history... (cached) 106559 5M | 8879 1H | 2219 4H bars
+[ETH] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×26322 | weekday=1 blocked×12720 | weekday=2 blocked×12716 | weekday=5 blocked×12480 | regime=CHOPPY blocked×8500 | 4H=BULLISH blocks SELL (strict)×4420 | regime=TRENDING_BEAR blocked×3497 | 4H=NEUTRAL blocks SELL (strict)×963 | regime=LOW_VOLATILITY_CHOP blocked×430 | 1H=BULL blocks SELL×227 | 4H=NEUTRAL blocks BUY (strict)×179 | FVG quality too low×143 | 4H=BEARISH blocks BUY (strict)×74 | [DIAG] fvg_ok×31 | Setup too old (>ICT_MAX_SETUP_AGE_BARS)×26 | 1H=STRONG_BULL blocks SELL×24 | Entry: no FVG reaction×8
+2 signals generated
+[CKPT] saved — 2 tokens done, 3 signals
+[XRP] Fetching 365d history... (cached) 106559 5M | 8879 1H | 2219 4H bars
+[XRP] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×26349 | weekday=1 blocked×12719 | weekday=2 blocked×12711 | weekday=5 blocked×12476 | regime=CHOPPY blocked×10041 | 4H=BULLISH blocks SELL (strict)×3659 | regime=TRENDING_BEAR blocked×3614 | 4H=NEUTRAL blocks SELL (strict)×775 | regime=LOW_VOLATILITY_CHOP blocked×481 | FVG quality too low×198 | 1H=BULL blocks SELL×196 | 4H=NEUTRAL blocks BUY (strict)×91 | 4H=BEARISH blocks BUY (strict)×70 | Setup too old (>ICT_MAX_SETUP_AGE_BARS)×59 | Entry: no FVG reaction×28 | [DIAG] fvg_ok×21 | 1H=STRONG_BULL blocks SELL×10
+5 signals generated
+[CKPT] saved — 3 tokens done, 8 signals
+[HBAR] Fetching 365d history... (cached) 106560 5M | 8879 1H | 2219 4H bars
+[HBAR] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×26833 | weekday=1 blocked×12700 | weekday=2 blocked×12697 | weekday=5 blocked×12440 | regime=CHOPPY blocked×9932 | 4H=BULLISH blocks SELL (strict)×3717 | regime=TRENDING_BEAR blocked×3339 | 4H=NEUTRAL blocks SELL (strict)×729 | regime=LOW_VOLATILITY_CHOP blocked×362 | FVG quality too low×141 | 1H=BULL blocks SELL×126 | 4H=NEUTRAL blocks BUY (strict)×124 | Setup too old (>ICT_MAX_SETUP_AGE_BARS)×84 | [DIAG] fvg_ok×55 | 4H=BEARISH blocks BUY (strict)×31 | Entry: no FVG reaction×7
+2 signals generated
+[CKPT] saved — 4 tokens done, 10 signals
+[AVAX] Fetching 365d history... (cached) 106559 5M | 8879 1H | 2219 4H bars
+[AVAX] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×26852 | weekday=1 blocked×12653 | weekday=2 blocked×12486 | weekday=5 blocked×12272 | regime=CHOPPY blocked×9134 | regime=TRENDING_BEAR blocked×4378 | 4H=BULLISH blocks SELL (strict)×3076 | 4H=NEUTRAL blocks SELL (strict)×908 | Setup too old (>ICT_MAX_SETUP_AGE_BARS)×438 | 4H=NEUTRAL blocks BUY (strict)×245 | FVG quality too low×213 | Entry: no FVG reaction×51 | 1H=BULL blocks SELL×44 | 4H=BEARISH blocks BUY (strict)×42 | regime=LOW_VOLATILITY_CHOP blocked×37 | [DIAG] fvg_ok×22 | 1H=STRONG_BULL blocks SELL×11
+7 signals generated
+[CKPT] saved — 5 tokens done, 17 signals
+[LINK] Fetching 365d history... (cached) 106559 5M | 8879 1H | 2219 4H bars
+[LINK] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×27225 | weekday=2 blocked×12642 | weekday=1 blocked×12623 | weekday=5 blocked×12245 | regime=CHOPPY blocked×9522 | regime=TRENDING_BEAR blocked×3796 | 4H=BULLISH blocks SELL (strict)×3345 | 4H=NEUTRAL blocks SELL (strict)×750 | Setup too old (>ICT_MAX_SETUP_AGE_BARS)×413 | FVG quality too low×235 | 4H=NEUTRAL blocks BUY (strict)×202 | regime=LOW_VOLATILITY_CHOP blocked×191 | 1H=BULL blocks SELL×103 | 4H=BEARISH blocks BUY (strict)×75 | [DIAG] fvg_ok×45 | Entry: no FVG reaction×32 | 1H=STRONG_BULL blocks SELL×15
+4 signals generated
+[CKPT] saved — 6 tokens done, 21 signals
+[BNB] Fetching 365d history... (cached) 106560 5M | 8879 1H | 2219 4H bars
+[BNB] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×26576 | weekday=1 blocked×12719 | weekday=2 blocked×12652 | weekday=5 blocked×12474 | regime=CHOPPY blocked×9780 | 4H=BULLISH blocks SELL (strict)×4388 | regime=TRENDING_BEAR blocked×2916 | 4H=NEUTRAL blocks SELL (strict)×751 | regime=LOW_VOLATILITY_CHOP blocked×371 | FVG quality too low×177 | 1H=BULL blocks SELL×146 | 4H=NEUTRAL blocks BUY (strict)×142 | 4H=BEARISH blocks BUY (strict)×82 | Setup too old (>ICT_MAX_SETUP_AGE_BARS)×81 | Entry: no FVG reaction×24 | [DIAG] fvg_ok×19
+1 signals generated
+[CKPT] saved — 7 tokens done, 22 signals
+[ADA] Fetching 365d history... (cached) 106559 5M | 8879 1H | 2219 4H bars
+[ADA] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×27148 | weekday=1 blocked×12720 | weekday=2 blocked×12695 | weekday=5 blocked×12472 | regime=CHOPPY blocked×10392 | regime=TRENDING_BEAR blocked×3825 | 4H=BULLISH blocks SELL (strict)×2856 | 4H=NEUTRAL blocks SELL (strict)×856 | 4H=NEUTRAL blocks BUY (strict)×228 | regime=LOW_VOLATILITY_CHOP blocked×168 | FVG quality too low×116 | Entry: no FVG reaction×109 | Setup too old (>ICT_MAX_SETUP_AGE_BARS)×67 | [DIAG] fvg_ok×61 | 1H=BULL blocks SELL×31 | 4H=BEARISH blocks BUY (strict)×16
+3 signals generated
+[CKPT] saved — 8 tokens done, 25 signals
+[POL] Fetching 365d history... (cached) 106559 5M | 8879 1H | 2219 4H bars
+[POL] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×27258 | weekday=2 blocked×12686 | weekday=1 blocked×12565 | weekday=5 blocked×12141 | regime=CHOPPY blocked×10797 | regime=TRENDING_BEAR blocked×3530 | 4H=BULLISH blocks SELL (strict)×2806 | 4H=NEUTRAL blocks SELL (strict)×631 | Setup too old (>ICT_MAX_SETUP_AGE_BARS)×452 | 4H=NEUTRAL blocks BUY (strict)×181 | FVG quality too low×177 | regime=LOW_VOLATILITY_CHOP blocked×130 | 1H=BULL blocks SELL×37 | 4H=BEARISH blocks BUY (strict)×35 | Entry: no FVG reaction×29 | [DIAG] fvg_ok×23 | regime=HIGH_VOLATILITY blocked×12
+3 signals generated
+[CKPT] saved — 9 tokens done, 28 signals
+[TON] Fetching 365d history... (cached) 106560 5M | 8879 1H | 2219 4H bars
+[TON] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×28261 | weekday=1 blocked×12670 | weekday=2 blocked×12657 | weekday=5 blocked×12382 | regime=CHOPPY blocked×10903 | regime=TRENDING_BEAR blocked×3129 | 4H=BULLISH blocks SELL (strict)×2628 | 4H=NEUTRAL blocks SELL (strict)×330 | regime=LOW_VOLATILITY_CHOP blocked×292 | Setup too old (>ICT_MAX_SETUP_AGE_BARS)×262 | FVG quality too low×167 | 4H=NEUTRAL blocks BUY (strict)×91 | regime=HIGH_VOLATILITY blocked×48 | [DIAG] fvg_ok×45 | 4H=BEARISH blocks BUY (strict)×33 | 1H=BULL blocks SELL×25 | Entry: no FVG reaction×17 | 1H=STRONG_BULL blocks SELL×14 | [MSS] SSL: CHoCH failed×1
+3 signals generated
+[CKPT] saved — 10 tokens done, 31 signals
+
+====================================================================
+  ICT BACKTEST REPORT — Last 365 Days  (5M resolution)
+  Mode     : RESEARCH | Directions: BUY+SELL
+  Gates    : 4H=strict | 1H=loose | Blocked: CHOPPY, HIGH_VOLATILITY, LIQUIDATION, LOW_VOLATILITY_CHOP, RANGING, TRENDING_BEAR | SELL-ok: TRENDING_BEAR
+  Strategy : Liquidity Sweep + MSS + FVG + 5M iFVG Precision
+  Entry    : 5M open inside entry zone (up to 72 bar window = 4H)
+  Outcome  : 288 × 5M bars = 24H window | TP = 1H swing levels
+  Costs    : Fee 0.10%/side + Slip 0.050%/side (0.30% RT) | MaxSL 3% | BEW≤60%
+  NOTE(M11): Portfolio limits (MAX_OPEN_POSITIONS=4, MAX_SAME_DIRECTION=2) not simulated.
+             Non-binding at current signal rate (~3-4/month). Re-evaluate if rate >8/month.
+====================================================================
+
+Token  #Sigs   Win  P-TP2  P-TP1  Loss   Exp    WR%   AvgRR  AvgFVG%
+--------------------------------------------------------------------
+ADA        3     2      0      0     1     0  66.7%   0.90x   0.669%
+AVAX       7     5      0      1     1     0  85.7%   1.13x   0.563%
+BNB        1     0      0      1     0     0 100.0%   1.24x   1.139%
+BTC        1     0      0      1     0     0 100.0%   1.05x   0.971%
+ETH        2     0      0      2     0     0 100.0%   1.15x   0.984%
+HBAR       2     1      0      0     1     0  50.0%   1.36x   0.655%
+LINK       4     2      1      0     1     0  75.0%   1.02x   0.777%
+POL        3     2      0      0     1     0  66.7%   1.00x   1.159%
+TON        3     2      0      0     1     0  66.7%   1.36x   0.673%
+XRP        5     2      0      1     2     0  60.0%   1.29x   0.915%
+
+--- Win Rate by Regime ---
+  TRENDING_BEAR          11 sigs  WR: 81.8%  ################
+  TRENDING_BULL          20 sigs  WR: 70.0%  ##############
+
+--- Win Rate by Sweep Type (BSL=SELL, SSL=BUY) ---
+  BSL      11 sigs  WR: 81.8%  ################
+  SSL      20 sigs  WR: 70.0%  ##############
+
+--- Win Rate by 1H Trend at Entry ---
+  STRONG_BEAR       10 sigs  WR: 90.0%  ##################
+  STRONG_BULL       17 sigs  WR: 70.6%  ##############
+  BULL               3 sigs  WR: 66.7%  #############
+  BEAR               1 sigs  WR:  0.0%  
+
+--- Win Rate by 4H Bias at Setup ---
+  BEARISH      11 sigs  WR: 81.8%  ################
+  BULLISH      20 sigs  WR: 70.0%  ##############
+
+--- Win Rate: IFVG Present vs Absent ---
+  IFVG=YES:    30 sigs  WR: 73.3%
+  IFVG=NO:      1 sigs  WR:100.0%
+
+--- Win Rate: 5M iFVG Precision Entry vs FVG Fallback ---
+  5M-iFVG used:   13 sigs (41.9% hit)  WR: 53.8%
+  FVG fallback:   18 sigs               WR: 88.9%
+
+--- Win Rate by 4H Dealing Range Location ---
+  DISCOUNT    :    8 sigs  WR: 87.5%
+  PREMIUM     :   17 sigs  WR: 64.7%
+  UNKNOWN     :    6 sigs  WR: 83.3%
+
+--- Win Rate by MSS Quality ---
+  HIGH    :   30 sigs  WR: 73.3%
+  MEDIUM  :    1 sigs  WR:100.0%
+
+--- Win Rate by FVG Quality ---
+  HIGH    :   31 sigs  WR: 74.2%
+
+--- Win Rate by Entry Reaction Type ---
+  MIDPOINT_RECLAIM    :   24 sigs  WR: 75.0%
+  REACTION_CONFIRMED  :    7 sigs  WR: 71.4%
+
+--- Win Rate by TP1 Liquidity Target Type ---
+  1H_SWING_H        :    6 sigs  WR: 50.0%
+  1H_SWING_L        :    3 sigs  WR:100.0%
+  RR_FALLBACK       :   18 sigs  WR: 77.8%
+  SESSION_H         :    2 sigs  WR:100.0%
+  SESSION_L         :    2 sigs  WR: 50.0%
+
+--- Win Rate by SMT Divergence (BTC reference) ---
+  SMT confirmed    :   22 sigs  WR: 77.3%
+  SMT not confirmed:    9 sigs  WR: 66.7%
+  BULLISH           :   12 sigs  WR: 75.0%
+  BEARISH           :   10 sigs  WR: 80.0%
+  NONE              :    9 sigs  WR: 66.7%
+
+--- Win Rate by Session (M2: ICT Kill Zones) ---
+  ASIA_KZ     :    6 sigs  WR:100.0% *low-sample*
+  LONDON_KZ   :    7 sigs  WR:100.0% *low-sample*
+  NY_AM_KZ    :    9 sigs  WR: 66.7% *low-sample*
+  OVERNIGHT   :    9 sigs  WR: 44.4% *low-sample*
+
+--- Win Rate by Day of Week (Task 12) ---
+  Mon:   13 sigs  WR: 69.2% *low-sample*
+  Thu:    6 sigs  WR: 83.3% *low-sample*
+  Fri:    7 sigs  WR: 85.7% *low-sample*
+  Sun:    5 sigs  WR: 60.0% *low-sample*
+
+--- Win Rate by UTC Hour (Task 12) ---
+  H02:    2 sigs  WR:100.0%  #################### *low-sample*
+  H03:    5 sigs  WR:100.0%  #################### *low-sample*
+  H05:    2 sigs  WR:100.0%  #################### *low-sample*
+  H07:    1 sigs  WR:  0.0%   *low-sample*
+  H09:    3 sigs  WR: 33.3%  ####### *low-sample*
+  H10:    2 sigs  WR: 50.0%  ########## *low-sample*
+  H11:    1 sigs  WR:  0.0%   *low-sample*
+  H13:    1 sigs  WR:100.0%  #################### *low-sample*
+  H14:    3 sigs  WR: 33.3%  ####### *low-sample*
+  H15:    5 sigs  WR: 80.0%  ################ *low-sample*
+  H20:    3 sigs  WR:100.0%  #################### *low-sample*
+  H21:    1 sigs  WR:100.0%  #################### *low-sample*
+  H22:    1 sigs  WR:100.0%  #################### *low-sample*
+  H23:    1 sigs  WR:100.0%  #################### *low-sample*
+
+--- Win Rate by EV Status (Task 13) ---
+  INSUFFICIENT_DATA     :   31 sigs  WR: 74.2%  AvgEV: +0.000%
+
+--- Win Rate by EV Sample-Size Tier (Task 15) ---
+
+--- EV Score vs Confidence Correlation (Task 13) ---
+
+--- Win Rate by Confidence Level ---
+  Conf  8:    10 sigs  WR: 70.0%  ##############
+  Conf  9:    14 sigs  WR: 71.4%  ##############
+  Conf 10:     7 sigs  WR: 85.7%  #################
+
+--- BUY vs SELL (Phase 4.6: 4H-aligned) ---
+  BUY:    20 signals  WR:70.0% [48-86%]          NetE: +1.597%  z:+2.07
+  SELL:   11 signals  WR:81.8% [52-95%]          NetE: +1.622%  z:+2.31
+
+====================================================================
+  OVERALL: 31 signals | WR: 74.2% [57-86%] | Net R:R avg:1.15x med:1.13x | Net E: +1.6061%/trade
+  TP1 rate: 74.2% | Profit Factor: 5.129 | Max DD: 4.540% | Max Loss Streak: 3
+  BEW avg: 47.0% | z-score: +3.04 | Need WR > BEW to profit
+====================================================================
+
+  HONEST-LABEL METRICS (de Prado triple-barrier + 5k bootstrap CI 95%)
+  Triple-barrier first-touch: TP=23 (74.2%) | SL=8 (25.8%) | TIMEOUT=0 (0.0%)
+  Bootstrap WR    : 74.19% [58.06–90.32%]  (n=31)
+  Bootstrap Sharpe: +0.6302  [+0.2491–+1.2373]  (per-trade R; ×√N_per_yr for calendar)
+====================================================================
+
+--- Failure Classification (Task 17/19) — 8 losses ---
+  buy_in_premium_zone         :    3 ( 37.5%)
+  no_SMT                      :    3 ( 37.5%)
+  unclassified_loss           :    1 ( 12.5%)
+  sell_in_discount_zone       :    1 ( 12.5%)
+
+================================================================================
+  PHASE 4.6 FILTER ANALYSIS — Subset tests (4H-aligned BUY+SELL)
+  Paper-trade threshold: n>=30 + WR>BEW + z>=1.28 + WFgap<10% + NetE>0
+================================================================================
+  Filter                                n    WR%   BEW%    NetE%      z   WFGap%  Flag
+  --------------------------------------------------------------------------------
+  NOTE: 17 simultaneous tests; Bonferroni z ≥ 2.52 for CANDIDATE flag (α=0.10 family-wise; FWER≈10%)
+  (Raw z ≥ 1.28 shown in brackets if unadjusted threshold passes but Bonferroni does not)
+  --------------------------------------------------------------------------------
+  All signals (baseline)               31  74.2%  47.0%   +1.606%  +3.04   -11.2%
+  BUY only (4H BULLISH + 1H BULL/SBULL)   20  70.0%  46.9%   +1.597%  +2.07   -14.2%
+  SELL only (4H BEARISH + 1H BEAR/SBEAR)   11  81.8%  47.1%   +1.622%  +2.31    -3.3%
+  RANGING regime only                   0   0.0%   0.0%   +0.000%  +0.00      n/a
+  TRENDING_BULL regime only            20  70.0%  46.9%   +1.597%  +2.07   -14.2%
+  TRENDING_BEAR regime only            11  81.8%  47.1%   +1.622%  +2.31    -3.3%
+  Exclude BTC                          30  73.3%  46.9%   +1.631%  +2.90    -9.8% *** CANDIDATE ***
+  Exclude SOL                          31  74.2%  47.0%   +1.606%  +3.04   -11.2%
+  Exclude BTC + SOL                    30  73.3%  46.9%   +1.631%  +2.90    -9.8% *** CANDIDATE ***
+  Exclude LINK                         27  74.1%  46.6%   +1.660%  +2.86    -9.4%
+  HBAR only                             2  50.0%  42.4%   +1.208%  +0.22      n/a
+  IFVG as hard filter                  30  73.3%  46.9%   +1.628%  +2.90    -9.8% *** CANDIDATE ***
+  BUY + IFVG present                   19  68.4%  46.8%   +1.632%  +1.89   -11.4%
+  SELL + IFVG present                  11  81.8%  47.1%   +1.622%  +2.31    -3.3%
+  5M iFVG precision (used)             13  53.8%  45.6%   +0.565%  +0.60    +7.1%
+  BUY + 5M iFVG precision               9  44.4%  44.8%   +0.332%  -0.02   +16.7%
+  SELL + 5M iFVG precision              4  75.0%  47.4%   +1.091%  +1.11      n/a
+================================================================================
+
+
+================================================================================================
+  ROLLING WALK-FORWARD VALIDATION (Task 14)
+  Train window: 90 days | Test window: 30 days | Step: 30 days
+  Threshold: test WR > train BEW | z >= 1.28 | overfit gap < 10%
+================================================================================================
+  Window                                   Tr-N  Tr-WR% Te-N  Te-WR%   Te-NE%  Te-PF  Te-DD%    Gap  Flag
+  ------------------------------------------------------------------------------------------------
+  2025-06-22 → 2025-10-20                    12   58.3%    4  100.0%   +3.180%    inf  0.000% -41.7%
+  2025-07-22 → 2025-11-19                     9   88.9%    2  100.0%   +1.208%    inf  0.000% -11.1%
+  2025-09-20 → 2026-01-18                     6  100.0%    5   60.0%   +1.532%   4.58  1.340% +40.0%
+  2025-10-20 → 2026-02-17                     7   71.4%    3   66.7%   +0.390%   1.53  2.220%  +4.8%
+
+  Consistent windows: 0/4 (0%)
+================================================================================================
+
+
+-----------------------------------------------------------------
+  HONEST METRICS - CPCV + Deflated Sharpe (Top-10 #5)
+-----------------------------------------------------------------
+  n_signals     = 31
+  CPCV config   = K=5 groups, k=2 test, embargo=2.0%
+  n_splits      = 10
+
+  WR (CPCV)      mean=74.62%  std=11.25%
+                 q05=61.5%  q50=83.3%  q95=83.3%
+  Sharpe (CPCV)  mean=0.766  std=0.264
+
+  Overall Sharpe = 0.737  (in-sample, full pool)
+  Skew           = -0.266
+  Kurtosis       = 2.073  (normal=3)
+  PSR (in-sample) = 100.0%   (informational - can read 100% for overfit strategies)
+  PSR (OOS CPCV)  = 100.0%   (HONEST - uses mean of CPCV test-fold Sharpes)
+  DSR (multi-test) = 95.6%   [n_trials=9, bench_SR=0.402, SR_trial_std=0.264]
+  !!  DSR uses within-run fold-Sharpe std as proxy for
+      cross-trial std. Real DSR likely LOWER than reported.
+
+  VERDICT: PASS   (Phase A exit: CPCV mean WR >= 58%, DSR >= 95% if computed)
+-----------------------------------------------------------------
+
+================================================================================================
+  PHASE I-3 - ICT STRATEGY VARIANT LEARNER - TEMPLATE COMPARISON REPORT
+  Total: 31 signals  |  Train: 16 (80%)  |  Holdout: 15 (20%)
+  Holdout from: 2025-11-03
+================================================================================================
+
+  ----------------------------------------------------------------------------------------
+  Tier A - Strict (4/5 required, live allowed)
+  ----------------------------------------------------------------------------------------
+  Train (80%)          n=11    WR=72.7%  wWR=75.5%  AvgPnL=+1.8745%  AvgConf=9.0  AvgRR=1.71  MaxDD=2.8400%  MFE=+4.0986%  MAE=+0.6943%  realR=+1.1888R  [INSUF]
+  Holdout (20%)        n=7     WR=71.4%  wWR=73.9%  AvgPnL=+1.4550%  AvgConf=9.1  AvgRR=1.83  MaxDD=2.2200%  MFE=+2.2194%  MAE=+1.1967%  realR=+0.5818R  [INSUF]
+  WF Gap               +1.3%  OK
+  WARN: [TIER_A] n=18 - insufficient sample (<30), treat as noise
+
+  ----------------------------------------------------------------------------------------
+  Tier B - Balanced (3/5 required, live allowed)
+  ----------------------------------------------------------------------------------------
+  Train (80%)          n=5     WR=60.0%  wWR=68.2%  AvgPnL=+0.5430%  AvgConf=8.6  AvgRR=1.50  MaxDD=1.7000%  MFE=+1.6542%  MAE=+0.8798%  realR=+0.3893R  [INSUF]
+  Holdout (20%)        n=8     WR=87.5%  wWR=91.2%  AvgPnL=+2.0337%  AvgConf=8.8  AvgRR=1.69  MaxDD=1.3400%  MFE=+3.0093%  MAE=+1.0008%  realR=+1.1040R  [INSUF]
+  WF Gap               -27.5%  OK
+  WARN: [TIER_B] n=13 - insufficient sample (<30), treat as noise
+
+  ----------------------------------------------------------------------------------------
+  Tier C - Exploratory (2/2 required, paper-only)
+  ----------------------------------------------------------------------------------------
+  Train (80%)          n=0  (no signals)
+  Holdout (20%)        n=0  (no signals)
+  WARN: [TIER_C] n=0 - insufficient sample (<30), treat as noise
+
+  ----------------------------------------------------------------------------------------
+  No Template Match
+  ----------------------------------------------------------------------------------------
+  Train (80%)          n=0  (no signals)
+  Holdout (20%)        n=0  (no signals)
+  WARN: [NONE] n=0 - insufficient sample (<30), treat as noise
+
+================================================================================================
+  ALL-WARNINGS SUMMARY
+================================================================================================
+  WARN: [TIER_A] n=18 - insufficient sample (<30), treat as noise
+  WARN: [TIER_B] n=13 - insufficient sample (<30), treat as noise
+  WARN: [TIER_C] n=0 - insufficient sample (<30), treat as noise
+  WARN: [NONE] n=0 - insufficient sample (<30), treat as noise
+================================================================================================
+
+[PHASE I-3] Template report → c:\Users\User\Desktop\TradeAI\docs\ict_strategy_variant_learner\template_performance_report.md
+
+[WALK-FORWARD VALIDATION] Fixed OOS boundary: 2025-11-03 (locked wall-clock split)
+  Cutoff          : 2025-11-03
+  IN-SAMPLE       : WR 68.8% [44-86%]  (16 sigs)
+  OUT-OF-SAMPLE   : WR 80.0% [55-93%]  (15 sigs)
+  WF gap          : -11.2%  OK (<10%)
+  ⚠ STAT WARNING  : OOS n=15 < 30 — 95% CI on OOS WR ≈ [60%, 100%] (±20pp). WF gap of -11.2% is within noise at this sample size. Do not interpret as validated edge.
+
+[DB] Run #125 saved — 31 signals, 74.2% WR

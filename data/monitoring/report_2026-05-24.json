@@ -1,0 +1,178 @@
+{
+  "cross_token": {
+    "avg_pairwise_l1": 0.2516,
+    "homogeneity_alert": false,
+    "min_pairwise_l1": 0.0,
+    "n_pairs": 45
+  },
+  "generated_at": "2026-05-24T00:41:32Z",
+  "per_token": {
+    "ADA": {
+      "alert_level": "OK",
+      "alerts": [],
+      "days_since_update": 2.8,
+      "entropy": 1.6476,
+      "entropy_drift": -0.0007,
+      "floor_pin_count": 0,
+      "is_degenerate": false,
+      "last_updated": "2026-05-21 05:25:18",
+      "max_feature": "fvg_quality",
+      "max_weight": 0.2562,
+      "n_updates": 0,
+      "pinned_features": []
+    },
+    "AVAX": {
+      "alert_level": "OK",
+      "alerts": [],
+      "days_since_update": 2.8,
+      "entropy": 1.6777,
+      "entropy_drift": -0.0013,
+      "floor_pin_count": 0,
+      "is_degenerate": false,
+      "last_updated": "2026-05-21 05:25:18",
+      "max_feature": "fvg_quality",
+      "max_weight": 0.2434,
+      "n_updates": 0,
+      "pinned_features": []
+    },
+    "BNB": {
+      "alert_level": "WARN",
+      "alerts": [
+        "PINNED at bounds: dr_location"
+      ],
+      "days_since_update": 2.82,
+      "entropy": 1.7093,
+      "entropy_drift": -0.0003,
+      "floor_pin_count": 1,
+      "is_degenerate": false,
+      "last_updated": "2026-05-21 05:07:37",
+      "max_feature": "fvg_quality",
+      "max_weight": 0.25,
+      "n_updates": 0,
+      "pinned_features": [
+        "dr_location"
+      ]
+    },
+    "BTC": {
+      "alert_level": "OK",
+      "alerts": [],
+      "days_since_update": 2.8,
+      "entropy": 1.7225,
+      "entropy_drift": -0.0006,
+      "floor_pin_count": 0,
+      "is_degenerate": false,
+      "last_updated": "2026-05-21 05:25:18",
+      "max_feature": "confidence",
+      "max_weight": 0.1962,
+      "n_updates": 0,
+      "pinned_features": []
+    },
+    "ETH": {
+      "alert_level": "OK",
+      "alerts": [],
+      "days_since_update": 2.8,
+      "entropy": 1.6357,
+      "entropy_drift": 0.0,
+      "floor_pin_count": 0,
+      "is_degenerate": false,
+      "last_updated": "2026-05-21 05:25:18",
+      "max_feature": "trend_strength",
+      "max_weight": 0.3403,
+      "n_updates": 0,
+      "pinned_features": []
+    },
+    "HBAR": {
+      "alert_level": "OK",
+      "alerts": [],
+      "days_since_update": 2.8,
+      "entropy": 1.6241,
+      "entropy_drift": 0.0,
+      "floor_pin_count": 0,
+      "is_degenerate": false,
+      "last_updated": "2026-05-21 05:25:18",
+      "max_feature": "trend_strength",
+      "max_weight": 0.2817,
+      "n_updates": 0,
+      "pinned_features": []
+    },
+    "LINK": {
+      "alert_level": "OK",
+      "alerts": [],
+      "days_since_update": 2.8,
+      "entropy": 1.7233,
+      "entropy_drift": 0.0,
+      "floor_pin_count": 0,
+      "is_degenerate": false,
+      "last_updated": "2026-05-21 05:25:18",
+      "max_feature": "fvg_quality",
+      "max_weight": 0.2101,
+      "n_updates": 0,
+      "pinned_features": []
+    },
+    "POL": {
+      "alert_level": "OK",
+      "alerts": [],
+      "days_since_update": 2.8,
+      "entropy": 1.6857,
+      "entropy_drift": 0.001,
+      "floor_pin_count": 0,
+      "is_degenerate": false,
+      "last_updated": "2026-05-21 05:25:18",
+      "max_feature": "fvg_quality",
+      "max_weight": 0.2555,
+      "n_updates": 0,
+      "pinned_features": []
+    },
+    "TON": {
+      "alert_level": "WARN",
+      "alerts": [
+        "PINNED at bounds: dr_location"
+      ],
+      "days_since_update": 0.6,
+      "entropy": 1.7093,
+      "entropy_drift": -0.0,
+      "floor_pin_count": 1,
+      "is_degenerate": false,
+      "last_updated": "2026-05-23 10:11:03",
+      "max_feature": "fvg_quality",
+      "max_weight": 0.25,
+      "n_updates": 0,
+      "pinned_features": [
+        "dr_location"
+      ]
+    },
+    "XRP": {
+      "alert_level": "OK",
+      "alerts": [],
+      "days_since_update": 2.82,
+      "entropy": 1.7146,
+      "entropy_drift": 0.0006,
+      "floor_pin_count": 0,
+      "is_degenerate": false,
+      "last_updated": "2026-05-21 05:07:37",
+      "max_feature": "fvg_quality",
+      "max_weight": 0.2171,
+      "n_updates": 0,
+      "pinned_features": []
+    }
+  },
+  "schema_version": 1,
+  "summary": {
+    "global_alert_level": "WARN",
+    "tokens_degenerate": 0,
+    "tokens_low_entropy": 0,
+    "tokens_monitored": 10,
+    "tokens_pinned": 2,
+    "tokens_stale": 0
+  },
+  "thresholds": {
+    "degenerate": 0.4,
+    "entropy_drift": 0.3,
+    "entropy_drift_crit": 0.6,
+    "entropy_drift_lookback": 10,
+    "floor_pin_crit_count": 4,
+    "homogeneity": 0.05,
+    "low_entropy": 1.55,
+    "stale_days": 14
+  }
+}

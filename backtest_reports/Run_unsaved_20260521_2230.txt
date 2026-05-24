@@ -1,0 +1,49 @@
+====================================================================
+  TRADEAI — ICT BACKTESTING ENGINE  (Phase 4.7)
+  Mode      : Research (BUY+SELL)
+  Strategy  : Liquidity Sweep + MSS + FVG + 5M iFVG Precision
+  Period    : Last 365 days
+  TF Stack  : 4H bias | 1H TP levels | 5M sweep/MSS/FVG (Phase 4.8)
+  Entry win : 72×5M = 4H  |  Outcome: 288×5M = 24H
+  Gates     : 4H=none | 1H=loose | Blocked: CHOPPY, HIGH_VOLATILITY, LIQUIDATION, LOW_VOLATILITY_CHOP, RANGING, TRENDING_BEAR | SELL-ok: TRENDING_BEAR
+  Fees      : RT=0.30% (0.10%/side fee + 0.05%/side slippage)
+  Tokens    : BTC, ETH, XRP, HBAR, AVAX, LINK, BNB, ADA, POL
+====================================================================
+
+Note: VPN required (Binance blocked in Philippines)
+
+[OGD] Loaded backtest weights for 10 token(s): ADA, AVAX, BNB, BTC, ETH, HBAR, LINK, POL, SOL, XRP
+[BTC] Fetching 365d history... 106560 5M | 8880 1H | 2220 4H bars
+[BTC] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×31903 | weekday=1 blocked×15249 | weekday=2 blocked×15060 | weekday=5 blocked×14974 | regime=CHOPPY blocked×10263 | regime=TRENDING_BEAR blocked×4509 | 1H=STRONG_BULL blocks SELL×4334 | 1H=BULL blocks SELL×1246 | FVG quality too low×313 | regime=LOW_VOLATILITY_CHOP blocked×265 | Setup too old (>ICT_MAX_SETUP_AGE_BARS)×68 | [DIAG] fvg_ok×17 | MSS sequence (fired before FVG complete)×17
+0 signals generated
+[ETH] Fetching 365d history... 106560 5M | 8880 1H | 2220 4H bars
+[ETH] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×32217 | weekday=1 blocked×15261 | weekday=2 blocked×15069 | weekday=5 blocked×14976 | regime=CHOPPY blocked×9725 | regime=TRENDING_BEAR blocked×4569 | 1H=STRONG_BULL blocks SELL×4440 | 1H=BULL blocks SELL×1314 | regime=LOW_VOLATILITY_CHOP blocked×431 | FVG quality too low×210 | [DIAG] fvg_ok×45 | MSS sequence (fired before FVG complete)×45 | Setup too old (>ICT_MAX_SETUP_AGE_BARS)×29
+0 signals generated
+[XRP] Fetching 365d history... 106560 5M | 8880 1H | 2220 4H bars
+[XRP] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×32191 | weekday=1 blocked×15257 | weekday=2 blocked×15063 | weekday=5 blocked×14972 | regime=CHOPPY blocked×11715 | regime=TRENDING_BEAR blocked×4471 | 1H=STRONG_BULL blocks SELL×3367 | 1H=BULL blocks SELL×1268 | regime=LOW_VOLATILITY_CHOP blocked×494 | FVG quality too low×275 | Setup too old (>ICT_MAX_SETUP_AGE_BARS)×76 | [DIAG] fvg_ok×69 | MSS sequence (fired before FVG complete)×69
+0 signals generated
+[HBAR] Fetching 365d history... 106561 5M | 8880 1H | 2220 4H bars
+[HBAR] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×32460 | weekday=1 blocked×15240 | weekday=2 blocked×15051 | weekday=5 blocked×14936 | regime=CHOPPY blocked×11477 | regime=TRENDING_BEAR blocked×4252 | 1H=STRONG_BULL blocks SELL×3375 | 1H=BULL blocks SELL×1463 | regime=LOW_VOLATILITY_CHOP blocked×338 | FVG quality too low×199 | Setup too old (>ICT_MAX_SETUP_AGE_BARS)×106 | [DIAG] fvg_ok×65 | MSS sequence (fired before FVG complete)×65
+0 signals generated
+[AVAX] Fetching 365d history... 106560 5M | 8880 1H | 2220 4H bars
+[AVAX] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×32364 | weekday=1 blocked×15173 | weekday=2 blocked×14804 | weekday=5 blocked×14705 | regime=CHOPPY blocked×10781 | regime=TRENDING_BEAR blocked×5558 | 1H=STRONG_BULL blocks SELL×3116 | 1H=BULL blocks SELL×752 | Setup too old (>ICT_MAX_SETUP_AGE_BARS)×556 | FVG quality too low×292 | [DIAG] fvg_ok×79 | MSS sequence (fired before FVG complete)×79 | regime=LOW_VOLATILITY_CHOP blocked×37
+0 signals generated
+[LINK] Fetching 365d history... 106561 5M | 8880 1H | 2220 4H bars
+[LINK] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×33396 | weekday=1 blocked×15160 | weekday=2 blocked×14955 | weekday=5 blocked×14681 | regime=CHOPPY blocked×10740 | regime=TRENDING_BEAR blocked×4797 | 1H=STRONG_BULL blocks SELL×3432 | 1H=BULL blocks SELL×803 | Setup too old (>ICT_MAX_SETUP_AGE_BARS)×533 | FVG quality too low×315 | regime=LOW_VOLATILITY_CHOP blocked×203 | [DIAG] fvg_ok×88 | MSS sequence (fired before FVG complete)×88
+0 signals generated
+[BNB] Fetching 365d history... 106560 5M | 8880 1H | 2220 4H bars
+[BNB] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×32482 | weekday=1 blocked×15259 | weekday=2 blocked×15008 | weekday=5 blocked×14964 | regime=CHOPPY blocked×11604 | 1H=STRONG_BULL blocks SELL×4413 | regime=TRENDING_BEAR blocked×3677 | 1H=BULL blocks SELL×872 | regime=LOW_VOLATILITY_CHOP blocked×409 | FVG quality too low×235 | Setup too old (>ICT_MAX_SETUP_AGE_BARS)×93 | [DIAG] fvg_ok×19 | MSS sequence (fired before FVG complete)×19
+0 signals generated
+[ADA] Fetching 365d history... 106561 5M | 8880 1H | 2220 4H bars
+[ADA] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×33221 | weekday=1 blocked×15263 | weekday=2 blocked×15047 | weekday=5 blocked×14959 | regime=CHOPPY blocked×11943 | regime=TRENDING_BEAR blocked×4741 | 1H=STRONG_BULL blocks SELL×2715 | 1H=BULL blocks SELL×833 | FVG quality too low×221 | regime=LOW_VOLATILITY_CHOP blocked×168 | Setup too old (>ICT_MAX_SETUP_AGE_BARS)×88 | [DIAG] fvg_ok×86 | MSS sequence (fired before FVG complete)×86
+0 signals generated
+[POL] Fetching 365d history... 106560 5M | 8880 1H | 2220 4H bars
+[POL] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×32574 | weekday=1 blocked×15088 | weekday=2 blocked×15037 | weekday=5 blocked×14598 | regime=CHOPPY blocked×12941 | regime=TRENDING_BEAR blocked×4501 | 1H=STRONG_BULL blocks SELL×2425 | 1H=BULL blocks SELL×1149 | Setup too old (>ICT_MAX_SETUP_AGE_BARS)×516 | FVG quality too low×250 | regime=LOW_VOLATILITY_CHOP blocked×164 | [DIAG] fvg_ok×31 | MSS sequence (fired before FVG complete)×31 | regime=HIGH_VOLATILITY blocked×12
+0 signals generated
+
+No signals generated — check VPN / Binance connection.
+
+[Walk-Forward] Not enough signals for rolling windows.
+
+[PHASE I-3] No signals - template report skipped.
+[PHASE I-3] Template report → c:\Users\User\Desktop\TradeAI\docs\ict_strategy_variant_learner\template_performance_report.md

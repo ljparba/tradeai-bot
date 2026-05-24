@@ -1,0 +1,22 @@
+[Unit]
+Description=TradeAI ICT Crypto Signal Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tradeai
+WorkingDirectory=/home/tradeai/TradeAI
+EnvironmentFile=/home/tradeai/TradeAI/.env
+ExecStart=/usr/bin/python3 /home/tradeai/TradeAI/crypto_alert.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/tradeai/TradeAI/logs/bot.log
+StandardError=append:/home/tradeai/TradeAI/logs/bot.log
+
+# Resource limits (paranoid defaults — bot uses ~500MB normally)
+MemoryLimit=2G
+CPUQuota=200%
+
+[Install]
+WantedBy=multi-user.target

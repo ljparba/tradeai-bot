@@ -1,0 +1,49 @@
+====================================================================
+  TRADEAI — ICT BACKTESTING ENGINE  (Phase 4.7)
+  Mode      : Research (BUY+SELL)
+  Strategy  : Liquidity Sweep + MSS + FVG + 5M iFVG Precision
+  Period    : Last 365 days
+  TF Stack  : 4H bias | 1H TP levels | 5M sweep/MSS/FVG (Phase 4.8)
+  Entry win : 72×5M = 4H  |  Outcome: 288×5M = 24H
+  Gates     : 4H=none | 1H=loose | Blocked: CHOPPY, HIGH_VOLATILITY, LIQUIDATION, LOW_VOLATILITY_CHOP, RANGING, TRENDING_BEAR | SELL-ok: TRENDING_BEAR
+  Fees      : RT=0.30% (0.10%/side fee + 0.05%/side slippage)
+  Tokens    : BTC, ETH, XRP, HBAR, AVAX, LINK, BNB, ADA, POL
+====================================================================
+
+Note: VPN required (Binance blocked in Philippines)
+
+[OGD] No backtest_token_weights found — using AE_DEFAULT_WEIGHTS for all tokens
+[BTC] Fetching 365d history... 106560 5M | 8880 1H | 2220 4H bars
+[BTC] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×12853 | weekday=1 blocked×6359 | weekday=5 blocked×6251 | weekday=2 blocked×6240 | regime=CHOPPY blocked×4384
+0 signals generated
+[ETH] Fetching 365d history... 106560 5M | 8880 1H | 2220 4H bars
+[ETH] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×13059 | weekday=1 blocked×6360 | weekday=5 blocked×6251 | weekday=2 blocked×6240 | regime=CHOPPY blocked×4120
+0 signals generated
+[XRP] Fetching 365d history... 106560 5M | 8880 1H | 2220 4H bars
+[XRP] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×13119 | weekday=1 blocked×6359 | weekday=5 blocked×6248 | weekday=2 blocked×6240 | regime=CHOPPY blocked×4862
+0 signals generated
+[HBAR] Fetching 365d history... 106560 5M | 8880 1H | 2220 4H bars
+[HBAR] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×13285 | weekday=1 blocked×6351 | weekday=2 blocked×6226 | weekday=5 blocked×6218 | regime=CHOPPY blocked×4763
+0 signals generated
+[AVAX] Fetching 365d history... 106561 5M | 8880 1H | 2220 4H bars
+[AVAX] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×12950 | weekday=1 blocked×6336 | weekday=2 blocked×6147 | weekday=5 blocked×6145 | regime=CHOPPY blocked×4792
+0 signals generated
+[LINK] Fetching 365d history... 106560 5M | 8880 1H | 2220 4H bars
+[LINK] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×13944 | weekday=1 blocked×6300 | weekday=2 blocked×6219 | weekday=5 blocked×6180 | regime=CHOPPY blocked×4373
+0 signals generated
+[BNB] Fetching 365d history... 106561 5M | 8880 1H | 2220 4H bars
+[BNB] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×13576 | weekday=1 blocked×6360 | weekday=5 blocked×6249 | weekday=2 blocked×6217 | regime=CHOPPY blocked×4743
+0 signals generated
+[ADA] Fetching 365d history... 106560 5M | 8880 1H | 2220 4H bars
+[ADA] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×13752 | weekday=1 blocked×6360 | weekday=5 blocked×6243 | weekday=2 blocked×6238 | regime=CHOPPY blocked×4825
+0 signals generated
+[POL] Fetching 365d history... 106561 5M | 8880 1H | 2220 4H bars
+[POL] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×13064 | weekday=1 blocked×6281 | weekday=2 blocked×6236 | weekday=5 blocked×6067 | regime=CHOPPY blocked×5573
+0 signals generated
+
+No signals generated — check VPN / Binance connection.
+
+[Walk-Forward] Not enough signals for rolling windows.
+
+[PHASE I-3] No signals - template report skipped.
+[PHASE I-3] Template report → C:\Users\User\Desktop\TradeAI\docs\ict_strategy_variant_learner\template_performance_report.md

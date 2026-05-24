@@ -1,0 +1,41 @@
+[ADAPTIVE] Bootstrap-initialized (no live data yet): ADA, AVAX, BNB, BTC, DOGE, DOT, ETH, HBAR, LINK, LTC, NEAR, POL, SOL, XRP
+[DRIFT] Loaded baselines for: ADA, AVAX, BNB, BTC, ETH, HBAR, LINK, POL, XRP
+====================================================================
+  TRADEAI — ICT BACKTESTING ENGINE  (Phase 4.7)
+  Mode      : Research (BUY+SELL)
+  Strategy  : Liquidity Sweep + MSS + FVG + 5M iFVG Precision
+  Period    : Last 730 days
+  TF Stack  : 4H bias | 1H TP levels | 5M sweep/MSS/FVG (Phase 4.8)
+  Entry win : 72×5M = 4H  |  Outcome: 288×5M = 24H
+  Gates     : 4H=none | 1H=loose | Blocked: CHOPPY, HIGH_VOLATILITY, LIQUIDATION, LOW_VOLATILITY_CHOP, RANGING, TRENDING_BEAR | SELL-ok: TRENDING_BEAR
+  Fees      : RT=0.30% (0.10%/side fee + 0.05%/side slippage)
+  Tokens    : BTC, ETH, XRP, HBAR, AVAX, LINK, BNB, ADA, POL, SUI
+====================================================================
+
+Note: VPN required (Binance blocked in Philippines)
+
+[OGD] Loaded backtest weights for 14 token(s): ADA, AVAX, BNB, BTC, DOGE, DOT, ETH, HBAR, LINK, LTC, NEAR, POL, SOL, XRP
+[BTC] Fetching 730d history... 211682 5M | 17640 1H | 4410 4H bars
+[BTC] Simulating ICT signals... C:\Users\User\Desktop\TradeAI\backtest.py:516: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+  ts    = datetime.utcfromtimestamp(ts_ms / 1000)
+C:\Users\User\Desktop\TradeAI\backtest.py:816: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+  utc_hour=datetime.utcfromtimestamp(ts_entry_ms / 1000).hour,
+C:\Users\User\Desktop\TradeAI\backtest.py:883: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+  ts_str = datetime.utcfromtimestamp(ts_entry_ms / 1000).strftime("%Y-%m-%d %H:%M:%S")
+  Gate rejections: regime=RANGING blocked×79743 | weekday=1 blocked×30212 | weekday=5 blocked×29938 | regime=CHOPPY blocked×28600 | 1H=STRONG_BULL blocks SELL×11358 | regime=TRENDING_BEAR blocked×9820 | 1H=BULL blocks SELL×2409 | regime=LOW_VOLATILITY_CHOP blocked×1214 | FVG quality too low×651 | Setup too old (>ICT_MAX_SETUP_AGE_BARS)×140 | [DIAG] fvg_ok×81 | Entry: no FVG reaction×36
+8 signals generated
+[CKPT] saved — 1 tokens done, 8 signals
+[ETH] Fetching 730d history... 211682 5M | 17640 1H | 4410 4H bars
+[ETH] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×81027 | weekday=1 blocked×30232 | weekday=5 blocked×29949 | regime=CHOPPY blocked×28450 | 1H=STRONG_BULL blocks SELL×10591 | regime=TRENDING_BEAR blocked×9853 | 1H=BULL blocks SELL×2894 | regime=LOW_VOLATILITY_CHOP blocked×1056 | FVG quality too low×425 | [DIAG] fvg_ok×128 | Setup too old (>ICT_MAX_SETUP_AGE_BARS)×68 | Entry: no FVG reaction×23
+10 signals generated
+[CKPT] saved — 2 tokens done, 18 signals
+[XRP] Fetching 730d history... 211681 5M | 17640 1H | 4410 4H bars
+[XRP] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×79388 | regime=CHOPPY blocked×33023 | weekday=1 blocked×30233 | weekday=5 blocked×29931 | regime=TRENDING_BEAR blocked×9886 | 1H=STRONG_BULL blocks SELL×8801 | 1H=BULL blocks SELL×2276 | regime=LOW_VOLATILITY_CHOP blocked×1867 | FVG quality too low×447 | Setup too old (>ICT_MAX_SETUP_AGE_BARS)×148 | regime=HIGH_VOLATILITY blocked×144 | [DIAG] fvg_ok×133 | Entry: no FVG reaction×71 | [MSS] BSL: CHoCH failed×1
+12 signals generated
+[CKPT] saved — 3 tokens done, 30 signals
+[HBAR] Fetching 730d history... 211682 5M | 17640 1H | 4410 4H bars
+[HBAR] Simulating ICT signals...   Gate rejections: regime=RANGING blocked×83306 | regime=CHOPPY blocked×30745 | weekday=1 blocked×29904 | weekday=5 blocked×29375 | regime=TRENDING_BEAR blocked×9416 | 1H=STRONG_BULL blocks SELL×7777 | 1H=BULL blocks SELL×2795 | Setup too old (>ICT_MAX_SETUP_AGE_BARS)×1018 | regime=LOW_VOLATILITY_CHOP blocked×987 | FVG quality too low×476 | [DIAG] fvg_ok×101 | Entry: no FVG reaction×43 | regime=HIGH_VOLATILITY blocked×24 | [MSS] BSL: CHoCH failed×3
+12 signals generated
+[CKPT] saved — 4 tokens done, 42 signals
+[AVAX] Fetching 730d history... 211682 5M | 17640 1H | 4410 4H bars
+[AVAX] Simulating ICT signals... 
