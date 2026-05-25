@@ -40,6 +40,11 @@ from labeling import (
     triple_barrier_label, bootstrap_wr_ci, bootstrap_sharpe_ci,
     label_outcome_aliases,
 )
+# Phase A.2 (LIVE_BACKTEST_PARITY_ROADMAP.md):
+# Realistic execution model. Activated via env var REALISTIC_EXECUTION=1.
+# Default is OFF — when off, this import is a no-op and backtest behavior is
+# byte-identical to pre-A.2. See docs/exec_model_calibration.md for tuning.
+import execution  # type: ignore
 
 
 class _Tee:
@@ -893,6 +898,47 @@ def run_backtest_token(token, c5m, c1h, c4h, btc_c1h=None, btc_c5m=None, config=
         if entry_bar is None:
             continue
 
+        # ── Phase A.2: Realistic execution model ─────────────────────────
+        # Off by default (REALISTIC_EXECUTION=0). When on, the model overrides
+        # entry_price with the simulated fill price and may reject the signal
+        # entirely (no_fill / stale_move) or assign a partial fill (50% size).
+        # Default OFF preserves byte-identical backtest output vs pre-A.2.
+        # See docs/exec_model_calibration.md.
+        fill_size_pct       = 1.0     # full fill by default
+        realistic_cost_pct  = None    # None → plan uses default TOKEN_RT_COST
+        if os.environ.get("REALISTIC_EXECUTION", "0") == "1":
+            # ATR(14) on last 14 closed 5M bars — needed for stale-move reject.
+            _atr_n = min(14, len(h5) - 1)
+            if _atr_n >= 2:
+                _tr_sum = 0.0
+                for _k in range(1, _atr_n + 1):
+                    _hh = h5[-_k]; _ll = l5[-_k]; _pc = c5[-_k - 1]
+                    _tr_sum += max(_hh - _ll, abs(_hh - _pc), abs(_ll - _pc))
+                _atr_5m_abs = _tr_sum / _atr_n
+            else:
+                _atr_5m_abs = (abs(h5[-1] - l5[-1])
+                               if h5 else max(entry_price * 0.005, 1e-6))
+            _atr_ratio_val = float(regime.get("atr_ratio", 1.0))
+            _seed = execution.derive_seed(ts, token, direction)
+            _er = execution.simulate_execution(
+                signal_ts=ts,
+                signal_price=c5[-1],
+                next_bar_open=o,
+                token=token,
+                direction=direction,
+                regime=regime["regime"],
+                atr_5m=_atr_5m_abs,
+                atr_ratio=_atr_ratio_val,
+                seed=_seed,
+            )
+            if _er.status == "REJECTED":
+                _reject_key = f"Execution: {_er.reason}"
+                rejection_counts[_reject_key] = rejection_counts.get(_reject_key, 0) + 1
+                continue
+            entry_price        = _er.fill_price
+            fill_size_pct      = _er.fill_size_pct
+            realistic_cost_pct = _er.total_cost_pct
+
         ts_entry_ms = c5m["times"][entry_bar]
 
         # ── EV gate (C-N2 KNOWN STRUCTURAL — see CROSS_REF.md) ─────────────────────
@@ -978,6 +1024,27 @@ def run_backtest_token(token, c5m, c1h, c4h, btc_c1h=None, btc_c5m=None, config=
             rejection_counts[f"R:R {plan['rr1']}x < {ICT_MIN_RR_GATE}x minimum"] = (
                 rejection_counts.get(f"R:R {plan['rr1']}x < {ICT_MIN_RR_GATE}x minimum", 0) + 1)
             continue
+
+        # ── Phase A.2: apply realistic-execution cost delta to plan ──────────
+        # If simulate_execution gave us a token-and-time-specific cost different
+        # from the default TOKEN_RT_COST baked into the plan, subtract the
+        # delta from all net_* fields. Price levels (sl/tp1/tp2/tp3) unchanged;
+        # only the net P&L scales. No-op when realistic_cost_pct is None.
+        if realistic_cost_pct is not None:
+            _baseline_cost = TOKEN_RT_COST.get(token, ROUND_TRIP_COST_PCT)
+            _delta_pct = (realistic_cost_pct - _baseline_cost) * 100  # plan uses pct (0-100)
+            if _delta_pct:
+                plan = dict(plan)  # avoid mutating shared returned dict
+                plan["net_tp1_pct"] = round(plan["net_tp1_pct"] - _delta_pct, 4)
+                if plan.get("net_tp2_pct") is not None:
+                    plan["net_tp2_pct"] = round(plan["net_tp2_pct"] - _delta_pct, 4)
+                if plan.get("net_tp3_pct") is not None:
+                    plan["net_tp3_pct"] = round(plan["net_tp3_pct"] - _delta_pct, 4)
+                plan["net_sl_pct"] = round(plan["net_sl_pct"] - _delta_pct, 4)
+                # Recompute net_rr1 with adjusted values; guard against /0.
+                _abs_net_sl = abs(plan["net_sl_pct"])
+                if _abs_net_sl > 1e-9:
+                    plan["net_rr1"] = round(abs(plan["net_tp1_pct"] / plan["net_sl_pct"]), 2)
 
         # ── Confidence — OGD-weighted ICT quality score (aligned with live formula) ─
         fvg_size_pct  = (fvg["top"] - fvg["bottom"]) / max(eff_price, 1e-10) * 100
@@ -1078,6 +1145,13 @@ def run_backtest_token(token, c5m, c1h, c4h, btc_c1h=None, btc_c5m=None, config=
             outcome, plan["net_tp1_pct"], plan["net_sl_pct"], plan["sl_pct"],
             net_tp2_pct=plan.get("net_tp2_pct"),
             net_tp3_pct=plan.get("net_tp3_pct"))
+
+        # ── Phase A.2: scale realized R by realized fill size ────────────────
+        # A 50% partial fill produces 50% of the full-fill P&L impact (in either
+        # direction — WIN, PARTIAL_TP1/TP2, LOSS, or EXPIRED). REJECTED signals
+        # were filtered above, so fill_size_pct here is always in {0.5, 1.0}.
+        if fill_size_pct < 1.0 and _real_r is not None:
+            _real_r = round(_real_r * fill_size_pct, 4)
 
         signals.append({
             "token":        token,
