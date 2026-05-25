@@ -372,6 +372,7 @@ If you're a new Claude session opening this repo and the operator says "continue
 ## 12. Cross-references
 
 - **Design docs:** `docs/AUTONOMOUS_EXPLORER_DESIGN.md`, `docs/OPTIMIZATION_AGENT_PIPELINE.md`, `docs/ENTERPRISE_ROADMAP.md`
+- **Live ↔ Backtest Parity Plan:** `docs/LIVE_BACKTEST_PARITY_ROADMAP.md` — canonical sequenced plan (Phases A-D) to bring TradeAI's backtest-vs-live divergences to enterprise quant standards. Read FIRST before proposing changes to execution model, validation methodology, or backtest gate symmetry.
 - **Audit history:** `docs/comprehensive/CROSS_REF.md`, `.claude/reports/tradeai-audit/`
 - **Exploration logs:** `docs/exploration_runs/` (Cycle 1, 1b, 1c, Tier-2 grids)
 - **Operator skills:** `.claude/skills/` (tradeai-audit, tradeai-backtest, tradeai-health, etc.)

@@ -144,6 +144,10 @@ class MultiChannelAlerter:
     def send(self, subject: str, body: str, *, force_secondary: bool = False) -> dict:
         """Deliver to primary; fall back to secondary on failure (or always if forced).
 
+        ``body`` may contain HTML tags (<b>, <pre>, <code>, <i>) for the
+        Telegram primary channel. The SMTP secondary path receives an
+        HTML-stripped version so emails render cleanly without tag noise.
+
         Returns ``{"primary_ok": bool, "secondary_ok": bool}``.
         """
         result = {"primary_ok": False, "secondary_ok": False}
@@ -158,7 +162,11 @@ class MultiChannelAlerter:
             self._last_primary_ok_ts = time.time()
 
         if force_secondary or not result["primary_ok"]:
-            result["secondary_ok"] = self.secondary.send(subject, body)
+            # SMTP receives a plain-text version — strip HTML tags so the
+            # email body doesn't show literal <b>, <pre>, etc.
+            import re as _re
+            plain_body = _re.sub(r"<[^>]+>", "", body)
+            result["secondary_ok"] = self.secondary.send(subject, plain_body)
             if result["secondary_ok"]:
                 self._last_secondary_ok_ts = time.time()
 
@@ -236,17 +244,20 @@ class Heartbeat:
         self-test forces a delivery to BOTH primary AND secondary so silent
         rot of the SMTP path is detected within a day at 1h cadence.
         """
+        import html as _html
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         body = (
-            f"SELFTEST — alert path verification\n"
-            f"Time: {ts} UTC\n"
-            f"PID:  {os.getpid()}\n"
-            f"Beat counter: {self._counter}\n"
-            f"This message confirms both Telegram AND secondary (SMTP) are reachable. "
-            f"If you do not see it on every configured channel, the alert path is "
-            f"degraded — investigate before LIVE."
+            "<b>Selftest  -  alert path check</b>\n\n"
+            "<pre>"
+            f"Time      {_html.escape(ts)} UTC\n"
+            f"PID       {_html.escape(str(os.getpid()))}\n"
+            f"Beat      #{_html.escape(str(self._counter))}"
+            "</pre>\n"
+            "Confirms both Telegram AND SMTP are reachable. If you do not\n"
+            "see this on every configured channel, the alert path is\n"
+            "degraded - investigate before LIVE."
         )
-        outcome = self.alerter.send("[SELFTEST]", body, force_secondary=True)
+        outcome = self.alerter.send("Selftest", body, force_secondary=True)
         logger.info(
             f"[HEARTBEAT] selftest #{self._counter // self.selftest_every}: "
             f"primary={'OK' if outcome['primary_ok'] else 'FAIL'} | "

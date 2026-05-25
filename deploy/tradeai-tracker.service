@@ -17,7 +17,7 @@ StandardError=append:/home/tradeai/TradeAI/logs/tracker.log
 # Bind to localhost only — dashboard only accessible via SSH tunnel
 Environment="TRACKER_HOST=127.0.0.1"
 
-MemoryLimit=512M
+MemoryMax=512M
 
 [Install]
 WantedBy=multi-user.target

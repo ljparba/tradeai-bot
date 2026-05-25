@@ -4333,7 +4333,7 @@ async function loadExplorer(){
         const vcolor = {PASS:'var(--green)', FAIL:'var(--red)', ERROR:'var(--muted)'}[t.verdict] || 'var(--muted)';
         return '<tr style="border-bottom:1px solid rgba(148,163,184,.07)">'
           + '<td style="padding:.35rem .5rem">#' + t.trial_id + '</td>'
-          + '<td style="padding:.35rem .5rem;color:var(--muted);font-size:.74rem">' + (t.study_name||'').slice(0,18) + '</td>'
+          + '<td style="padding:.35rem .5rem;color:var(--muted);font-size:.74rem;white-space:nowrap">' + (t.study_name||'') + '</td>'
           + '<td style="padding:.35rem .5rem;color:' + vcolor + ';font-weight:600">' + t.verdict + '</td>'
           + '<td style="padding:.35rem .5rem">' + (t.n||'—') + '</td>'
           + '<td style="padding:.35rem .5rem">' + (t.wr!=null ? t.wr+'%' : '—') + '</td>'

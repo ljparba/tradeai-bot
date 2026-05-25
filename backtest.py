@@ -987,7 +987,11 @@ def run_backtest_token(token, c5m, c1h, c4h, btc_c1h=None, btc_c5m=None, config=
             _fvg_mid  = (fvg["top"] + fvg["bottom"]) / 2
             _ifvg_spatially_valid = abs(_ifvg_mid - _fvg_mid) / max(_fvg_mid, 1e-10) <= ICT_IFVG_PROXIMITY_PCT
         ifvg_bonus    = +1 if _ifvg_spatially_valid else 0  # Run 44 + spatial gate: iFVG within 3% of FVG mid
-        smt_penalty   = -1 if smt_result.get("smt_confirmed") else 0
+        # C-E (audit 2026-05-25): flipped from penalty to bonus. Strategy templates
+        # already award +0.10 SMT_bonus per Run #85 finding (SMT=True 78.8% WR vs
+        # 66.7% without). Confidence integer path was missed in Fix #31 — see
+        # CROSS_REF.md TPL-SMT entry (now PARTIAL FIX → resolved).
+        smt_bonus     = +1 if smt_result.get("smt_confirmed") else 0
         # SESSION-FIX: use signal DETECTION bar (ts.hour) — not entry bar — so
         # template matching and the stored "session" field are consistent.
         # The stored field at line ~736 uses ts.hour; using entry bar here caused
@@ -1020,7 +1024,7 @@ def run_backtest_token(token, c5m, c1h, c4h, btc_c1h=None, btc_c5m=None, config=
         _w_total      = sum(_feat_w.values())
         _ogd_qual     = (sum(_raw_scores[f] * _feat_w[f] for f in _raw_scores) / _w_total
                          if _w_total > 0 else 0.5)
-        confidence    = max(5, min(int(5 + _ogd_qual * 5) + ifvg_bonus + smt_penalty, 10))
+        confidence    = max(5, min(int(5 + _ogd_qual * 5) + ifvg_bonus + smt_bonus, 10))
         # Confidence floor check — backtest uses the static initial floor (5).
         # Live applies adaptive increments from load_performance_state() (_conf_floor,
         # _signal_threshold_adj, _wr_extra). Those adaptive layers are KNOWN STRUCTURAL
@@ -3058,10 +3062,29 @@ def main():
                         _sr_trial_std_honest = float(_cand)
             except Exception:
                 _sr_trial_std_honest = None
+            # C-D (audit 2026-05-25): read cumulative_min_trials seed so a DB wipe
+            # doesn't reset the selection-bias denominator. Without this, post-wipe
+            # n_trials_for_dsr drops to ~2 instead of the historic ~27, weakening
+            # the DSR multiple-testing correction by ~75%.
+            _cumulative_min_trials = 0
+            try:
+                _row2 = _conn.execute(
+                    "SELECT value FROM bot_state WHERE key = 'cumulative_min_trials'"
+                ).fetchone()
+                if _row2 and _row2[0]:
+                    _blob2 = json.loads(_row2[0])
+                    _cm = _blob2.get("value")
+                    if isinstance(_cm, int) and _cm > 0:
+                        _cumulative_min_trials = _cm
+            except Exception:
+                _cumulative_min_trials = 0
             _conn.close()
             # Add 1 to represent the entire legacy bucket as a single historical trial.
             # Add 1 more to count THIS pending run (not yet saved when CPCV runs).
             _candidate = _distinct + (1 if _has_legacy else 0) + 1
+            # C-D: take max with cumulative seed so DB wipe can't artificially
+            # lower the selection-bias correction below the honest historic count.
+            _candidate = max(_candidate, _cumulative_min_trials)
             if _candidate > 1:
                 _n_trials_dsr = int(_candidate)
         except Exception:

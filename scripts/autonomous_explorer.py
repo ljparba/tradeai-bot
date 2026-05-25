@@ -46,6 +46,7 @@ Usage:
 """
 import argparse
 import hashlib
+import html
 import json
 import os
 import re
@@ -105,11 +106,33 @@ CREATE INDEX IF NOT EXISTS idx_trials_verdict ON trials(verdict);
 CREATE INDEX IF NOT EXISTS idx_trials_cpcv_mean ON trials(cpcv_mean DESC);
 """
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (ValueError, TypeError):
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, str(default)))
+    except (ValueError, TypeError):
+        return default
+
+
+# PASS gates for a trial. Defaults match the "high-quality / low-frequency"
+# Run-168 profile. All four are env-overridable so the operator can run
+# alternative search profiles (e.g. high-frequency / moderate-WR) in a
+# separate explorer session without touching this file:
+#
+#   EXPLORER_N_MIN=180     EXPLORER_WR_MIN=55     EXPLORER_DSR_MIN=80
+#
+# A trial PASSES only if all four are satisfied (see _verdict in this file).
 GATES = {
-    "n_min":             30,
-    "cpcv_mean_min_pct": 60.0,
-    "cpcv_q05_min_pct":  50.0,
-    "dsr_min_pct":       95.0,
+    "n_min":             _env_int("EXPLORER_N_MIN",       30),    # >= signals/365d
+    "cpcv_mean_min_pct": _env_float("EXPLORER_WR_MIN",    60.0),  # >= CPCV mean WR %
+    "cpcv_q05_min_pct":  _env_float("EXPLORER_Q05_MIN",   50.0),  # >= worst-fold WR %
+    "dsr_min_pct":       _env_float("EXPLORER_DSR_MIN",   95.0),  # >= Deflated Sharpe %
 }
 
 ANTI_PATTERN_LOCKS = {
@@ -261,8 +284,14 @@ class _PidFile:
             pass
 
 
-# ── Telegram notify (stdlib-only fallback if requests unavailable) ──────────
-def _telegram(message: str) -> bool:
+# ── Telegram notify ─────────────────────────────────────────────────────────
+def _h(value) -> str:
+    """HTML-escape a value for safe inclusion in <pre>...</pre> blocks."""
+    return html.escape(str(value))
+
+
+def _telegram(html_text: str) -> bool:
+    """Send Telegram in HTML parse-mode. Falls back to plain text on parse error."""
     token   = os.environ.get("TELEGRAM_TOKEN", "")
     chat_id = os.environ.get("CHAT_ID", "")
     if not token or not chat_id:
@@ -271,10 +300,21 @@ def _telegram(message: str) -> bool:
         import requests
         r = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": message},
+            json={"chat_id": chat_id, "text": html_text, "parse_mode": "HTML"},
             timeout=10,
         )
-        return r.status_code == 200
+        if r.status_code == 200:
+            return True
+        body = (r.text or "").lower()
+        if "can't parse" in body or "parse" in body:
+            plain = re.sub(r"<[^>]+>", "", html_text)
+            r2 = requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": plain},
+                timeout=10,
+            )
+            return r2.status_code == 200
+        return False
     except Exception as e:
         print(f"[explorer] telegram send failed: {e}")
         return False
@@ -893,10 +933,18 @@ def _objective_factory(study_name: str, guard: _GuardState, sess: dict):
                 promo_result = _try_auto_promote(study_name, trial.number, params, m)
                 if promo_result == "promoted":
                     promoted = True
-                    msg = (f"AUTO_PROMOTED trial #{trial.number} -> new baseline pin\n"
-                           f"CPCV: {m.get('cpcv_mean')}  DSR: {m.get('dsr')}  Sharpe: {m.get('sharpe')}")
-                    print(f"[promote] {msg}")
-                    _telegram(f"TradeAI Explorer AUTO_PROMOTED\n{msg}")
+                    print(f"[promote] AUTO_PROMOTED trial #{trial.number} -> new baseline pin "
+                          f"CPCV={m.get('cpcv_mean')} DSR={m.get('dsr')} Sharpe={m.get('sharpe')}")
+                    _telegram(
+                        "<b>Explorer AUTO-PROMOTED</b>\n\n"
+                        f"Trial #{_h(trial.number)} is the new baseline pin.\n\n"
+                        "<pre>"
+                        f"CPCV     {_h(m.get('cpcv_mean'))}%\n"
+                        f"DSR      {_h(m.get('dsr'))}%\n"
+                        f"Sharpe   {_h(m.get('sharpe'))}\n"
+                        f"n        {_h(m.get('n'))}"
+                        "</pre>"
+                    )
                     guard.pin_dsr = _read_pin_dsr()
                     guard.pin_run = _read_pin_run()
                     sess["auto_promotions"] = sess.get("auto_promotions", 0) + 1
@@ -910,8 +958,13 @@ def _objective_factory(study_name: str, guard: _GuardState, sess: dict):
                     # spam if a persistent issue (e.g., promote_baseline.py
                     # subprocess crash) hits every PASS trial.
                     if not sess.get("promote_failure_telegram_sent"):
-                        _telegram(f"Explorer auto-promote FAILED: {promo_result}\n"
-                                  f"(further failures this session will be console-only)")
+                        _telegram(
+                            "<b>Explorer AUTO-PROMOTE FAILED</b>\n\n"
+                            "<pre>"
+                            f"{_h(promo_result)}"
+                            "</pre>\n"
+                            "Further failures this session will be console-only."
+                        )
                         sess["promote_failure_telegram_sent"] = True
                         _write_session(sess)
         finally:
@@ -928,10 +981,14 @@ def _objective_factory(study_name: str, guard: _GuardState, sess: dict):
             print(f"[explorer] No more trials this session. Optuna study preserved.")
             sys.stdout.flush()
             _telegram(
-                f"TradeAI Explorer PAUSED\n"
-                f"Reason: {guard_msg}\n"
-                f"Trials this session: {sess.get('trials_completed')}\n"
-                f"Best CPCV: {sess.get('best_cpcv')}, DSR: {sess.get('best_dsr')}"
+                "<b>Explorer PAUSED  -  anti-overfit guard tripped</b>\n\n"
+                "<pre>"
+                f"Reason    {_h(guard_msg)}\n"
+                f"Trials    {_h(sess.get('trials_completed'))} done this session\n"
+                f"Best      CPCV {_h(sess.get('best_cpcv'))}%  DSR {_h(sess.get('best_dsr'))}%"
+                "</pre>\n"
+                "Optuna study preserved. Investigate cause, then resume with:\n"
+                "<code>sudo systemctl start tradeai-explorer</code>"
             )
             raise optuna.exceptions.TrialPruned()
 
@@ -988,10 +1045,12 @@ def run_study(study_name: str, n_trials: int, skip_precache: bool = False):
         sys.stdout.flush()
 
         _telegram(
-            f"TradeAI Explorer STARTED\n"
-            f"Study: {study_name}\n"
-            f"Trials: {n_trials}\n"
-            f"Baseline pin: Run-{_read_pin_run()}  DSR={guard.pin_dsr}"
+            "<b>Explorer STARTED</b>\n\n"
+            "<pre>"
+            f"Study     {_h(study_name)}\n"
+            f"Trials    {_h(n_trials)}\n"
+            f"Baseline  Run-{_h(_read_pin_run())}  (DSR {_h(guard.pin_dsr)})"
+            "</pre>"
         )
 
         # SIGTERM handler — systemctl stop sends SIGTERM. Calls study.stop()
@@ -1022,9 +1081,14 @@ def run_study(study_name: str, n_trials: int, skip_precache: bool = False):
             sess["pause_reason"] = "keyboard_interrupt"
             _write_session(sess)
             _telegram(
-                f"TradeAI Explorer INTERRUPTED\n"
-                f"Trials completed: {sess.get('trials_completed')}\n"
-                f"Best CPCV: {sess.get('best_cpcv')}"
+                "<b>Explorer INTERRUPTED</b>\n\n"
+                "<pre>"
+                f"Reason    Ctrl+C from operator\n"
+                f"Trials    {_h(sess.get('trials_completed'))} / {_h(sess.get('trials_planned'))}\n"
+                f"Best      CPCV {_h(sess.get('best_cpcv'))}%"
+                "</pre>\n"
+                "Optuna study preserved. Resume with:\n"
+                "<code>sudo systemctl start tradeai-explorer</code>"
             )
             return
 
@@ -1032,10 +1096,19 @@ def run_study(study_name: str, n_trials: int, skip_precache: bool = False):
         if guard.pause_reason:
             sess["pause_reason"] = guard.pause_reason
             _write_session(sess)
+            _counts = sess.get("counts", {})
             _telegram(
-                f"TradeAI Explorer STOPPED ({guard.pause_reason})\n"
-                f"Trials completed: {sess.get('trials_completed')}/{sess.get('trials_planned')}\n"
-                f"Best CPCV: {sess.get('best_cpcv')}  DSR: {sess.get('best_dsr')}"
+                "<b>Explorer STOPPED  -  guard tripped</b>\n\n"
+                "<pre>"
+                f"Reason    {_h(guard.pause_reason)}\n"
+                f"Trials    {_h(sess.get('trials_completed'))} / {_h(sess.get('trials_planned'))}\n"
+                f"Results   {_h(_counts.get('PASS',0))} PASS  "
+                f"{_h(_counts.get('FAIL',0))} FAIL  "
+                f"{_h(_counts.get('ERROR',0))} ERROR\n"
+                f"Best      CPCV {_h(sess.get('best_cpcv'))}%  DSR {_h(sess.get('best_dsr'))}%"
+                "</pre>\n"
+                "Optuna study preserved. Resume with:\n"
+                "<code>sudo systemctl start tradeai-explorer</code>"
             )
         else:
             sess["ended_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1048,13 +1121,17 @@ def run_study(study_name: str, n_trials: int, skip_precache: bool = False):
             if sess.get("best_cpcv"):
                 print(f"[explorer] best CPCV: {sess['best_cpcv']}  DSR: {sess['best_dsr']}")
                 print(f"[explorer] best params: {sess['best_params']}")
+            _counts = sess.get("counts", {})
             _telegram(
-                f"TradeAI Explorer DONE\n"
-                f"Trials: {sess.get('trials_completed')}/{sess.get('trials_planned')}\n"
-                f"Verdicts: PASS={sess['counts'].get('PASS',0)} "
-                f"FAIL={sess['counts'].get('FAIL',0)} "
-                f"ERROR={sess['counts'].get('ERROR',0)}\n"
-                f"Best CPCV: {sess.get('best_cpcv')}  DSR: {sess.get('best_dsr')}"
+                "<b>Explorer DONE</b>\n\n"
+                "<pre>"
+                f"Trials    {_h(sess.get('trials_completed'))} / {_h(sess.get('trials_planned'))}\n"
+                f"Results   {_h(_counts.get('PASS',0))} PASS  "
+                f"{_h(_counts.get('FAIL',0))} FAIL  "
+                f"{_h(_counts.get('ERROR',0))} ERROR\n"
+                f"Best      CPCV {_h(sess.get('best_cpcv'))}%  DSR {_h(sess.get('best_dsr'))}%\n"
+                f"Baseline  Run-{_h(sess.get('pin_run'))}  (CPCV {_h(sess.get('pin_dsr'))}%)"
+                "</pre>"
             )
     finally:
         pid.release()

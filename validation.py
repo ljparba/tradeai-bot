@@ -634,17 +634,29 @@ def cpcv_summary(
         out["dsr_bench_sharpe"] = None
 
     # Verdict against Phase A exit criteria: CPCV-validated WR >= 58% AND
-    # (DSR >= 95% when DSR is computed). Per backtest-bias-detector audit
-    # Fix #3: MARGINAL must also enforce the DSR gate — without it, a run
-    # with WR=57.9% but DSR=0.001% would slip through as MARGINAL.
+    # DSR >= 95% (when computed). Fix #3 added DSR enforcement on MARGINAL.
+    #
+    # C-B (audit 2026-05-25): when DSR is None (e.g. n_trials_for_dsr<2 or
+    # missing cross_config_std), the verdict gate previously treated dsr_ok
+    # as True, allowing PASS without any multiple-testing correction. This
+    # would let a run with WR=80% but no honest selection-bias check slip
+    # through as PASS. Now: when DSR is None, cap the verdict at MARGINAL
+    # so the operator gets visibility that selection-bias correction was
+    # NOT applied. PASS requires an actual DSR >= 95%.
     wr_mean = out["wr_mean"]
-    dsr_ok = (out["dsr"] is None) or (out["dsr"] >= 0.95)
-    if wr_mean >= 58.0 and dsr_ok:
+    dsr_value = out["dsr"]
+    dsr_present = dsr_value is not None
+    dsr_passes = dsr_present and dsr_value >= 0.95
+    if wr_mean >= 58.0 and dsr_passes:
         out["verdict"] = "PASS"
-    elif wr_mean >= 55.0 and dsr_ok:
+    elif wr_mean >= 55.0 and (dsr_passes or not dsr_present):
+        # MARGINAL covers both "DSR present but borderline" and "DSR unavailable"
+        # cases. In the second case, the verdict honestly reflects unverified
+        # selection-bias status — operator must investigate before promoting.
         out["verdict"] = "MARGINAL"
     else:
         out["verdict"] = "FAIL"
+    out["dsr_gate_applied"] = dsr_present
 
     return out
 

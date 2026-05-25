@@ -18,6 +18,7 @@
 
 ## 0. Related Architecture Docs
 
+- [`docs/LIVE_BACKTEST_PARITY_ROADMAP.md`](./LIVE_BACKTEST_PARITY_ROADMAP.md) — **Live ↔ Backtest Parity Plan (locked 2026-05-25)** — focused, sequenced plan to close every divergence between live and backtest to enterprise quant standards. Phases A-D + deferred Phase E. **Read this BEFORE proposing any change to execution model, validation methodology, or backtest gate symmetry.**
 - [`docs/AUTONOMOUS_EXPLORER_DESIGN.md`](./AUTONOMOUS_EXPLORER_DESIGN.md) — **Autonomous explorer (Optuna-based)** — nightly self-driving search over existing backtest engine. Phased 5-day project. Design APPROVED 2026-05-24; implementation pending operator approval gate.
 - [`docs/OPTIMIZATION_AGENT_PIPELINE.md`](./OPTIMIZATION_AGENT_PIPELINE.md) — **3-agent flow** (Explorer → Analyzer → Optimizer) for OPERATOR-DRIVEN pattern discovery. Explorer + Optimizer SHIPPED 2026-05-23. Will coexist with autonomous explorer (manual = ad-hoc; autonomous = standing search).
 - [`docs/ROADMAP_AUDIT_CROSSCHECK.md`](./ROADMAP_AUDIT_CROSSCHECK.md) — cross-check vs TradingAgents investigation audit.

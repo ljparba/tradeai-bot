@@ -20,6 +20,7 @@ Required env vars (inherits from the bot):
 from __future__ import annotations
 
 import argparse
+import html
 import logging
 import os
 import sys
@@ -47,7 +48,9 @@ logging.basicConfig(
 logger = logging.getLogger("watchdog")
 
 
-def _send_telegram(message: str) -> bool:
+def _send_telegram(html_text: str) -> bool:
+    """Send a Telegram message in HTML parse-mode. Falls back to plain text
+    if HTML parsing fails (e.g., malformed <pre> or unescaped <)."""
     token = os.environ.get("TELEGRAM_TOKEN", "")
     chat = os.environ.get("CHAT_ID", "")
     if not token or not chat:
@@ -55,9 +58,22 @@ def _send_telegram(message: str) -> bool:
         return False
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     try:
-        r = requests.post(url, data={"chat_id": chat, "text": message}, timeout=10)
+        r = requests.post(
+            url,
+            data={"chat_id": chat, "text": html_text, "parse_mode": "HTML"},
+            timeout=10,
+        )
         if r.status_code == 200:
             return True
+        # HTML parse-error fallback — retry as plain text without tags
+        body = (r.text or "").lower()
+        if "can't parse" in body or "parse" in body:
+            import re as _re
+            plain = _re.sub(r"<[^>]+>", "", html_text)
+            r2 = requests.post(url, data={"chat_id": chat, "text": plain}, timeout=10)
+            if r2.status_code == 200:
+                logger.warning("Telegram HTML parse failed — sent as plain text")
+                return True
         logger.error(f"Telegram returned {r.status_code}: {r.text[:200]}")
         return False
     except Exception as e:
@@ -65,12 +81,19 @@ def _send_telegram(message: str) -> bool:
         return False
 
 
-def _alert(subject: str, body: str) -> None:
-    """Fire on BOTH channels — this is exactly when redundancy must work."""
-    full = f"{subject}\n{body}"
-    tg_ok = _send_telegram(full)
+def _alert(subject: str, html_body: str, plain_body: str | None = None) -> None:
+    """Fire on BOTH channels — this is exactly when redundancy must work.
+
+    html_body  HTML-formatted Telegram payload (must escape <,>,& in dynamic values).
+    plain_body Plain-text SMTP body. If None, falls back to HTML-stripped html_body.
+    """
+    if plain_body is None:
+        import re as _re
+        plain_body = _re.sub(r"<[^>]+>", "", html_body)
+    tg_full = f"<b>{subject}</b>\n\n{html_body}"
+    tg_ok = _send_telegram(tg_full)
     smtp = SmtpAlerter()
-    smtp_ok = smtp.send(subject, body) if smtp.configured else False
+    smtp_ok = smtp.send(subject, plain_body) if smtp.configured else False
     logger.info(f"alert dispatched — telegram={'OK' if tg_ok else 'FAIL'} smtp={'OK' if smtp_ok else 'FAIL/UNCONFIGURED'}")
     if not tg_ok and not smtp_ok:
         logger.critical("BOTH channels failed — operator will not be notified")
@@ -90,11 +113,23 @@ def main() -> int:
 
     hb_path = Path(args.heartbeat_file)
     logger.info(f"starting — file={hb_path} interval={args.interval}s staleness={args.staleness}s")
+
+    _stale_minutes = max(1, args.staleness // 60)
+    _started_str   = datetime.now().strftime("%Y-%m-%d %H:%M")
     _alert(
-        "Watchdog started",
-        f"Watchdog now monitoring {hb_path}\n"
-        f"Stale threshold: {args.staleness}s\n"
-        f"Started: {datetime.now().isoformat(timespec='seconds')}",
+        "Watchdog ACTIVE",
+        html_body=(
+            "<pre>"
+            f"Monitoring   {html.escape(str(hb_path))}\n"
+            f"Threshold    {_stale_minutes} min stale\n"
+            f"Started      {_started_str}"
+            "</pre>"
+        ),
+        plain_body=(
+            f"Monitoring   {hb_path}\n"
+            f"Threshold    {_stale_minutes} min stale\n"
+            f"Started      {_started_str}"
+        ),
     )
 
     last_alert_ts = 0.0
@@ -106,35 +141,73 @@ def main() -> int:
         if stale:
             need_alert = (last_state == "OK") or (now - last_alert_ts >= args.realert_cooldown)
             if need_alert:
+                _age_min = max(1, int(age // 60))
                 if payload is None:
-                    body = (
-                        f"HEARTBEAT FILE MISSING\n"
-                        f"Expected at: {hb_path}\n"
-                        f"The bot has either never started or crashed before writing its first beat.\n"
-                        f"Time: {datetime.now().isoformat(timespec='seconds')}"
+                    subject = "BOT NOT RUNNING"
+                    html_body = (
+                        "<pre>"
+                        "Heartbeat file is missing.\n"
+                        f"Expected at: {html.escape(str(hb_path))}\n\n"
+                        "The bot has either never started, or crashed\n"
+                        "before writing its first heartbeat."
+                        "</pre>\n"
+                        "Check:   <code>sudo systemctl status tradeai</code>\n"
+                        "Start:   <code>sudo systemctl start tradeai</code>"
                     )
-                    subject = "Bot heartbeat MISSING"
+                    plain_body = (
+                        "Heartbeat file is missing.\n"
+                        f"Expected at: {hb_path}\n\n"
+                        "The bot has either never started, or crashed "
+                        "before writing its first heartbeat.\n\n"
+                        "Check:   sudo systemctl status tradeai\n"
+                        "Start:   sudo systemctl start tradeai"
+                    )
                 else:
-                    body = (
-                        f"BOT HEARTBEAT STALE — possible crash or hang\n"
-                        f"Last beat: {payload.get('ts_utc', 'unknown')} UTC ({age:.0f}s ago)\n"
-                        f"PID:       {payload.get('pid', '?')}\n"
-                        f"Cycle:     {payload.get('cycle', '?')}\n"
-                        f"Mode:      {payload.get('execution_mode', '?')}\n"
-                        f"Threshold: {args.staleness}s\n"
-                        f"Investigate immediately: check bot console, system, network."
+                    subject = f"BOT FROZEN  -  no heartbeat for {_age_min} min"
+                    _last_beat = html.escape(str(payload.get("ts_utc", "unknown")))
+                    _pid       = html.escape(str(payload.get("pid", "?")))
+                    _cycle     = html.escape(str(payload.get("cycle", "?")))
+                    _mode      = html.escape(str(payload.get("execution_mode", "?")))
+                    html_body = (
+                        "<pre>"
+                        f"Last cycle   #{_cycle}  at {_last_beat} UTC\n"
+                        f"PID          {_pid} (alive per systemd)\n"
+                        f"Mode         {_mode}\n"
+                        f"Threshold    {_stale_minutes} min"
+                        "</pre>\n"
+                        "Likely cause: network hang, deadlock, or stuck API call.\n\n"
+                        "Check:   <code>journalctl -u tradeai -n 50</code>\n"
+                        "Restart: <code>sudo systemctl restart tradeai</code>"
                     )
-                    subject = "Bot heartbeat STALE"
-                _alert(subject, body)
+                    plain_body = (
+                        f"Last cycle   #{payload.get('cycle','?')}  at {payload.get('ts_utc','?')} UTC\n"
+                        f"PID          {payload.get('pid','?')} (alive per systemd)\n"
+                        f"Mode         {payload.get('execution_mode','?')}\n"
+                        f"Threshold    {_stale_minutes} min\n\n"
+                        "Likely cause: network hang, deadlock, or stuck API call.\n\n"
+                        "Check:   journalctl -u tradeai -n 50\n"
+                        "Restart: sudo systemctl restart tradeai"
+                    )
+                _alert(subject, html_body, plain_body)
                 last_alert_ts = now
             last_state = "STALE"
         else:
             if last_state == "STALE":
                 # Recovery — tell operator the bot is back
-                ts_utc = (payload or {}).get("ts_utc", "?")
+                ts_utc = html.escape(str((payload or {}).get("ts_utc", "?")))
+                _age_s = int(age)
                 _alert(
-                    "Bot RECOVERED",
-                    f"Heartbeat resumed.\nLast beat: {ts_utc} UTC ({age:.0f}s ago)\nThe bot is alive again.",
+                    "BOT RECOVERED",
+                    html_body=(
+                        "<pre>"
+                        f"Last beat   {ts_utc} UTC  ({_age_s}s ago)\n"
+                        "</pre>"
+                        "Heartbeat resumed. The bot is alive again."
+                    ),
+                    plain_body=(
+                        f"Last beat   {(payload or {}).get('ts_utc', '?')} UTC  ({_age_s}s ago)\n\n"
+                        "Heartbeat resumed. The bot is alive again."
+                    ),
                 )
                 last_alert_ts = now
             last_state = "OK"

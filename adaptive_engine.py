@@ -596,6 +596,30 @@ class AdaptiveWeightEngine:
             scratch_n[token] = n + 1
             n_processed[token] = n_processed.get(token, 0) + 1
 
+        # ── Degenerate-reject guard (audit 2026-05-25, C-F follow-up) ────────
+        # Tokens with thin bootstrap data can produce lopsided weight distributions
+        # (e.g. TON post-onboarding 2026-05-24: session=43.9% > DEGENERATE_THRESHOLD 0.40).
+        # Without intervention, these degenerate distributions would persist in
+        # backtest_token_weights and cold-start contaminate live token_weights.
+        # Live runtime has a degenerate-block guard that falls back to DEFAULT_WEIGHTS
+        # at scoring time, but the dashboard still flags CRIT and the table stores
+        # noise. Cleaner to refuse the import at the source: when a token's
+        # bootstrap output is degenerate, substitute uniform DEFAULT_WEIGHTS so the
+        # persisted row is clean. Live OGD updates will diverge organically once
+        # closed paper signals accumulate. This is data-quality enforcement at the
+        # bootstrap layer, not a behavioral change at scoring time.
+        _rejected_tokens: list = []
+        for _tok in list(scratch_w.keys()):
+            _is_degen, _worst_feat, _worst_val = self._check_degenerate(scratch_w[_tok])
+            if _is_degen:
+                scratch_w[_tok] = dict(DEFAULT_WEIGHTS)
+                scratch_v[_tok] = {f: 0.0 for f in FEATURES}
+                _rejected_tokens.append((_tok, _worst_feat, _worst_val))
+                print(f"[ADAPTIVE] bootstrap REJECTED {_tok} — "
+                      f"{_worst_feat}={_worst_val:.3f} > {DEGENERATE_THRESHOLD} "
+                      f"(substituted uniform DEFAULT_WEIGHTS; live OGD will learn organically "
+                      f"once paper signals close)")
+
         # ── Persist to backtest_token_weights only — never touches token_weights ──
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         try:
@@ -615,16 +639,10 @@ class AdaptiveWeightEngine:
 
         self._snapshot_weights(trigger="bootstrap_after", run_id=run_id)
 
-        # Post-bootstrap degenerate weight check — warn but never block.
-        # Early bootstraps with thin data legitimately produce skewed weights.
-        for _tok, _w in scratch_w.items():
-            _degen, _feat, _val = self._check_degenerate(_w)
-            if _degen:
-                _msg = (f"[ADAPTIVE] bootstrap degenerate weight for {_tok}: "
-                        f"{_feat}={_val:.3f} > {DEGENERATE_THRESHOLD} — "
-                        f"weights persisted but flagged (normal with thin data; "
-                        f"runtime will fall back to defaults if still degenerate at signal time)")
-                print(_msg)
+        if _rejected_tokens:
+            print(f"[ADAPTIVE] bootstrap degenerate-reject summary: "
+                  f"{len(_rejected_tokens)} token(s) substituted with uniform defaults: "
+                  f"{', '.join(f'{t}({f}={v:.2f})' for t, f, v in _rejected_tokens)}")
 
         # M14: Soft-threshold alert — warn when any feature weight exceeds 3× its
         # default (e.g., dr_location > 0.15 given default 0.05).  Does not block;

@@ -18,10 +18,21 @@ Project layout:
   docs/             — CLAUDE_CONTEXT.md, LEARNING_SYSTEM_AUDIT.md
   scripts/          — start_bot.bat, start_tracker.bat
 """
-import os, sqlite3, requests, time, json, logging
+import os, sqlite3, requests, time, json, logging, html, re
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone, timedelta
 from typing import Optional
+
+
+def _h(value) -> str:
+    """HTML-escape a value for safe inclusion in Telegram HTML messages.
+
+    Telegram HTML mode (parse_mode='HTML') requires '<', '>', '&' to be
+    escaped when they appear in dynamic content. Wrapping every interpolated
+    f-string value with _h() prevents the API from misparsing the message
+    and falling back to plain text (which would lose <pre> alignment).
+    """
+    return html.escape(str(value))
 
 # Load .env / .env.vault BEFORE any other module reads os.environ.
 # secrets_loader is the bot's centralized secrets entry point (Phase A item #4).
@@ -590,10 +601,15 @@ def load_performance_state():
                 if _verdict == "VERIFIED_WORSE":
                     try:
                         send_telegram(
-                            f"⚠️ TUNE BOT ALERT — VERIFIED_WORSE\n"
-                            f"Tune #{_tid} post-apply WR {_post_wr:.1f}% is BELOW baseline "
-                            f"{_baseline:.1f}% (n={_tot} signals).\n"
-                            f"Consider rolling back via the Tune Bot dashboard."
+                            "<b>Tune Bot  -  VERIFIED_WORSE</b>\n\n"
+                            "<pre>"
+                            f"Tune #     {_h(_tid)}\n"
+                            f"Post-WR    {_post_wr:.1f}%\n"
+                            f"Baseline   {_baseline:.1f}%\n"
+                            f"Sample n   {_h(_tot)} signals"
+                            "</pre>\n"
+                            "Post-apply WR is below baseline. Consider rolling back\n"
+                            "via the Tune Bot dashboard."
                         )
                     except Exception:
                         pass
@@ -954,7 +970,14 @@ def check_kill_switches(token):
     except Exception as e:
         _ks_err = f"[KILL SWITCH] DB check error — failing closed: {e}"
         print(_ks_err)
-        send_telegram(f"⚠️ KILL SWITCH DB ERROR — all signals blocked\n{_ks_err}")
+        send_telegram(
+            "<b>KILL SWITCH  -  DB ERROR</b>\n\n"
+            "<pre>"
+            f"{_h(_ks_err)}"
+            "</pre>\n"
+            "All signal generation is blocked until the DB error clears.\n"
+            "Check: <code>journalctl -u tradeai -n 50</code>"
+        )
         return False, f"Kill switch DB error — failing closed to protect capital"  # C3: fail-closed
 
 def update_signal_result(sig_id, price, tp1, tp2, tp3, sl, signal,
@@ -1304,41 +1327,44 @@ def send_exit_suggestion(sig, assessment, price):
 
     if verdict == "TAKE_PROFIT":
         header = "TAKE PROFIT"
-        icon   = "[TP]"
-        note   = (f"Price reached {coverage:.0f}% of TP1 target — strong exit zone. "
+        note   = (f"Price reached {coverage:.0f}% of TP1 target - strong exit zone. "
                   f"Consider closing full position or majority here.")
     elif verdict == "CONSIDER_PARTIAL":
-        header = "CONSIDER PARTIAL CLOSE"
-        icon   = "[EXIT]"
+        header = "PARTIAL CLOSE"
         note   = (f"Take 30-50% off the table here. "
                   f"Let remainder run toward TP1 (${tp1:.4f}).")
     else:
         header = "WATCH CLOSELY"
-        icon   = "[WATCH]"
-        note   = "No action required yet — conditions shifting. Monitor next few candles."
+        note   = "No action required yet - conditions shifting. Monitor next few candles."
 
+    _time_str = f"{time_rem}h left" if time_rem is not None else ""
     msg = (
-        f"{icon} *{header} — {token} {direction} #{sig_id}*\n"
-        f"{'─'*34}\n"
-        f"Entry: ${entry:.4f}  [{dir_arrow}]  Now: ${price:.4f}\n"
-        f"TP1 coverage: {coverage:.0f}%  |  Float P&L: {pnl_sign}{pnl:.2f}%\n"
-        f"Conf: {conf}/10  |  Regime: {regime}"
+        f"<b>{_h(header)}  -  {_h(token)} {_h(direction)} #{_h(sig_id)}</b>\n"
+        "\n<pre>"
+        f"Entry      ${entry:>11.4f}\n"
+        f"Now        ${price:>11.4f}\n"
+        f"TP1 cov    {coverage:>4.0f}%\n"
+        f"Float PnL  {pnl_sign}{pnl:.2f}%\n"
+        f"Conf       {_h(conf)}/10\n"
+        f"Regime     {_h(regime)}"
+        + (f"\nExpires    {_h(_time_str)}" if _time_str else "")
+        + "</pre>\n"
     )
 
-    if time_rem is not None:
-        msg += f"  |  {time_rem}h left"
-
     if signals:
-        msg += f"\n\n*Exit signals firing ({len(signals)}):*\n"
+        msg += f"\n<b>Exit signals firing ({_h(len(signals))}):</b>\n"
         for s in signals:
-            msg += f"  + {s}\n"
+            msg += f"  - {_h(s)}\n"
     else:
-        msg += "\n\n_(No reversal signals — purely coverage-based)_\n"
+        msg += "\n<i>No reversal signals - purely coverage-based.</i>\n"
 
     msg += (
-        f"\n*Verdict: {note}*\n\n"
-        f"TP1: ${tp1:.4f}  |  TP2: ${tp2:.4f}\n"
-        f"_Analysis only. Final call is yours._"
+        f"\n<b>Verdict</b>\n{_h(note)}\n"
+        "\n<pre>"
+        f"TP1   ${tp1:.4f}\n"
+        f"TP2   ${tp2:.4f}"
+        "</pre>\n"
+        "\n<i>Analysis only. Your call.</i>"
     )
 
     if len(msg) > 4000:
@@ -2399,7 +2425,10 @@ def generate_signal(token, price, change_24h, volume_24h):  # noqa: C901
         _ifvg_spatially_valid = abs(_ifvg_mid - _fvg_mid) / max(_fvg_mid, 1e-10) <= ICT_IFVG_PROXIMITY_PCT
     ifvg_bonus   = +1 if _ifvg_spatially_valid else 0  # Run 44: IFVG=YES 60.5% WR — spatial gate added
     # SMT confirmed signals are anti-predictive (Run 41: 34.1% vs 40.7%; Run 42: 26.8% vs 66.7%)
-    smt_penalty  = -1 if smt_result.get("smt_confirmed") else 0
+    # C-E (audit 2026-05-25): flipped from penalty to bonus. Strategy templates
+    # already award +0.10 SMT_bonus per Run #85 finding. Confidence integer path
+    # was missed in Fix #31. See CROSS_REF.md TPL-SMT (PARTIAL FIX → resolved).
+    smt_bonus    = +1 if smt_result.get("smt_confirmed") else 0
     # OGD-weighted quality score — 5 structural features (confidence excluded to avoid circularity)
     _cur_session = _utc_to_session(datetime.now(timezone.utc).hour)
     _dr_loc      = dr_4h.get("location", "UNKNOWN")
@@ -2424,7 +2453,7 @@ def generate_signal(token, price, change_24h, volume_24h):  # noqa: C901
     _w_total     = sum(_feat_w.values())
     _ogd_quality = (sum(_raw_scores[f] * _feat_w[f] for f in _raw_scores) / _w_total
                     if _w_total > 0 else 0.5)
-    confidence   = max(5, min(int(5 + _ogd_quality * 5) + ifvg_bonus + smt_penalty, 10))
+    confidence   = max(5, min(int(5 + _ogd_quality * 5) + ifvg_bonus + smt_bonus, 10))
     if confidence < _conf_floor:  # C7/M7: enforce dynamic floor computed by load_performance_state()
         return None, regime
     # Fix 2: enforce _signal_threshold_adj in regime-neutral conditions.
@@ -2634,17 +2663,19 @@ def _md(s: str) -> str:
 
 def send_telegram(message, _retries=3, _delay=5):
     """Send Telegram message with exponential-backoff retry.
-    On Markdown parse error (400 'can't parse entities'), retries once as plain
-    text — protects system messages that contain stray underscores or other
-    Markdown-special chars (e.g. adx_trend=18.0 in the drift-gate note).
+
+    Uses HTML parse-mode (Telegram supports <b>, <i>, <code>, <pre>, <a>).
+    On parse error (400 'can't parse entities'), retries once with the HTML
+    tags stripped — protects against unescaped < or & in dynamic content.
     Tries up to _retries times. On total failure, logs to console so no signal
     is ever silently dropped — caller always gets True/False back."""
     if not TELEGRAM_TOKEN: return False
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    parse_mode = "Markdown"
+    parse_mode = "HTML"
+    text = message
     for attempt in range(1, _retries + 1):
         try:
-            payload = {"chat_id": CHAT_ID, "text": message}
+            payload = {"chat_id": CHAT_ID, "text": text}
             if parse_mode:
                 payload["parse_mode"] = parse_mode
             r = requests.post(url, json=payload, timeout=10)
@@ -2653,7 +2684,8 @@ def send_telegram(message, _retries=3, _delay=5):
         except requests.exceptions.HTTPError as e:
             body = (e.response.text or "").lower() if e.response is not None else ""
             if parse_mode and ("can't parse entities" in body or "parse" in body):
-                print(f"[TG] Markdown parse error — retrying as plain text")
+                print(f"[TG] HTML parse error — retrying as plain text")
+                text = re.sub(r"<[^>]+>", "", message)
                 parse_mode = None
                 continue
             wait = _delay * attempt
@@ -2734,62 +2766,102 @@ def send_signal_msg(token,price,ch24,result,plan,sig_id,regime):
     ifvg_line   = (f"  IFVG:   [{ifvg_r['ifvg_bottom']:.5f}–{ifvg_r['ifvg_top']:.5f}] ✓"
                    if ifvg_r.get("ifvg_present") else "  IFVG:   None")
 
-    sig_label  = "BUY " if signal == "BUY" else "SELL"
-    # L6: wrap underscore-containing dynamic strings with _md() to prevent Markdown v1 italic corruption
-    msg=(f"{sig_label} *{token}* | ICT | ID:{sig_id}\n"
-         f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC\n"
-         f"Price: ${price:.4f} | 24H: {ch24:+.2f}%\n\n"
-         f"*{reg_emoji} MARKET REGIME*\n"
-         f"  {_md(reg)} (ADX:{reg_adx} Eff:{reg_eff:.2f} Conf:{reg_conf}%)\n\n"
-         f"*₿ BTC FILTER*\n"
-         f"  4H:{btc_t4h} 1H:{btc_t1h} Dom:{btc_dom:.1f}%({dom_arrow})\n"
-         f"  Status: {btc_status}\n\n"
-         f"*ICT SETUP (15M)*\n"
-         f"  Sweep:  {sweep_type} @ {sweep_lev:.5f}\n"
-         f"  4H DR:  {dr_location} (mid={dr_mid:.4f})\n"
-         f"  FVG:    [{fvg_bot:.5f} — {fvg_top:.5f}] ({fvg_size_pct:.2f}%) [{fvg_qual}]\n"
-         f"{entry_zone_line}\n"
-         f"  Reaction: {entry_tp}\n"
-         f"  MSS:    Confirmed ({mss_qual}) | 4H: {bias_4h} | 1H: {_md(trend_1h)}\n"
-         f"  SMT:    {smt_ok} {smt_type} (vs BTC)\n"
-         f"{ifvg_line}\n"
-         f"  Strength: {result['strength']} | Conf: {bar} {conf}/10\n"
-         f"  Session: {session_lbl} | EV: {f'{ev_score:+.3f}%' if ev_score is not None else 'N/A'}"
-         f" [{_md(ev_status)} n={ev_sample_n}] {ev_label}\n")
     # Phase 5A — template safety section
     _tmpl_id     = result.get("matched_template_id", "NONE")
     _tmpl_status = result.get("template_status", "UNKNOWN_TEMPLATE")
     _tmpl_live   = result.get("template_live_allowed", 0)
     _tmpl_reason = result.get("template_block_reason", "")
-    _TMPL_EMOJI  = {"ACTIVE": "✅", "PAPER_ONLY": "📋",
-                    "PAUSED_BY_CIRCUIT_BREAKER": "⏸", "INSUFFICIENT_SAMPLE": "🔬",
-                    "BLOCKED_BY_REGIME_SAFETY": "🚫", "DAILY_CAP_REACHED": "🔒",
-                    "UNKNOWN_TEMPLATE": "❓"}
     _exec_tag    = "LIVE-OK" if _tmpl_live else "PAPER"
-    msg += (f"\n*STRATEGY TEMPLATE*\n"
-            f"  Template: {_tmpl_id} {_TMPL_EMOJI.get(_tmpl_status, '❓')} {_tmpl_status}\n"
-            f"  Execution: {_exec_tag}\n"
-            + (f"  Blocked: {_tmpl_reason}\n" if _tmpl_reason else ""))
+
+    # ── Title + header ──
+    ts_now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    msg = (
+        f"<b>{_h(token)} {_h(signal)}  signal #{_h(sig_id)}</b>\n"
+        f"{_h(ts_now)} UTC  -  price ${price:.4f}  (24h {ch24:+.2f}%)\n"
+    )
+
+    # ── Trade plan (Entry / SL / TP1-3) ──
     if plan:
-        net_note = (f"Net TP1: {plan['net_tp1_pct']:+.2f}% | "
-                    f"BEW: {plan['breakeven_wr']:.0%} | "
-                    f"Net RR: 1:{plan['net_rr1']}")
+        msg += (
+            "\n<pre>"
+            f"Entry  {price:>12.5f}\n"
+            f"SL     {plan['sl']:>12.5f}   {plan['sl_pct']:+6.2f}%\n"
+            f"TP1    {plan['tp1']:>12.5f}   {plan['tp1_pct']:+6.2f}%   R:R {plan['rr1']:>4}   close 40%\n"
+            f"TP2    {plan['tp2']:>12.5f}   {plan['tp2_pct']:+6.2f}%   R:R {plan['rr2']:>4}   close 40%\n"
+            f"TP3    {plan['tp3']:>12.5f}   {plan['tp3_pct']:+6.2f}%   R:R {plan['rr3']:>4}   close 20%"
+            "</pre>\n"
+        )
+
+    # ── At-a-glance summary line ──
+    msg += (
+        f"\n<b>Conf {_h(conf)}/10</b>   "
+        f"{_h(_tmpl_id)} {_h(_tmpl_status)} ({_h(_exec_tag)})\n"
+        f"Regime {_h(reg)}  ADX {_h(reg_adx)}  Eff {reg_eff:.2f}\n"
+        f"HTF    4H {_h(bias_4h)}   /   1H {_h(trend_1h)}\n"
+        f"BTC    4H {_h(btc_t4h)}   /   1H {_h(btc_t1h)}   /   Dom {btc_dom:.1f}%   /   {_h(btc_status)}\n"
+    )
+
+    # ── ICT setup detail ──
+    if ifvg_5m_found:
+        _entry_line = (f"Entry    {ifvg_5m_r['ifvg_5m_bottom']:.5f} - {ifvg_5m_r['ifvg_5m_top']:.5f}  "
+                       f"(5M iFVG precision)")
+    else:
+        _entry_line = f"Entry    FVG retracement zone"
+    _smt_state = "confirmed" if smt_r.get("smt_confirmed") else "absent"
+    _ifvg_state = "matched" if ifvg_r.get("ifvg_present") else "none"
+    _ev_str = f"{ev_score:+.3f}%" if ev_score is not None else "N/A"
+    msg += (
+        "\n<pre>"
+        f"Sweep    {_h(sweep_type)} @ {sweep_lev:.5f}\n"
+        f"DR (4H)  {_h(dr_location)}  mid {dr_mid:.4f}\n"
+        f"FVG      {fvg_bot:.5f} - {fvg_top:.5f}  ({fvg_size_pct:.2f}%, {_h(fvg_qual)})\n"
+        f"{_entry_line}\n"
+        f"Reaction {_h(entry_tp)}\n"
+        f"MSS      {_h(mss_qual)}\n"
+        f"SMT      {_h(smt_type)}  ({_h(_smt_state)} vs BTC)\n"
+        f"iFVG     {_h(_ifvg_state)}\n"
+        f"Session  {_h(session_lbl)}\n"
+        f"EV       {_h(_ev_str)}  (n={_h(ev_sample_n)}, {_h(ev_status)})"
+        "</pre>\n"
+    )
+
+    # ── Size + net economics ──
+    if plan:
         sz_notional = sizing.get("notional_usd", 0.0)
         sz_risk_pct = sizing.get("account_risk_pct", 0.0)
         sz_max_loss = sizing.get("max_loss_usd", 0.0)
         sz_fees     = sizing.get("fees_usd", 0.0)
-        msg+=(f"\n*TRADE PLAN*\n"
-              f"Entry: ${price:.4f} | {entry_label}\n"
-              f"SL:  ${plan['sl']:.5f} ({plan['sl_pct']:.2f}%) — 0.3% beyond swept wick\n"
-              f"TP1: ${plan['tp1']:.5f} ({plan['tp1_pct']:+.2f}%) R:R 1:{plan['rr1']} [{tp1_lbl}] — sell 40%\n"
-              f"TP2: ${plan['tp2']:.5f} ({plan['tp2_pct']:+.2f}%) R:R 1:{plan['rr2']} — sell 40%\n"
-              f"TP3: ${plan['tp3']:.5f} ({plan['tp3_pct']:+.2f}%) R:R 1:{plan['rr3']} — sell 20%\n"
-              f"{net_note}\n"
-              f"Size: ${sz_notional:,.0f} | Risk: {sz_risk_pct:.0f}% (${sz_max_loss:.2f}) | Fees: ~${sz_fees:.2f}\n")
-    if comp and len(comp)>=5:
-        msg+=f"\nCompound ({wr_live:.0%} WR): ${YOUR_CAPITAL:,.0f} → 5T:${comp[4]:,.0f} → 10T:${comp[9]:,.0f}\n"
-    msg+=f"\nWhy:\n{reasons}\n\nAnalysis only. Final call is yours."
-    if len(msg)>4000: msg=msg[:3980]+"...[trimmed]"
+        msg += (
+            f"\nSize ${sz_notional:,.0f}  -  "
+            f"Risk {sz_risk_pct:.1f}% (${sz_max_loss:.2f})  -  "
+            f"Fees ~${sz_fees:.2f}\n"
+            f"Net TP1 {plan['net_tp1_pct']:+.2f}%  -  "
+            f"BEW {plan['breakeven_wr']:.0%}  -  "
+            f"Net R:R {plan['net_rr1']}\n"
+        )
+
+    # ── Template block reason (only if actually blocked) ──
+    if _tmpl_reason:
+        msg += f"\n<i>Template blocked: {_h(_tmpl_reason)}</i>\n"
+
+    # ── Why this signal (reasons list) ──
+    msg += "\n<b>Why this signal:</b>\n"
+    for r in result["reasons"]:
+        msg += f"  - {_h(r)}\n"
+
+    # ── Compound projection (optional) ──
+    if comp and len(comp) >= 5:
+        msg += (
+            f"\nCompound at {wr_live:.0%} WR:  "
+            f"${YOUR_CAPITAL:,.0f}  ->  "
+            f"5T ${comp[4]:,.0f}  ->  "
+            f"10T ${comp[9]:,.0f}\n"
+        )
+
+    msg += "\n<i>Analysis only. Your call.</i>"
+
+    if len(msg) > 4000:
+        msg = msg[:3980] + "...[trimmed]"
     send_telegram(msg)
     ifvg_tag    = " IFVG" if ifvg_r.get("ifvg_present") else ""
     ifvg_5m_tag = " 5M-iFVG" if ifvg_5m_found else ""
@@ -2887,7 +2959,7 @@ def maybe_send_daily_summary(prices):
         conn2.close()
     except: pass
 
-    lines=[f"Daily Summary {now.strftime('%Y-%m-%d')}\n{db_line}"]
+    token_rows = []
     for token in BINANCE_TOKENS:
         price=prices.get(token,0.0)
         if price<=0: continue
@@ -2898,10 +2970,17 @@ def maybe_send_daily_summary(prices):
         # Fall back to last DB regime if in-memory is still UNKNOWN
         if reg == "UNKNOWN":
             reg = db_regimes.get(token, "UNKNOWN")
-        # Use pipe separator — Telegram markdown eats square brackets
-        lines.append(f"{token}: ${price:.4f} RSI:{rsi_v} MTF:{mtf['bias']} | {reg}")
-    lines.append("Analysis only. Your call always.")
-    send_telegram("\n".join(lines)); print("[DAILY SUMMARY SENT]")
+        token_rows.append(
+            f"{_h(token):<5} ${price:>10.4f}   RSI {_h(int(rsi_v)):>2}   "
+            f"MTF {_h(mtf['bias']):<10}   {_h(reg)}"
+        )
+    msg = (
+        f"<b>Daily Summary  -  {_h(now.strftime('%Y-%m-%d'))}</b>\n\n"
+        f"<pre>{_h(db_line)}</pre>\n"
+        "<pre>" + "\n".join(token_rows) + "</pre>\n"
+        "<i>Analysis only. Your call.</i>"
+    )
+    send_telegram(msg); print("[DAILY SUMMARY SENT]")
 
 # ══════════════════════════════════════════════════════════
 # MAIN
@@ -2966,9 +3045,10 @@ def main():
     # is only notified when the bot is fully ready — not before DB init can fail.
     if EXECUTION_MODE == "LIVE":
         send_telegram(
-            "LIVE MODE ACTIVATED\n"
-            "Real-money trading is now running.\n"
-            "Set EXECUTION_MODE=PAPER to return to paper trading."
+            "<b>LIVE MODE ACTIVATED</b>\n\n"
+            "Real-money trading is now running.\n\n"
+            "To return to paper trading, set "
+            "<code>EXECUTION_MODE=PAPER</code> and restart the bot."
         )
 
     # ── Restore persisted scalar state (Phase 3) ─────────
@@ -3019,18 +3099,21 @@ def main():
     print(f"  DB:        {DB_PATH}")
     print("="*58)
     print(weight_engine.summary())
+    _tokens_str = " ".join(BINANCE_TOKENS.keys())
+    _drift_note_clean = _drift_note.strip()
     send_telegram(
-        f"Signal Bot v13 Started — ICT MODE\n"
-        f"Tokens: {' | '.join(BINANCE_TOKENS.keys())}\n\n"
-        f"Strategy: ICT Liquidity Sweep + MSS + FVG Retracement\n"
-        f"  TF Stack:  1H bias | 15M sweep/MSS/FVG | live price in FVG\n"
-        f"  SL:        0.3% beyond swept wick (max {MAX_SL_PCT*100:.0f}%)\n"
-        f"  TP:        1H confirmed swing levels (1.5–4R)\n"
-        f"  Expiry:    12H | Cooldown: {SIGNAL_COOLDOWN} min\n"
-        f"  BEW gate:  {MAX_BREAKEVEN_WR:.0%} | RT cost: {ROUND_TRIP_COST_PCT*100:.2f}%\n\n"
-        f"DB: {DB_PATH} | Tracker: tracker.py\n"
-        f"Analysis only. Final call is yours."
-        f"{_drift_note}"
+        "<b>TradeAI v13 STARTED  -  ICT mode</b>\n\n"
+        "<pre>"
+        f"Mode       {_h(EXECUTION_MODE)}\n"
+        f"Tokens     {_h(len(BINANCE_TOKENS))}  ({_h(_tokens_str)})\n"
+        f"Strategy   ICT sweep + MSS + FVG retracement\n"
+        f"SL         0.3% beyond swept wick  (max {MAX_SL_PCT*100:.1f}%)\n"
+        f"TP         1H swing levels  (1.5R - 4R)\n"
+        f"Expiry     12h    Cooldown {_h(SIGNAL_COOLDOWN)} min\n"
+        f"BEW gate   {MAX_BREAKEVEN_WR:.0%}     RT cost {ROUND_TRIP_COST_PCT*100:.2f}%"
+        "</pre>"
+        + (f"\n<i>{_h(_drift_note_clean)}</i>" if _drift_note_clean else "")
+        + "\n\n<i>Analysis only. Your call.</i>"
     )
     load_performance_state()
     # M26: Pre-flight Binance connectivity check — abort before entering the main loop
@@ -3042,10 +3125,18 @@ def main():
         _pf.raise_for_status()
         print("[PREFLIGHT] Binance connectivity OK")
     except Exception as _pfe:
-        _pf_msg = f"TradeAI STARTUP FAILED — Binance unreachable: {_pfe}"
-        print(f"[PREFLIGHT] {_pf_msg}")
+        _pf_msg_plain = f"TradeAI STARTUP FAILED - Binance unreachable: {_pfe}"
+        print(f"[PREFLIGHT] {_pf_msg_plain}")
         try:
-            send_telegram(_pf_msg)
+            send_telegram(
+                "<b>TradeAI STARTUP FAILED</b>\n\n"
+                "Cannot reach Binance API. The bot will exit.\n\n"
+                "<pre>"
+                f"Error: {_h(_pfe)}"
+                "</pre>\n"
+                "Check VPN, network, or Binance API status, then restart with:\n"
+                "<code>sudo systemctl restart tradeai</code>"
+            )
         except Exception:
             pass
         return
@@ -3137,12 +3228,16 @@ def main():
                 open_cnt = port_st["total_open"]
                 eff_thr  = SIGNAL_THRESHOLD + _signal_threshold_adj
                 _hb_alerter.send(
-                    "[HEARTBEAT]",
-                    f"Bot alive — {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
-                    f"Open: {open_cnt}/{MAX_OPEN_POSITIONS} | "
-                    f"WR: {wr_live:.0%} | "
-                    f"Threshold: {eff_thr}% | "
-                    f"Cycle: {cycle}",
+                    "Heartbeat",
+                    "<b>Heartbeat  -  bot alive</b>\n\n"
+                    "<pre>"
+                    f"Time      {_h(datetime.now().strftime('%Y-%m-%d %H:%M'))}\n"
+                    f"Cycle     {_h(cycle)}\n"
+                    f"Mode      {_h(EXECUTION_MODE)}\n"
+                    f"Open      {_h(open_cnt)} / {_h(MAX_OPEN_POSITIONS)}\n"
+                    f"WR        {wr_live:.0%}\n"
+                    f"Threshold {_h(eff_thr)}%"
+                    "</pre>",
                 )
                 _last_heartbeat = time.time()
             for token in BINANCE_TOKENS:
@@ -3188,17 +3283,27 @@ def main():
             print(f"[{datetime.now().strftime('%H:%M')}] Done {elapsed:.0f}s — sleep {sleep_t:.0f}s")
             time.sleep(sleep_t)
         except KeyboardInterrupt:
-            print("\n[STOPPED]"); send_telegram("Bot v11 stopped."); break
+            print("\n[STOPPED]"); send_telegram("<b>TradeAI v13 STOPPED</b>\n\nKeyboard interrupt received."); break
         except Exception as e:
             _consecutive_errors += 1
             print(f"[LOOP ERROR #{_consecutive_errors}] {e}")
             # Alert user on first error and every 5th thereafter
             if _consecutive_errors == 1 or _consecutive_errors % 5 == 0:
                 send_telegram(
-                    f"[BOT ERROR] Cycle failure #{_consecutive_errors}\n"
-                    f"{str(e)[:200]}\nBot retrying — check console if this persists.")
+                    f"<b>Bot ERROR  -  cycle failure #{_h(_consecutive_errors)}</b>\n\n"
+                    "<pre>"
+                    f"{_h(str(e)[:300])}"
+                    "</pre>\n"
+                    "Bot is retrying. Investigate if this persists:\n"
+                    "<code>journalctl -u tradeai -n 50</code>"
+                )
             if _consecutive_errors >= 15:
-                send_telegram("[BOT CRITICAL] 15 consecutive failures — stopping.")
+                send_telegram(
+                    "<b>Bot CRITICAL  -  STOPPING</b>\n\n"
+                    "15 consecutive cycle failures. The bot has stopped.\n\n"
+                    "Investigate before restarting:\n"
+                    "<code>journalctl -u tradeai -n 100</code>"
+                )
                 break
             time.sleep(min(60 * _consecutive_errors, 300))
 
