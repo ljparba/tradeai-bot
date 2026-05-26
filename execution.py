@@ -278,10 +278,15 @@ def _vol_multiplier(atr_ratio: float) -> float:
 def derive_seed(signal_ts: datetime, token: str, direction: str) -> int:
     """Standard helper for callers to derive a deterministic seed.
 
-    Backtest should use this so that re-running the same backtest produces
-    identical fills. Optuna trial determinism depends on it.
+    Uses BLAKE2b so the seed is identical across processes regardless of
+    PYTHONHASHSEED. The previous implementation used Python's hash() which
+    is salt-randomized per process — broke promote_baseline.py's
+    reproducibility re-run gate across different interpreters.
     """
-    return hash((signal_ts.isoformat(), token, direction)) & 0x7FFFFFFF
+    import hashlib
+    key = f"{signal_ts.isoformat()}|{token}|{direction}".encode("utf-8")
+    digest = hashlib.blake2b(key, digest_size=8).digest()
+    return int.from_bytes(digest, "big") & 0x7FFFFFFF
 
 
 # ── Module-level introspection (for debugging) ───────────────────────────────

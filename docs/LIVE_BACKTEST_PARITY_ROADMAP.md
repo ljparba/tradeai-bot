@@ -36,7 +36,7 @@ This roadmap is **focused on parity only**. For broader scope:
 - **C2** (no true walk-forward hold-out) → Phase C
 - **C4** (regime ADX static vs DriftDetector) → Phase D
 - **C-N3** (cooldown anchor live vs backtest) → known minor, accepted
-- **DR-1** (DEALING_RANGE_GATE divergence) → Phase B
+- **DR-1** (DEALING_RANGE_GATE divergence) → Phase B → DONE 2026-05-26
 - **H6** (OGD weight isolation in backtest) → Phase D
 
 ---
@@ -76,7 +76,7 @@ Concrete checklist of what makes a quant system "enterprise-grade" on parity, fr
 
 ---
 
-## 4. Current parity status (snapshot 2026-05-25)
+## 4. Current parity status (snapshot 2026-05-26 post Phase B.1)
 
 ### Category A: IDENTICAL across live and backtest
 
@@ -100,8 +100,8 @@ The work `live-backtest-consistency-checker` validates at 10/10 score:
 
 | Gap ID | Component | Live | Backtest | Why diverged | Phase |
 |---|---|---|---|---|---|
-| GAP-1 | Execution model | Real latency 10-30s + spreads + partial fills | Instant fill at signal price, flat 30bps cost | Standard retail backtest convention; needs realistic friction modeling | **A** |
-| GAP-2 | Dealing-range gate (DR-1) | `LIVE_DEALING_RANGE_GATE = True` | `BACKTEST_DEALING_RANGE_GATE = False` | Compromise for statistical power (more signals in BT) | **B** |
+| GAP-1 | Execution model | Real latency 10-30s + spreads + partial fills | Instant fill at signal price, flat 30bps cost | Standard retail backtest convention; needs realistic friction modeling | **A — DONE 2026-05-26** |
+| GAP-2 | Dealing-range gate (DR-1) | `LIVE_DEALING_RANGE_GATE = True` | `BACKTEST_DEALING_RANGE_GATE = True` | RESOLVED via B.1 (2026-05-26) — gate symmetric; n=7 cliff documented | **B — DONE 2026-05-26** |
 | GAP-3 | OGD weights during scoring | Learned per-token weights | DEFAULT_WEIGHTS only (H6 fix) | Required for CPCV statistical validity | **D** (carefully) |
 | GAP-4 | Walk-forward validation | N/A (live IS sequential) | k-fold CPCV only, not sequential | k-fold provides better stat power at small n; trade-off | **C** |
 | GAP-5 | Held-out validation window | All live data is implicitly held-out | All historical data was seen by Optuna | C2 KNOWN STRUCTURAL — would require discarding tuning history | **C** |
@@ -315,14 +315,37 @@ These are out of scope for the parity roadmap (some addressed in `ENTERPRISE_ROA
 
 ---
 
+### Phase B outcome (closed 2026-05-26 via B.1)
+
+| Sub-phase | Commit | Outcome |
+|---|---|---|
+| B.1 — Flip `BACKTEST_DEALING_RANGE_GATE: false → true` | this commit | Run-78 verification: n=7, CPCV mean WR 87.5%, DSR 99.9%, VERDICT PASS. Gate now symmetric live + backtest. DR-1 RESOLVED. |
+| H-D prep — `execution.py:derive_seed()` → `hashlib.blake2b` | this commit | Cross-process determinism verified across PYTHONHASHSEED=0,12345; 29/29 tests still pass. |
+
+**Honest baseline shift** (Run-77 → Run-78, same execution model, only DR gate symmetry changed):
+- n: 34 → 7 (−27; DR gate filter rate ~79%, much more aggressive than the roadmap's predicted ~50-60%)
+- Headline WR: 85.3% → 85.7% (+0.4pp)
+- CPCV mean: 85.27% → 87.50% (+2.23pp)
+- CPCV std: 6.01% → 16.32% (variance explodes at n=7)
+- CPCV Sharpe mean: 1.180 → 5.425 (and std=12.44 — pure noise at this sample size)
+- DSR: 100% → 99.9% (n_trials=27 anchor holds)
+
+**The n=7 sample-size cliff is the honest result.** Backtest is no longer a precise predictor of live WR — it now functions as a structural validation that the strategy survives realistic execution + symmetric DR gating. For ongoing R&D, treat CPCV mean as VERDICT-only at this sample size; CPCV q05 + DSR are the only reliable discriminators. Phase B met its acceptance criteria (WR > 55% floor, DSR > 80% floor), so the gate stays ON; the cliff is documented as a known operating condition, not a regression.
+
+**What changes for the explorer:** Optuna will struggle at n=7. The session GATES floors should already be lower than 55% / 80% — but the explorer's `CPCV_MEAN_FLOOR` and `DSR_FLOOR` should be reviewed in next session to ensure n=7 trials don't get auto-rejected for missing arbitrary thresholds that were calibrated against n=34.
+
+---
+
 ### PHASE B — DR-1 Resolution
 
-**Status:** TODO (operator decision required)
-**Effort:** ~10 hours (mostly re-validation, minimal code)
-**Closes:** GAP-2 (DR-1 known structural)
+**Status:** DONE (closed 2026-05-26 via B.1; see outcome block above)
+**Effort:** ~10 hours (mostly re-validation, minimal code) — actual: ~1 hour
+**Closes:** GAP-2 (DR-1 known structural) → RESOLVED in CROSS_REF
 **Files affected:**
-- MODIFY: `config.py` (one of the two gates flips)
-- MODIFY: `docs/comprehensive/CROSS_REF.md` (DR-1 entry: PARTIAL FIX → resolved or DOCUMENTED ACCEPTANCE)
+- MODIFIED: `config.py` (`BACKTEST_DEALING_RANGE_GATE: False → True`)
+- MODIFIED: `execution.py` (H-D fix: `derive_seed()` → `hashlib.blake2b` for cross-process determinism)
+- MODIFIED: `docs/comprehensive/CROSS_REF.md` (DR-1 entry: KNOWN STRUCTURAL → RESOLVED)
+- MODIFIED: `data/baseline_pin.json` (Run-77 → Run-78, predecessor preserved)
 
 **The decision (must be made before Phase B can be implemented):**
 

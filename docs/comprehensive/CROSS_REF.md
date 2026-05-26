@@ -126,7 +126,7 @@
 | HIGH | 25 | 23 | 1 (H23 operator task) | 0 | 0 |
 | MEDIUM | 27 | 26 | 0 | 0 | 1 (M24 liquid_hours) |
 | LOW | 12 | 8 | 0 | 4 | 0 |
-| **Post-Audit** | **5** | **1** | **4 (DR-1, CF-1, C-N2, C-N3)** | **0** | **0** |
+| **Post-Audit** | **5** | **2** | **3 (CF-1, C-N2, C-N3)** | **0** | **0** |
 | **Sprint 1 Infra** | **6** | **6** | **0** | **0** | **0** |
 | **Sprint 2 Infra** | **5** | **5** | **0** | **0** | **0** |
 | **Sprint 3 Infra** | **2** | **2** | **0** | **0** | **0** |
@@ -136,7 +136,7 @@
 - C2 (walk-forward OOS — structural), C4 (ADX drift — deferred), H23 (auto-start — operator task)
 - L2, L3, L4, L5 (intentionally skipped)
 - M24 (liquid_hours — DISPUTED; only flag if LIVE vs BACKTEST configs diverge from each other)
-- DR-1 (dealing_range_gate — KNOWN STRUCTURAL; see Post-Audit section below)
+- DR-1 (dealing_range_gate — RESOLVED 2026-05-26 Phase B.1; gate now symmetric LIVE=true / BACKTEST=true. See Post-Audit row for n=7 caveat.)
 - CF-1 (adaptive confidence floors — KNOWN STRUCTURAL; see Post-Audit section below)
 - C-N1 (BTC trend filter — VERIFIED FIXED 2026-05-22; backtest BLOCK removed)
 - C-N2 (EV gate in backtest — KNOWN STRUCTURAL; activates post-paper-N≥30)
@@ -150,7 +150,7 @@
 
 | ID | Description | Final Status | Notes for Agents |
 |----|-------------|-------------|-----------------|
-| DR-1 | `dealing_range_gate`: LIVE_CONFIG=True vs BACKTEST_CONFIG=False | KNOWN STRUCTURAL | Intentional. DR-1 catch-22: SELL-in-TRENDING_BEAR always lands in DISCOUNT zone — enabling the gate in BACKTEST_CONFIG blocked 100% of valid SELL signals in diagnostic window. Direction is conservative: live is stricter than backtest, so backtest WR slightly understates live WR (not overstates it). Do NOT flag as config drift. File: strategy_engine.py lines 126 (LIVE) and 139 (BACKTEST). |
+| DR-1 | `dealing_range_gate`: LIVE_CONFIG=True vs BACKTEST_CONFIG=False | **RESOLVED — 2026-05-26 (Phase B.1)** | `config.py:329` flipped `BACKTEST_DEALING_RANGE_GATE: false → true`. Gate is now symmetric across live + backtest. Run-78 verification baseline: n=7 (was 34 pre-flip), CPCV mean WR 87.5%, DSR 99.9%, VERDICT PASS. The DR gate filter rate is ~79% in backtest — significantly more aggressive than the roadmap's predicted ~50-60%; this is a real sample-size cliff. Backtest is no longer a precise predictor of live WR at n=7, but the structural divergence (which was the audit-correctness concern) is closed. Files: `config.py:329`, `strategy_engine.py` lines 126/139 (no longer divergent). For ongoing R&D, treat backtest CPCV mean as VERDICT-only at this sample size; CPCV q05 + DSR are the only reliable discriminators. See `docs/LIVE_BACKTEST_PARITY_ROADMAP.md` Phase B for derivation + n=7 caveat documentation. |
 | CF-1 | Adaptive confidence floors (`_conf_floor`, `_signal_threshold_adj`, `_wr_extra`) applied in live but not backtest | KNOWN STRUCTURAL | Backtest uses static floor=5 (the initial starting value). Live adaptive increments only activate after live signals accumulate — backtest correctly models the bot's fresh-start behavior. The static floor=5 is already enforced via `max(5, ...)` in both paths. Explicit static check added to backtest.py to make code symmetric. Full adaptive modeling would require loading live history into backtest (H6-style contamination risk). Do NOT flag as config drift. File: crypto_alert.py:2432-2453 (live), backtest.py confidence floor check. |
 | TT-1 | T21 source-code scan for PARTIAL_TP1/2 | REMOVED — FALSE PREMISE | T21 was scanning source code for uses of PARTIAL_TP1/2 outside backtest context. Removed because PARTIAL_TP1/2 ARE legitimate intermediate live result values (TP2 hit, TP3 pending). T2 already verifies the actual DB has no unexpected values. Do NOT recreate T21. |
 | TT-2 | A13 fvg_min_quality pattern mismatch | VERIFIED FIXED | strategy_engine.py uses 6-space alignment `fvg_min_quality      = "HIGH"`. test_tunebot.py now checks all 4 spacing variants (0, 1, 4, 6 spaces). Do NOT flag A13 as flaky — it was a test bug, not a code bug. |

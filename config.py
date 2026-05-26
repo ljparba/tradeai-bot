@@ -326,7 +326,7 @@ BACKTEST_ENABLE_BUY:           bool = _env_bool("BACKTEST_ENABLE_BUY", True)
 BACKTEST_ENABLE_SELL:          bool = _env_bool("BACKTEST_ENABLE_SELL", True)
 BACKTEST_BIAS_4H_GATE:         str  = _env_choice("BACKTEST_BIAS_4H_GATE", "none", ("strict", "loose", "none"))  # F-8 (2026-05-23): strict->none. D-2 reversal: 365d bias=strict over-filters (n=37, CPCV std=15.56%); bias=none restores Run-110 baseline (n=46, CPCV std=8.85%, q05=63.2%).
 BACKTEST_TREND_1H_GATE:        str  = _env_choice("BACKTEST_TREND_1H_GATE", "strict", ("strict", "loose", "none"))  # TP-2-b PROMOTED 2026-05-24 — mirrors LIVE_TREND_1H_GATE for live/BT parity
-BACKTEST_DEALING_RANGE_GATE:   bool = _env_bool("BACKTEST_DEALING_RANGE_GATE", False)  # DR-1 disabled
+BACKTEST_DEALING_RANGE_GATE:   bool = _env_bool("BACKTEST_DEALING_RANGE_GATE", True)  # Phase B.1 (2026-05-26): false->true. DR-1 RESOLVED — mirrors LIVE_DEALING_RANGE_GATE for live/BT parity. Live is source of truth; the structural divergence is closed even at the cost of thinner sample size.
 BACKTEST_MSS_MIN_QUALITY:      str  = _env_choice("BACKTEST_MSS_MIN_QUALITY", "LOW", ("LOW", "MEDIUM", "HIGH"))
 BACKTEST_FVG_MIN_QUALITY:      str  = _env_choice("BACKTEST_FVG_MIN_QUALITY", "HIGH", ("LOW", "MEDIUM", "HIGH"))
 BACKTEST_SMT_GATE:             bool = _env_bool("BACKTEST_SMT_GATE", False)
