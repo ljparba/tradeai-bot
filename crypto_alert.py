@@ -1132,8 +1132,13 @@ def _trigger_weight_update(sig_id: int, outcome: str):
     """
     try:
         conn = _connect()
+        # R7 fix (master audit 2026-05-26): also fetch market_regime to label
+        # the OGD update with the active regime at signal-creation time. The
+        # regime is observation-only — NOT used to condition learning — and
+        # is persisted to weight_history via update(snapshot=True) for future
+        # regime-aware analysis.
         row  = conn.execute(
-            "SELECT s.token, s.feature_scores_json, r.profit_pct "
+            "SELECT s.token, s.feature_scores_json, r.profit_pct, s.market_regime "
             "FROM signals s LEFT JOIN results r ON r.signal_id = s.id "
             "WHERE s.id=?",
             (sig_id,)
@@ -1141,7 +1146,7 @@ def _trigger_weight_update(sig_id: int, outcome: str):
         conn.close()
         if not row:
             return
-        token, fs_json, profit_pct = row
+        token, fs_json, profit_pct, regime = row
 
         if not fs_json:
             print(f"[ADAPTIVE] #{sig_id} — no feature_scores_json stored; skipping OGD update")
@@ -1152,7 +1157,11 @@ def _trigger_weight_update(sig_id: int, outcome: str):
         # (e.g. -0.85 pp → -0.0085 fraction). update() then divides by 0.01 to scale
         # 1% P&L → reward 1.0. Both conversions are intentional — do not remove either.
         _pct = float(profit_pct) / 100.0 if profit_pct is not None else None
-        weight_engine.update(token, outcome, feature_scores, profit_pct=_pct)
+        # R4 + R7 fix: pass regime + snapshot=True so weight_history captures
+        # reward/gradient_l1/profit_pct/regime per OGD update (forensic queries
+        # no longer require fragile joins to the results table).
+        weight_engine.update(token, outcome, feature_scores,
+                             profit_pct=_pct, regime=regime, snapshot=True)
 
     except Exception as e:
         print(f"[ADAPTIVE] _trigger_weight_update #{sig_id}: {e}")

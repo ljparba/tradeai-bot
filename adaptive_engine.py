@@ -55,7 +55,13 @@ WEIGHT_MAX       = 0.50   # per-feature ceiling — no feature dominates complet
 # correctly defaults rather than feeding a marginal bootstrap into live scoring.
 DEGENERATE_THRESHOLD = 0.40
 MAX_WEIGHT_STEP  = 0.04   # Task 16: max velocity magnitude per update (hard cap)
-OGD_MIN_SAMPLES  = 10  # start OGD after 10 closed trades (~3-4 months at 34/year frequency)
+OGD_MIN_SAMPLES  = 10  # OGD reaches FULL learning rate at this sample count
+OGD_WARMUP_FLOOR = 3   # R2 fix (master audit 2026-05-26): below this, no update
+                       # fires; between WARMUP_FLOOR and MIN_SAMPLES the LR is
+                       # ramped linearly from 0 → full. Replaces the sharp
+                       # n=10 cliff (signals 1-9 contributed zero gradient,
+                       # signal 10 got full LR). Now gradient kicks in gently
+                       # at n=4, scales up to full at n=OGD_MIN_SAMPLES.
 
 # ── Sample-size utilities (Task 15) ──────────────────────
 def label_sample_size(n: int) -> str:
@@ -233,6 +239,20 @@ def _init_adaptive_tables():
     conn.execute("""DELETE FROM token_weights WHERE feature NOT IN
         ('fvg_quality','mss_quality','session','confidence','trend_strength','dr_location')""")
     conn.execute("DELETE FROM bot_state WHERE key='test_key'")
+    # R4 + R7 fixes (master audit 2026-05-26): add forensic + regime columns.
+    # ALTER IDEMPOTENTLY — IF NOT EXISTS clause via try/except for each new
+    # column so old DBs migrate forward without dropping data.
+    for _col, _ddl in (
+        ("reward",      "REAL"),           # R4: signed reward used in the OGD step
+        ("gradient_l1", "REAL"),           # R4: sum(|w_after - w_before|) across features
+        ("profit_pct",  "REAL"),           # R4: realised PnL fraction passed to update()
+        ("regime",      "TEXT"),           # R7: regime label at update time (observation-only)
+    ):
+        try:
+            conn.execute(f"ALTER TABLE weight_history ADD COLUMN {_col} {_ddl}")
+        except sqlite3.OperationalError:
+            # Column already exists — safe to ignore
+            pass
     conn.commit()
     conn.close()
 
@@ -358,7 +378,8 @@ class AdaptiveWeightEngine:
 
     def update(self, token: str, outcome: str,
                feature_scores: Dict[str, float], persist: bool = True,
-               profit_pct: float = None):
+               profit_pct: float = None, regime: str = None,
+               snapshot: bool = False):
         """
         Apply OGD update immediately on signal close.
 
@@ -367,9 +388,18 @@ class AdaptiveWeightEngine:
         profit_pct:     actual P&L % (signed; e.g. +0.015 = +1.5%, -0.012 = -1.2%).
                         When provided, reward is scaled proportionally to real P&L rather than
                         using discrete outcome buckets — larger wins earn more gradient signal.
+        regime:         R7 fix (master audit 2026-05-26) — observation-only regime label at
+                        update time (e.g. "TRENDING_BULL", "RANGING"). NOT used to condition
+                        learning — purely persisted to weight_history for future analysis.
+        snapshot:       R4 fix (master audit 2026-05-26) — when True, also write a
+                        weight_history row (trigger='signal_close') tagged with the reward /
+                        gradient_l1 / profit_pct / regime metadata for forensic queries.
+                        Default False to preserve back-compat — callers (crypto_alert.py
+                        _trigger_weight_update) opt in.
         """
         self._ensure_token(token)
         n = self._n.get(token, 0)
+        w_before_snapshot = dict(self._weights[token]) if snapshot else None
 
         _base_reward = {"WIN": +1.0, "PARTIAL_TP2": +0.6, "PARTIAL": +0.4, "PARTIAL_TP1": +0.4,
                         "LOSS": -1.0, "EXPIRED": -0.25}.get(outcome, 0.0)
@@ -406,14 +436,26 @@ class AdaptiveWeightEngine:
                 self._persist_token(token)
             return
 
-        # Only apply OGD after minimum sample threshold
-        if n < OGD_MIN_SAMPLES:
+        # R2 fix (master audit 2026-05-26): replace the sharp n=10 cliff with
+        # a linear ramp from OGD_WARMUP_FLOOR (n=3, ramp_scale=0) to
+        # OGD_MIN_SAMPLES (n=10, ramp_scale=1). Below WARMUP_FLOOR no update
+        # fires (need minimum data); within the ramp window, the LR is scaled
+        # to reflect partial confidence. Eliminates the discontinuity where
+        # signal 10 suddenly carries full gradient while signal 9 carried zero.
+        if n < OGD_WARMUP_FLOOR:
             self._n[token] = n + 1
             if persist:
                 self._persist_token(token)
-                print(f"[ADAPTIVE] {token} — accumulating samples ({n+1}/{OGD_MIN_SAMPLES}) "
-                      f"before OGD activates")
+                print(f"[ADAPTIVE] {token} — accumulating samples ({n+1}/{OGD_WARMUP_FLOOR}) "
+                      f"before OGD warmup activates")
             return
+        if n < OGD_MIN_SAMPLES:
+            # Soft warmup ramp: scale LR from 0 (at WARMUP_FLOOR) to 1 (at MIN_SAMPLES)
+            ramp_scale = (n - OGD_WARMUP_FLOOR) / max(1, OGD_MIN_SAMPLES - OGD_WARMUP_FLOOR)
+            print(f"[ADAPTIVE] {token} — warmup ramp n={n}/{OGD_MIN_SAMPLES} "
+                  f"lr_scale={ramp_scale:.2f} (OGD partially active)")
+        else:
+            ramp_scale = 1.0
 
         w     = self._weights[token]
         v     = self._velocity[token]
@@ -423,6 +465,8 @@ class AdaptiveWeightEngine:
         # LR = FLOOR + (INIT - FLOOR) / (1 + n / DECAY)
         _lr = LEARNING_RATE_FLOOR + (LEARNING_RATE_INIT - LEARNING_RATE_FLOOR) / (
             1.0 + n / max(LEARNING_RATE_DECAY, 1))
+        # R2: soft-ramp LR scaling during warmup window
+        _lr = _lr * ramp_scale
 
         for feat in FEATURES:
             score   = feature_scores.get(feat, 1.0 / len(FEATURES))
@@ -465,6 +509,19 @@ class AdaptiveWeightEngine:
                   f"reward={reward:+.2f} delta={total_delta:.4f} "
                   f"n={n+1}/{OGD_MIN_SAMPLES}+ n_eff={n_eff:.1f} "
                   f"| {change_str}")
+
+        # R4 + R7 fix: forensic snapshot to weight_history when caller opts in
+        # (live closes pass snapshot=True; bootstrap path uses _snapshot_weights
+        # directly with bootstrap_before/after triggers).
+        if snapshot:
+            self._snapshot_weights(
+                trigger="signal_close",
+                weights_before={token: w_before_snapshot} if w_before_snapshot else None,
+                reward=reward,
+                profit_pct=profit_pct,
+                regime=regime,
+                token_filter=token,
+            )
 
     # ── Persistence ──────────────────────────────────────
     def _persist_token(self, token: str):
@@ -830,7 +887,11 @@ class AdaptiveWeightEngine:
 
     # ── P1-5: weight snapshot helper ─────────────────────
     def _snapshot_weights(self, trigger: str, run_id: int = None,
-                          weights_before: "Dict[str, Dict[str, float]]" = None) -> None:
+                          weights_before: "Dict[str, Dict[str, float]]" = None,
+                          reward: float = None,
+                          profit_pct: float = None,
+                          regime: str = None,
+                          token_filter: str = None) -> None:
         """Write snapshot rows to weight_history for all loaded tokens.
 
         weights_before: optional mapping {token: {feature: weight}} representing
@@ -838,15 +899,36 @@ class AdaptiveWeightEngine:
             If omitted, the current in-memory weight is used for both columns
             (single-point snapshot — weight_before == weight_after).
             Must be passed for bootstrap_after so the before/after delta is meaningful.
+
+        reward / profit_pct: R4 fix (master audit 2026-05-26) — persisted to
+            weight_history per row. Enables forensic queries like "which OGD
+            update had the largest gradient impact?" without fragile joins to
+            the `results` table.
+
+        regime: R7 fix (master audit 2026-05-26) — observation-only regime
+            label captured at update time (e.g. "TRENDING_BULL", "RANGING").
+            NOT used to condition learning — pure data for future
+            regime-aware analysis (Phase D.x).
+
+        token_filter: when set, only writes rows for that single token
+            (used by per-signal `update()` to avoid persisting all tokens
+            on every close).
         """
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         try:
             conn = _connect()
             for token, w in self._weights.items():
+                if token_filter is not None and token != token_filter:
+                    continue
                 n        = self._n.get(token, 0)
                 # Resolve the "before" source: explicit dict > current in-memory weight
                 w_before = (weights_before.get(token, w)
                             if weights_before is not None else w)
+                # R4: per-update gradient_l1 = sum of |w_after - w_before|.
+                # Captures the magnitude of the actual learning step in a
+                # single scalar — easier to plot than 6-feature deltas.
+                gradient_l1 = sum(abs(w.get(f, 0.0) - w_before.get(f, 0.0))
+                                  for f in FEATURES)
                 for feat in FEATURES:
                     default  = DEFAULT_WEIGHTS.get(feat, 0.0)
                     before   = w_before.get(feat, default)
@@ -854,9 +936,11 @@ class AdaptiveWeightEngine:
                     conn.execute(
                         """INSERT INTO weight_history
                            (recorded_at, token, trigger, feature,
-                            weight_before, weight_after, n_updates, run_id)
-                           VALUES (?,?,?,?,?,?,?,?)""",
-                        (now, token, trigger, feat, before, after, n, run_id)
+                            weight_before, weight_after, n_updates, run_id,
+                            reward, gradient_l1, profit_pct, regime)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (now, token, trigger, feat, before, after, n, run_id,
+                         reward, gradient_l1, profit_pct, regime)
                     )
             conn.commit()
             conn.close()
