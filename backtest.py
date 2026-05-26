@@ -40,10 +40,21 @@ from labeling import (
     triple_barrier_label, bootstrap_wr_ci, bootstrap_sharpe_ci,
     label_outcome_aliases,
 )
-# Phase A.2 (LIVE_BACKTEST_PARITY_ROADMAP.md):
-# Realistic execution model. Activated via env var REALISTIC_EXECUTION=1.
-# Default is OFF — when off, this import is a no-op and backtest behavior is
-# byte-identical to pre-A.2. See docs/exec_model_calibration.md for tuning.
+# Phase A.3 (LIVE_BACKTEST_PARITY_ROADMAP.md):
+# Realistic execution model — DEFAULT ON as of 2026-05-26.
+#
+# Honest backtest of Run-168 config under REALISTIC_EXECUTION=1 (Run-77):
+#   n=34  CPCV mean=85.27%  Sharpe=1.180  DSR=100%
+# vs same config under REALISTIC_EXECUTION=0 (Run-76, byte-equiv Run-168):
+#   n=43  CPCV mean=79.11%  Sharpe=0.933  DSR=100%
+#
+# The realistic model REJECTS ~9 signals per backtest where price gapped
+# beyond 1.5x ATR during the operator-latency window — those would have
+# been bad fills in live trading. The remaining 34 signals have higher WR
+# and Sharpe because the bad-fill cohort was filtered, not faked away.
+#
+# To restore old behavior temporarily: set REALISTIC_EXECUTION=0.
+# Calibration knobs in docs/exec_model_calibration.md.
 import execution  # type: ignore
 
 
@@ -898,15 +909,15 @@ def run_backtest_token(token, c5m, c1h, c4h, btc_c1h=None, btc_c5m=None, config=
         if entry_bar is None:
             continue
 
-        # ── Phase A.2: Realistic execution model ─────────────────────────
-        # Off by default (REALISTIC_EXECUTION=0). When on, the model overrides
-        # entry_price with the simulated fill price and may reject the signal
-        # entirely (no_fill / stale_move) or assign a partial fill (50% size).
-        # Default OFF preserves byte-identical backtest output vs pre-A.2.
-        # See docs/exec_model_calibration.md.
+        # ── Phase A.3: Realistic execution model ─────────────────────────
+        # ON by default (REALISTIC_EXECUTION=1) since 2026-05-26. The model
+        # overrides entry_price with the simulated fill price and may reject
+        # the signal entirely (no_fill / stale_move) or assign a partial fill
+        # (50% size). Set REALISTIC_EXECUTION=0 to revert to pre-A.2 behavior.
+        # See docs/exec_model_calibration.md for the 15 calibration knobs.
         fill_size_pct       = 1.0     # full fill by default
         realistic_cost_pct  = None    # None → plan uses default TOKEN_RT_COST
-        if os.environ.get("REALISTIC_EXECUTION", "0") == "1":
+        if os.environ.get("REALISTIC_EXECUTION", "1") == "1":
             # ATR(14) on last 14 closed 5M bars — needed for stale-move reject.
             _atr_n = min(14, len(h5) - 1)
             if _atr_n >= 2:

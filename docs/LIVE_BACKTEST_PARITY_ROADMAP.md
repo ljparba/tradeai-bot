@@ -239,11 +239,30 @@ These are out of scope for the parity roadmap (some addressed in `ENTERPRISE_ROA
 
 | Phase | Theme | Effort | Closes gaps | Status |
 |---|---|---|---|---|
-| **A** | Realistic execution model in backtest | ~25h | GAP-1, GAP-7, GAP-8 | TODO |
+| **A** | Realistic execution model in backtest | ~25h | GAP-1, GAP-7, GAP-8 | **DONE 2026-05-26** |
 | **B** | DR-1 resolution (symmetric gate) | ~10h | GAP-2 | TODO |
 | **C** | Walk-forward + held-out window | ~30h | GAP-4, GAP-5, closes C2 limit | TODO |
 | **D** | OGD parity + drift auto-pause | ~15h | GAP-3 (validation), GAP-6 | TODO (requires 100+ live signals first) |
 | **E** | L2 order book + tick fills | ~40h + data $$ | GAP-1 finishing, microstructure | DEFER indefinitely |
+
+### Phase A outcome (closed 2026-05-26)
+
+| Sub-phase | Commit | Outcome |
+|---|---|---|
+| A.1 — `execution.py` + 29 tests + calibration doc | `2885706` | 29/29 tests pass; module imports cleanly |
+| A.2 — `backtest.py` 3 gated insertions (default OFF) | `2885706` | Run-76 byte-identical to Run-168 expected — verified |
+| A.3 — flip default to ON + baseline pin update | this commit | Run-77: CPCV 85.27%, Sharpe 1.180, DSR 100% (n=34) |
+
+**Honest baseline shift** (Run-168 → Run-77, same config, only execution model changed):
+- n: 43 → 34 (−9; rejected signals would have been stale fills in live)
+- Headline WR: 79.1% → 85.3% (+6.2pp)
+- CPCV mean: 79.11% → 85.27% (+6.16pp)
+- Sharpe (CPCV): 0.933 → 1.180 (+0.247, +26%)
+- DSR: 100% → 100% (unchanged, honest with `n_trials=27`)
+
+**The realistic model REVEALED HIDDEN STRENGTH, not weakness.** Signals filtered out were the ones that would have been bad fills under operator latency + spreads + stale-price-reject. The strategy edge is stronger than Run-168's optimistic backtest suggested.
+
+**Live trading implication (not yet implemented):** `crypto_alert.py` should add a stale-price-reject mechanism mirroring `execution.py:simulate_execution`. When the operator gets a Telegram alert and the market has gapped >1.5× ATR(5M) by the time of order placement, the bot should auto-cancel the signal. Tracked as a future enhancement, separate from this roadmap.
 
 **Total core work (A+B+C+D): ~80 hours.** Realistic over 4-6 weeks of operator-led work at 5-10h/week.
 

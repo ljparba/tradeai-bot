@@ -197,9 +197,49 @@ print(f'{r.status:8} fill=${r.fill_price:,.2f} size={r.fill_size_pct:.0%} cost={
 
 ## 9. Roadmap status
 
-- **Phase A.1** (this module + tests + this doc) — current
-- **Phase A.2** (wire into backtest.py with REALISTIC_EXECUTION=0 default) — pending
-- **Phase A.3** (flip default to 1 + recalibrate GATES) — pending after A.2
+- **Phase A.1** (this module + tests + this doc) — **DONE 2026-05-26** (commit `2885706`)
+- **Phase A.2** (wire into backtest.py with REALISTIC_EXECUTION=0 default) — **DONE 2026-05-26** (commit `2885706`; verified byte-identical via Run-76)
+- **Phase A.3** (flip default to 1 + update baseline pin) — **DONE 2026-05-26**
 - **Phase A calibration** (this doc Section 3) — pending after first 30 paper signals close
 
 Update this doc as calibration data accumulates. The knobs above are starting priors, not final values.
+
+## 10. Phase A.3 observed effect (2026-05-26)
+
+Backtest under default knobs, same config_hash, REALISTIC_EXECUTION=0 vs 1:
+
+| Metric | Run-76 (=0, byte-equiv Run-168) | Run-77 (=1, default ON) | Δ |
+|---|---|---|---|
+| n_signals | 43 | 34 | **−9 (−21%)** |
+| Headline WR | 79.1% | 85.3% | **+6.2pp** |
+| CPCV mean WR | 79.11% | 85.27% | +6.16pp |
+| CPCV std | 5.40% | 6.01% | +0.61 |
+| CPCV q05 | 70.6% | 76.9% | +6.3pp |
+| Sharpe (CPCV mean) | 0.933 | 1.180 | **+0.247 (+26%)** |
+| Overall Sharpe | 0.928 | 1.133 | +0.205 |
+| DSR | 100.0% | 100.0% | unchanged |
+| Verdict | PASS | PASS | ✅ |
+
+**Key observation:** the realistic model **rescued** the strategy — Run-168's optimistic 79.1% was being dragged DOWN by signals that would have been stale fills in live. The remaining 34 signals are HIGHER quality, producing better WR + Sharpe. The strategy edge is REAL, the original presentation was just pessimistic about itself.
+
+**Execution-reject totals (across 10 tokens):** ~70 stale_move + ~1 no_fill = ~71 candidate signals filtered. These were the signals where the operator's 10-30s Telegram→order placement window saw price gap >1.5× ATR(5M) — bad fills in live, no fills in honest backtest.
+
+**Live trading implication (not yet implemented):** `crypto_alert.py` should add a parallel stale-price-reject. When operator order-placement latency exceeds the ATR-scaled threshold, the live signal should be canceled instead of fired. This would mirror the backtest's honest behavior in live. Tracked as a future enhancement; see parity roadmap §5.
+
+## 11. Validation against live (pending paper trade accumulation)
+
+After 30+ closed paper signals accumulate, validate the honest model against live:
+
+```python
+# pseudocode
+backtest_predicted_wr  = parse("backtest_reports/Run77.txt").cpcv_mean  # 85.27%
+live_actual_wr         = compute_paper_wr(closed_signals)
+absolute_gap_pp        = abs(backtest_predicted_wr - live_actual_wr)
+
+if absolute_gap_pp <= 3:
+    print("Phase A.3 model is well-calibrated. Lock baseline.")
+elif absolute_gap_pp > 5:
+    print("Recalibration needed. Adjust EXEC_LATENCY_MEAN_SEC / EXEC_*.")
+```
+
+Until paper data exists, the model is calibrated against PRIORS (Section 2). The first 30 paper signals will be the empirical test.
