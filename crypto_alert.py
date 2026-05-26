@@ -2448,10 +2448,12 @@ def generate_signal(token, price, change_24h, volume_24h):  # noqa: C901
         _fvg_mid  = (fvg["top"] + fvg["bottom"]) / 2
         _ifvg_spatially_valid = abs(_ifvg_mid - _fvg_mid) / max(_fvg_mid, 1e-10) <= ICT_IFVG_PROXIMITY_PCT
     ifvg_bonus   = +1 if _ifvg_spatially_valid else 0  # Run 44: IFVG=YES 60.5% WR — spatial gate added
-    # SMT confirmed signals are anti-predictive (Run 41: 34.1% vs 40.7%; Run 42: 26.8% vs 66.7%)
-    # C-E (audit 2026-05-25): flipped from penalty to bonus. Strategy templates
-    # already award +0.10 SMT_bonus per Run #85 finding. Confidence integer path
-    # was missed in Fix #31. See CROSS_REF.md TPL-SMT (PARTIAL FIX → resolved).
+    # SMT bonus (C-E fix, cycle-2 audit 2026-05-25): per Run #85, SMT-confirmed
+    # signals are +12pp predictive. Strategy templates award +0.10 SMT_bonus
+    # in all three tiers; confidence-integer path here adds +1 so both
+    # scoring layers agree. M-G (cycle-4 audit 2026-05-26): removed stale
+    # "anti-predictive" Run-41/42 commentary that contradicted the C-E flip.
+    # See CROSS_REF.md TPL-SMT / C-E for the verification trail.
     smt_bonus    = +1 if smt_result.get("smt_confirmed") else 0
     # OGD-weighted quality score — 5 structural features (confidence excluded to avoid circularity)
     _cur_session = _utc_to_session(datetime.now(timezone.utc).hour)

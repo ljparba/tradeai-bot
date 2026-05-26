@@ -264,6 +264,14 @@ class AdaptiveWeightEngine:
         self._weights:          Dict[str, Dict[str, float]] = {}
         self._velocity:         Dict[str, Dict[str, float]] = {}
         self._n:                Dict[str, int]               = {}  # closed-signal count per token
+        # OGD-PHASEA (cycle-4 audit 2026-05-26): track effective sample count
+        # alongside raw n. Each update contributes |reward| ∈ [0, 1] to
+        # n_effective. Phase A's stale-reject raised PARTIAL_TP1 share from
+        # 18.6% → 28.6%; each PARTIAL contributes 0.4 vs WIN's 1.0 to the
+        # gradient. n_effective < raw_n at PARTIAL-heavy distributions —
+        # exposed for operator visibility + future gating refinement.
+        # In-memory only (no schema change); logged each OGD update.
+        self._n_effective:      Dict[str, float]             = {}
         self._last_update_time: Dict[str, float]             = {}  # epoch of last OGD update
         _init_adaptive_tables()
         self._load_all()
@@ -280,6 +288,7 @@ class AdaptiveWeightEngine:
             self._weights[token]          = self._default_weights()
             self._velocity[token]         = self._default_velocity()
             self._n[token]                = 0
+            self._n_effective[token]      = 0.0
             self._last_update_time[token] = 0.0
 
     def _load_all(self):
@@ -421,17 +430,25 @@ class AdaptiveWeightEngine:
         self._weights[token]  = w
         self._velocity[token] = v
         self._n[token]        = n + 1
+        # OGD-PHASEA fix: accumulate |reward| / 1.0 as effective sample
+        # weight (capped at 1.0). At PARTIAL-heavy distributions the
+        # gradient signal is weaker per update; this exposes the gap
+        # between raw count and effective contribution.
+        self._n_effective[token] = self._n_effective.get(token, 0.0) + min(1.0, abs(reward))
 
         if persist:
             self._persist_token(token)
 
-        # Task 16: detailed per-update log — old->new weight, delta, sample size
+        # Task 16: detailed per-update log — old->new weight, delta, sample size.
+        # OGD-PHASEA: log shows raw n + effective n so operator can see the gap.
         if persist:  # suppress per-update log during batch bootstrap
             changed = [(f, w_old[f], w[f]) for f in FEATURES if abs(w[f] - w_old[f]) > 0.001]
             change_str = "  ".join(f"{f}:{wo:.3f}->{wn:.3f}" for f, wo, wn in changed) or "no change"
             total_delta = sum(abs(w[f] - w_old[f]) for f in FEATURES)
+            n_eff = self._n_effective.get(token, 0.0)
             print(f"[ADAPTIVE] {token} OGD #{n+1} outcome={outcome} "
-                  f"reward={reward:+.2f} delta={total_delta:.4f} n={n+1}/{OGD_MIN_SAMPLES}+ "
+                  f"reward={reward:+.2f} delta={total_delta:.4f} "
+                  f"n={n+1}/{OGD_MIN_SAMPLES}+ n_eff={n_eff:.1f} "
                   f"| {change_str}")
 
     # ── Persistence ──────────────────────────────────────
@@ -662,6 +679,20 @@ class AdaptiveWeightEngine:
             print(f"[ADAPTIVE] bootstrap persist to backtest_token_weights error: {e}")
 
         self._snapshot_weights(trigger="bootstrap_after", run_id=run_id)
+
+        # M-I fix (cycle-4 audit 2026-05-26): seed _last_update_time for every
+        # token that received a non-default bootstrap weight. Without this,
+        # newly-bootstrapped tokens with _last_update_time=0 cause the 7-day
+        # decay-suppression guard at line 722 (`_time.time() - last < 7*86400`)
+        # to read effectively "never updated" → guard is inactive from minute
+        # one, so bootstrap weights silently decay every cycle until the first
+        # live close. Now seeded to bootstrap time so the 7-day guard activates
+        # from the moment bootstrap completes.
+        _bootstrap_now = datetime.now(timezone.utc).timestamp()
+        for _seed_tok in scratch_w.keys():
+            # Skip tokens that were thinned (n=0) — they aren't truly bootstrapped.
+            if scratch_n.get(_seed_tok, 0) > 0:
+                self._last_update_time[_seed_tok] = _bootstrap_now
 
         if _rejected_tokens:
             print(f"[ADAPTIVE] bootstrap degenerate-reject summary: "

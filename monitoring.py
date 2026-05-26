@@ -174,6 +174,16 @@ def _fetch_recent_history(db_path: str, token: str, limit: int
 
     Returns list of (recorded_at, {feature: weight_after}) sorted oldest-first.
     Rows from the same recorded_at are grouped together (one row per feature).
+
+    M-F fix (cycle-4 audit 2026-05-26): grouping key is now (recorded_at,
+    trigger) so the bootstrap-before/bootstrap-after pair (same second-
+    resolution timestamp, different triggers) doesn't collapse into one
+    snapshot. Previously the second trigger's features overwrote the
+    first, AND the effective lookback was halved because each "snapshot"
+    consumed two trigger rows in the LIMIT cap. The drift detector now
+    sees the intended `ENTROPY_DRIFT_LOOKBACK` distinct snapshots, and
+    `bootstrap_after` rows compare honestly against earlier OOS-only
+    snapshots without being masked by their own `bootstrap_before` row.
     """
     try:
         conn = _connect_ro(db_path)
@@ -181,24 +191,27 @@ def _fetch_recent_history(db_path: str, token: str, limit: int
         return []
     try:
         rows = conn.execute(
-            """SELECT recorded_at, feature, weight_after FROM weight_history
+            """SELECT recorded_at, trigger, feature, weight_after FROM weight_history
                WHERE token = ?
                ORDER BY id DESC
                LIMIT ?""",
-            (token, limit * len(FEATURES)),
+            (token, limit * len(FEATURES) * 2),  # 2× to allow both triggers per ts
         ).fetchall()
     except sqlite3.Error:
         rows = []
     conn.close()
 
-    # Group by recorded_at; preserve order (newest first), reverse at end.
+    # Group by (recorded_at, trigger); preserve order (newest first), reverse at end.
     grouped: List[Tuple[str, Dict[str, float]]] = []
+    current_key: Optional[Tuple[str, str]] = None
     current_ts: Optional[str] = None
     current_map: Dict[str, float] = {}
-    for recorded_at, feat, weight_after in rows:
-        if recorded_at != current_ts:
+    for recorded_at, trigger, feat, weight_after in rows:
+        key = (recorded_at, trigger or "")
+        if key != current_key:
             if current_ts is not None and current_map:
                 grouped.append((current_ts, current_map))
+            current_key = key
             current_ts = recorded_at
             current_map = {}
         if feat in FEATURES:
@@ -233,8 +246,13 @@ def compute_entropy(weights: Dict[str, float]) -> float:
 def detect_pinning(weights: Dict[str, float],
                    min_w: float = WEIGHT_MIN,
                    max_w: float = WEIGHT_MAX,
-                   tol: float = 1e-4) -> List[str]:
-    """Return features pinned at WEIGHT_MIN or WEIGHT_MAX (within tol)."""
+                   tol: float = 0.015) -> List[str]:
+    """Return features pinned at WEIGHT_MIN or WEIGHT_MAX (within tol).
+
+    M-D fix (cycle-4 audit 2026-05-26): tolerance raised from 1e-4 to 0.015
+    so renormalized floors (~0.042-0.053 observed in the bootstrap pool)
+    are correctly flagged. Previous 1e-4 only caught exact-floor pins.
+    """
     pinned: List[str] = []
     for feat, val in weights.items():
         if abs(val - min_w) <= tol or abs(val - max_w) <= tol:
@@ -244,12 +262,16 @@ def detect_pinning(weights: Dict[str, float],
 
 def count_floor_pins(weights: Dict[str, float],
                      min_w: float = WEIGHT_MIN,
-                     tol: float = 1e-4) -> int:
+                     tol: float = 0.015) -> int:
     """Count features pinned at WEIGHT_MIN floor (per ogd-weight-inspector recommendation).
 
     The Run-46 degeneracy fingerprint is N-1 features at the floor with mass
     concentrated in the remaining one. is_degenerate catches the dominant
     feature; this catches the symmetric "floor saturation" signature directly.
+
+    M-D fix (cycle-4 audit 2026-05-26): tolerance raised from 1e-4 to 0.015
+    to match the renormalization noise floor (~0.042-0.053) observed in the
+    bootstrap pool.
     """
     return sum(1 for v in weights.values() if abs(v - min_w) <= tol)
 

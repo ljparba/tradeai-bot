@@ -3281,12 +3281,18 @@ def main():
     print(f"[REPORT] Saved → backtest_reports/{_rpt_name}")
 
     # Bootstrap OGD warm-start weights from ALL historical backtest signals.
-    # run_id=None uses the full backtest_signals history (~43k rows) giving
-    # meaningful per-token priors (H6 fix isolates scoring from bootstrap — no contamination).
-    # Single-run bootstrap (~38 signals / ≤10 per token) produces near-default weights.
+    # M-E fix (cycle-4 audit 2026-05-26): pass `run_id` (the CURRENT backtest
+    # run we just saved) so the weight_history rows written by
+    # `_snapshot_weights(trigger="bootstrap_before/after", run_id=...)` are
+    # properly attributed. Previously called with run_id=None, leaving every
+    # historical weight_history row's run_id as NULL — forensic queries
+    # like "which Run-XYZ caused this dr_location collapse?" were impossible
+    # (audit found 9,240/9,240 rows with NULL run_id).
+    # The underlying bootstrap still samples from the full history pool;
+    # the run_id only tags the snapshot rows for audit attribution.
     if run_id:
         print(f"\n[ADAPTIVE] Bootstrapping weights from full backtest history (current run #{run_id} included)...")
-        weight_engine.bootstrap_from_backtest(run_id=None, verbose=True)
+        weight_engine.bootstrap_from_backtest(run_id=run_id, verbose=True)
 
     with open(OUTPUT_FILE, "w") as f:
         json.dump(all_signals, f, indent=2)
