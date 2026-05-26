@@ -3377,7 +3377,7 @@ async function loadBacktest(){
         +'<td class="mono" style="color:var(--muted)">'+d.expired+'</td>'
         +'<td><div class="wr-bar-wrap"><div class="wr-mini-bar"><div class="wr-mini-fill" style="width:'+d.wr+'%;background:'+wc+'"></div></div>'
         +'<span class="mono" style="font-size:.78rem">'+d.wr+'%</span></div></td>'
-        +'<td class="mono">1:'+d.avg_rr+'</td>'
+        +'<td class="mono">1:'+(d.avg_net_rr!=null?d.avg_net_rr:'—')+'</td>'
         +'<td class="mono">'+d.avg_conf+'</td></tr>';
     }).join(''):'<tr><td colspan="9" class="empty">No data</td></tr>';
 
