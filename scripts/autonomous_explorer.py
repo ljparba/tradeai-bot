@@ -48,6 +48,7 @@ import argparse
 import hashlib
 import html
 import json
+import math
 import os
 import re
 import signal
@@ -134,6 +135,24 @@ GATES = {
     "cpcv_q05_min_pct":  _env_float("EXPLORER_Q05_MIN",   50.0),  # >= worst-fold WR %
     "dsr_min_pct":       _env_float("EXPLORER_DSR_MIN",   95.0),  # >= Deflated Sharpe %
 }
+
+# Signal-count bonus for Optuna's objective function (cycle-7 audit fix
+# 2026-05-27): previously the objective returned `cpcv_mean` alone, so
+# Optuna actively converged AWAY from high-frequency configs (they hurt
+# WR). With LIVE clearance gated on 30 closed paper signals — and at the
+# current ~2.88 signals/month rate, ~10 months to gate — the operator's
+# real goal is "more signals at acceptable WR", not "max WR".
+#
+# Fix: add `alpha * log(n)` to the objective. Bigger alpha => Optuna
+# prefers high-n configs more aggressively even when WR drops slightly.
+# alpha=0 reverts to pure-WR optimization (legacy behavior).
+#
+# Calibration table (vs Run-81 baseline n=35, WR=70):
+#   alpha=0.0  →  Optuna ignores n, picks max WR (legacy)
+#   alpha=2.0  →  n=80 acceptable down to WR≈68.4%, n=120 to WR≈67.5%
+#   alpha=5.0  →  n=80 acceptable down to WR≈65.9%, n=120 to WR≈63.8%
+#   alpha=10.0 →  aggressive — n=120 acceptable down to WR≈57.7%
+N_BONUS_ALPHA = _env_float("EXPLORER_N_BONUS_ALPHA", 2.0)
 
 ANTI_PATTERN_LOCKS = {
     "ICT_SWING_N":      2,    # 3+ proven net-negative (Cycle 1b P-1 + 1c TP-5c')
@@ -998,10 +1017,24 @@ def _objective_factory(study_name: str, guard: _GuardState, sess: dict):
             )
             raise optuna.exceptions.TrialPruned()
 
+        # Signal-count bonus (cycle-7 audit 2026-05-27): see N_BONUS_ALPHA
+        # comment at module level for calibration rationale. log(max(1,n))
+        # so n=0 → bonus=0; n grows as log so the marginal reward of going
+        # from 100→200 is smaller than 30→60, preventing runaway frequency
+        # chasing at the cost of WR collapse.
+        _n_obs = m.get("n") if m and m.get("n") is not None else 0
+        _n_bonus = N_BONUS_ALPHA * math.log(max(1, _n_obs))
+
         if verdict == "PASS":
-            return float(m["cpcv_mean"])
+            _score = float(m["cpcv_mean"]) + _n_bonus
+            print(f"[explorer] objective: PASS score={_score:.2f} "
+                  f"(cpcv_mean={m['cpcv_mean']:.2f} + n_bonus={_n_bonus:.2f} @ n={_n_obs})")
+            return _score
         if m.get("cpcv_mean") is not None:
-            return float(m["cpcv_mean"]) - 30.0
+            _score = float(m["cpcv_mean"]) - 30.0 + _n_bonus
+            print(f"[explorer] objective: FAIL score={_score:.2f} "
+                  f"(cpcv_mean={m['cpcv_mean']:.2f} - 30.0 + n_bonus={_n_bonus:.2f} @ n={_n_obs})")
+            return _score
         return 0.0
     return _objective
 
