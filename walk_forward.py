@@ -450,3 +450,301 @@ def held_out_text_report(
         lines.append("  *** OVERFIT *** baseline may not generalize. Operator review required.")
     lines.append("-----------------------------------------------------------------")
     return "\n".join(lines)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Dual-track Phase D.1 (2026-05-26): WFV with adaptive OGD weights
+#
+# The H6 isolation in backtest scoring is correct for CPCV validity (model
+# parameters must be independent of test data when k-fold combinatorial splits
+# break chronology). But it creates a known unquantified divergence between
+# backtest WR (default weights) and live WR (learned weights).
+#
+# The literature-supported answer: do BOTH validation tracks in parallel.
+#   - CPCV with defaults (validation.py) — selection-bias correction, DSR
+#   - WFV with online OGD (this function) — live-parity expected performance
+#
+# This function processes signals chronologically, applying OGD weight updates
+# as each signal closes. For each signal, it captures:
+#   - default_score: weighted sum with AE_DEFAULT_WEIGHTS (what backtest used)
+#   - ogd_score:     weighted sum with current learned weights (what live computes)
+# Aggregated into parity metrics + per-window WR.
+#
+# Uses a sandboxed AdaptiveWeightEngine instance (persist=False on every update,
+# weights wiped to defaults at start) — does NOT touch live token_weights.
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _sandboxed_adaptive_engine():
+    """Return an AdaptiveWeightEngine with fresh in-memory state.
+
+    Loads the engine (which initializes tables + reads live state into memory)
+    then clears every dict so the simulation starts from defaults. All update()
+    calls in walk_forward_with_ogd() pass persist=False, so live DB rows are
+    never modified. The returned engine is throwaway — caller does not need to
+    close it.
+    """
+    from adaptive_engine import AdaptiveWeightEngine
+    eng = AdaptiveWeightEngine()
+    eng._weights.clear()
+    eng._velocity.clear()
+    eng._n.clear()
+    eng._n_effective.clear()
+    eng._last_update_time.clear()
+    return eng
+
+
+def _safe_corr(xs: Sequence[float], ys: Sequence[float]) -> float:
+    """Pearson correlation; returns 0.0 on degenerate input."""
+    n = len(xs)
+    if n < 2 or n != len(ys):
+        return 0.0
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    num = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    den_x = sum((x - mx) ** 2 for x in xs)
+    den_y = sum((y - my) ** 2 for y in ys)
+    den = (den_x * den_y) ** 0.5
+    return num / den if den > 0 else 0.0
+
+
+def walk_forward_with_ogd(
+    signals: Sequence[dict],
+    *,
+    n_windows: int = 12,
+    min_train_signals: int = 10,
+    is_win_func: Callable[[dict], bool] = _default_is_win,
+    score_func: Callable[[dict], float] = _default_win_score,
+) -> Dict[str, Any]:
+    """Sequential WFV with adaptive OGD scoring — live-parity track.
+
+    Mirrors live's online learning: weights start at defaults, get updated
+    chronologically as each signal closes. For each signal, captures both
+    the default-weights score (matches backtest's H6-isolated scoring) and
+    the OGD-weights score (matches what live would have computed at that
+    point in time).
+
+    Returns dict with:
+      n_signals               int
+      n_windows               echoed
+      windows                 per-window {idx, n_train, n_test, test_wr}
+      wfv_ogd_wr_mean         mean test WR across valid windows
+      wfv_ogd_wr_std          sample std
+      n_valid_windows         windows with train >= min_train_signals
+      mean_score_delta        mean(ogd_score - default_score) — sign + drift
+      abs_mean_score_delta    mean(|ogd_score - default_score|) — magnitude
+      corr_ogd_outcome        Pearson correlation between ogd_score and win-weight
+      corr_default_outcome    same for default_score (baseline for comparison)
+      top_decile_wr           WR of top-10% signals ranked by ogd_score
+      bottom_decile_wr        WR of bottom-10% signals ranked by ogd_score
+      top_decile_lift         top - bottom (the OGD discrimination metric)
+      parity_verdict          STRONG_LIFT | WEAK_LIFT | INVERTED | INSUFFICIENT_SAMPLE
+    """
+    # Defer heavy imports — keeps walk_forward.py importable even on installs
+    # that don't have adaptive_engine wired (e.g. minimal CI environments).
+    from adaptive_engine import DEFAULT_WEIGHTS, FEATURES, extract_ict_feature_scores
+    import json as _json
+
+    n = len(signals)
+    out: Dict[str, Any] = {
+        "n_signals":            n,
+        "n_windows":            n_windows,
+        "windows":              [],
+        "wfv_ogd_wr_mean":      0.0,
+        "wfv_ogd_wr_std":       0.0,
+        "n_valid_windows":      0,
+        "mean_score_delta":     0.0,
+        "abs_mean_score_delta": 0.0,
+        "corr_ogd_outcome":     0.0,
+        "corr_default_outcome": 0.0,
+        "top_decile_wr":        0.0,
+        "bottom_decile_wr":     0.0,
+        "top_decile_lift":      0.0,
+        "parity_verdict":       "INSUFFICIENT_SAMPLE",
+    }
+    if n == 0 or n_windows < 2:
+        return out
+
+    sorted_sigs = sorted(signals, key=lambda s: _ts_to_epoch(s.get("ts", "")))
+    t_eps = [_ts_to_epoch(s.get("ts", "")) for s in sorted_sigs]
+    t_start, t_end = t_eps[0], t_eps[-1]
+    if t_end <= t_start:
+        return out
+    window_secs = (t_end - t_start) / n_windows
+
+    eng = _sandboxed_adaptive_engine()
+    _VALID_OUTCOMES = {"WIN", "PARTIAL_TP1", "PARTIAL_TP2", "PARTIAL", "LOSS", "EXPIRED"}
+
+    enriched: List[dict] = []
+    for sig in sorted_sigs:
+        token = sig.get("token", "")
+        # Feature scores: prefer `feature_scores_json` if the signal carries
+        # it (live signals do); otherwise derive on-the-fly from the standard
+        # ICT-related fields the backtest signal dict already carries. Both
+        # paths route through extract_ict_feature_scores() for parity.
+        feat_raw = sig.get("feature_scores_json", "")
+        if isinstance(feat_raw, str) and feat_raw:
+            try:
+                feat_all = _json.loads(feat_raw)
+            except Exception:
+                feat_all = {}
+        elif isinstance(feat_raw, dict):
+            feat_all = feat_raw
+        else:
+            feat_all = {}
+
+        if feat_all and any(k in feat_all for k in FEATURES):
+            # Use stored feature scores (live signals path)
+            feat = {f: float(feat_all.get(f, 0.0) or 0.0) for f in FEATURES}
+        else:
+            # Backtest path: derive feature scores from the signal's existing
+            # ICT fields. `dr4h_location` is the backtest column name;
+            # `dr_location` is the live name. Accept either.
+            _dr_loc = sig.get("dr_location") or sig.get("dr4h_location") or "UNKNOWN"
+            try:
+                feat = extract_ict_feature_scores(
+                    signal=sig.get("signal", "BUY"),
+                    fvg_quality=sig.get("fvg_quality", "NONE"),
+                    mss_quality=sig.get("mss_quality", "NONE"),
+                    session=sig.get("session", "OVERNIGHT"),
+                    confidence=int(sig.get("confidence", 5) or 5),
+                    trend_1h=sig.get("trend_1h", "NEUTRAL"),
+                    dr_location=_dr_loc,
+                )
+                # extract_ict_feature_scores returns a dict that already
+                # matches FEATURES — filter defensively.
+                feat = {f: float(feat.get(f, 0.0) or 0.0) for f in FEATURES}
+            except Exception:
+                # Last-resort: uniform contribution = 1/n_features each
+                feat = {f: 1.0 / len(FEATURES) for f in FEATURES}
+
+        # Scores at this exact point in chronological time
+        default_score = sum(DEFAULT_WEIGHTS.get(f, 0.0) * feat[f] for f in FEATURES)
+        current_w = eng.get_weights(token)
+        ogd_score = sum(current_w.get(f, 0.0) * feat[f] for f in FEATURES)
+
+        outcome = sig.get("outcome", "")
+        # Apply OGD update with this signal's outcome (sandboxed — no DB write)
+        if outcome in _VALID_OUTCOMES:
+            try:
+                eng.update(token, outcome, feat, persist=False, profit_pct=None)
+            except Exception:
+                pass  # never block simulation on engine error
+
+        enriched.append({
+            "ts":            sig.get("ts"),
+            "token":         token,
+            "outcome":       outcome,
+            "default_score": default_score,
+            "ogd_score":     ogd_score,
+            "score_delta":   ogd_score - default_score,
+            "win_weight":    score_func(sig),
+        })
+
+    # ── Aggregate parity metrics ─────────────────────────────────────────────
+    score_deltas = [e["score_delta"] for e in enriched]
+    out["mean_score_delta"] = sum(score_deltas) / n
+    out["abs_mean_score_delta"] = sum(abs(d) for d in score_deltas) / n
+
+    ogd_scores      = [e["ogd_score"]     for e in enriched]
+    default_scores  = [e["default_score"] for e in enriched]
+    win_weights     = [e["win_weight"]    for e in enriched]
+    out["corr_ogd_outcome"]     = _safe_corr(ogd_scores, win_weights)
+    out["corr_default_outcome"] = _safe_corr(default_scores, win_weights)
+
+    # Decile WR analysis (the discrimination test)
+    sorted_by_ogd = sorted(enriched, key=lambda e: e["ogd_score"], reverse=True)
+    decile_n = max(1, n // 10)
+    out["top_decile_wr"] = (
+        sum(e["win_weight"] for e in sorted_by_ogd[:decile_n]) / decile_n * 100.0
+    )
+    out["bottom_decile_wr"] = (
+        sum(e["win_weight"] for e in sorted_by_ogd[-decile_n:]) / decile_n * 100.0
+    )
+    out["top_decile_lift"] = out["top_decile_wr"] - out["bottom_decile_wr"]
+
+    # ── Per-window WFV WR (using chronological partition) ────────────────────
+    valid_test_wrs: List[float] = []
+    for i in range(1, n_windows):
+        t_split = t_start + i * window_secs
+        t_test_end = t_start + (i + 1) * window_secs
+        train_e = [e for e, ts in zip(enriched, t_eps) if ts < t_split]
+        test_e  = [e for e, ts in zip(enriched, t_eps) if t_split <= ts < t_test_end]
+        n_train = len(train_e)
+        n_test  = len(test_e)
+        insufficient = n_train < min_train_signals or n_test == 0
+        if not insufficient:
+            test_wr = sum(e["win_weight"] for e in test_e) / n_test * 100.0
+            out["windows"].append({
+                "idx": i, "n_train": n_train, "n_test": n_test, "test_wr": test_wr,
+            })
+            valid_test_wrs.append(test_wr)
+
+    out["n_valid_windows"] = len(valid_test_wrs)
+    if valid_test_wrs:
+        out["wfv_ogd_wr_mean"] = sum(valid_test_wrs) / len(valid_test_wrs)
+        out["wfv_ogd_wr_std"]  = _safe_std(valid_test_wrs)
+
+    # ── Parity verdict ───────────────────────────────────────────────────────
+    if n < 10:
+        out["parity_verdict"] = "INSUFFICIENT_SAMPLE"
+    elif out["top_decile_lift"] >= 15.0:
+        out["parity_verdict"] = "STRONG_LIFT"
+    elif out["top_decile_lift"] >= 5.0:
+        out["parity_verdict"] = "WEAK_LIFT"
+    elif out["top_decile_lift"] <= -10.0:
+        out["parity_verdict"] = "INVERTED"
+    else:
+        out["parity_verdict"] = "NEUTRAL"
+    return out
+
+
+def walk_forward_ogd_text_report(wf_ogd: Dict[str, Any]) -> str:
+    """Compact human-readable WFV-with-OGD report block."""
+    lines = []
+    lines.append("-----------------------------------------------------------------")
+    lines.append("  WFV WITH ADAPTIVE OGD WEIGHTS (Phase D.1 — live-parity track)")
+    lines.append("-----------------------------------------------------------------")
+    lines.append(f"  n_signals              = {wf_ogd.get('n_signals', 0)}")
+    lines.append(f"  n_valid_windows        = {wf_ogd.get('n_valid_windows', 0)}")
+    lines.append(f"  WFV-OGD WR (mean)      = {wf_ogd.get('wfv_ogd_wr_mean', 0):.2f}%  "
+                 f"std={wf_ogd.get('wfv_ogd_wr_std', 0):.2f}%")
+    lines.append("")
+    lines.append("  Scoring parity (default vs learned OGD):")
+    lines.append(f"    mean(ogd_score - default_score)   = "
+                 f"{wf_ogd.get('mean_score_delta', 0):+.4f}")
+    lines.append(f"    mean(|ogd_score - default_score|) = "
+                 f"{wf_ogd.get('abs_mean_score_delta', 0):.4f}")
+    lines.append(f"    corr(ogd_score,     outcome)      = "
+                 f"{wf_ogd.get('corr_ogd_outcome', 0):+.3f}")
+    lines.append(f"    corr(default_score, outcome)      = "
+                 f"{wf_ogd.get('corr_default_outcome', 0):+.3f}")
+    lines.append(f"    top-decile WR  (by ogd_score)     = "
+                 f"{wf_ogd.get('top_decile_wr', 0):.2f}%")
+    lines.append(f"    bottom-decile WR (by ogd_score)   = "
+                 f"{wf_ogd.get('bottom_decile_wr', 0):.2f}%")
+    lines.append(f"    OGD lift (top - bottom)           = "
+                 f"{wf_ogd.get('top_decile_lift', 0):+.2f} pp")
+    lines.append("")
+    verdict = wf_ogd.get("parity_verdict", "?")
+    lines.append(f"  PARITY VERDICT: {verdict}")
+    if verdict == "STRONG_LIFT":
+        lines.append("    OGD scoring CORRECTLY ranks winners over losers (>=15pp lift).")
+        lines.append("    Live should outperform backtest's default-weights estimate as")
+        lines.append("    weights converge — H6 isolation is creating a real gap.")
+    elif verdict == "WEAK_LIFT":
+        lines.append("    OGD scoring shows modest lift (5-15pp). Live performance should")
+        lines.append("    track default-weights backtest closely with minor positive bias.")
+    elif verdict == "NEUTRAL":
+        lines.append("    OGD scoring lift is in the noise band (<5pp). Live performance")
+        lines.append("    should closely match default-weights backtest — H6 isolation")
+        lines.append("    has minimal practical impact at this sample size.")
+    elif verdict == "INVERTED":
+        lines.append("    *** INVERTED *** top-scored signals lose more than bottom-scored.")
+        lines.append("    Either OGD has degenerated, sample is noise-dominated, or the")
+        lines.append("    feature-set anti-correlates with outcomes. Investigate.")
+    elif verdict == "INSUFFICIENT_SAMPLE":
+        lines.append("    Sample too small (n<10) for meaningful OGD scoring verdict.")
+        lines.append("    Re-run after more signals accumulate.")
+    lines.append("-----------------------------------------------------------------")
+    return "\n".join(lines)

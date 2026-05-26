@@ -3325,6 +3325,20 @@ def main():
         print(f"[WARN] This usually means walk_forward.py is missing/broken. "
               f"Lockbox and decay-detection reports are NOT being produced.")
 
+    # Phase D.1 dual-track (2026-05-26): WFV with adaptive OGD weights.
+    # Complements the CPCV+default + WFV+default tracks above by simulating
+    # live's online weight learning chronologically. Closes the H6 isolation
+    # quantification gap — operator gets a live-parity estimate alongside the
+    # CPCV statistical validity report.
+    try:
+        from walk_forward import walk_forward_with_ogd, walk_forward_ogd_text_report
+        _wfv_ogd_input = _tune_sigs if HELD_OUT_DAYS > 0 else list(all_signals)
+        _wfv_ogd = walk_forward_with_ogd(_wfv_ogd_input, n_windows=12, min_train_signals=10)
+        print("\n" + walk_forward_ogd_text_report(_wfv_ogd))
+    except Exception as _ogd_exc:
+        print(f"\n[WARN] Phase D.1 WFV-OGD SKIPPED — "
+              f"{type(_ogd_exc).__name__}: {_ogd_exc}")
+
     tmpl_report    = template_comparison_report(all_signals)
     print_template_report(tmpl_report)
     _tmpl_out_dir  = os.path.join(_ROOT, "docs", "ict_strategy_variant_learner")

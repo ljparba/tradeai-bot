@@ -37,7 +37,7 @@ This roadmap is **focused on parity only**. For broader scope:
 - **C4** (regime ADX static vs DriftDetector) → Phase D
 - **C-N3** (cooldown anchor live vs backtest) → known minor, accepted
 - **DR-1** (DEALING_RANGE_GATE divergence) → Phase B → REVERTED 2026-05-26 (Option B.3) — see Phase B revert block below
-- **H6** (OGD weight isolation in backtest) → Phase D
+- **H6** (OGD weight isolation in backtest) → Phase D.1 → **PARTIAL DONE 2026-05-26** (dual-track WFV-with-OGD shipped; runtime quantification replaces deferred 6-month wait)
 
 ---
 
@@ -102,7 +102,7 @@ The work `live-backtest-consistency-checker` validates at 10/10 score:
 |---|---|---|---|---|---|
 | GAP-1 | Execution model | Real latency 10-30s + spreads + partial fills | Instant fill at signal price, flat 30bps cost | Standard retail backtest convention; needs realistic friction modeling | **A — DONE 2026-05-26** |
 | GAP-2 | Dealing-range gate (DR-1) | `LIVE_DEALING_RANGE_GATE = False` | `BACKTEST_DEALING_RANGE_GATE = False` | REVERTED 2026-05-26 via B.3 (after D2 instrumentation found 98.5% block rate) — DR-1 documented KNOWN STRUCTURAL; both gates OFF (symmetric absence preserves parity) | **B — REVERTED 2026-05-26 (Option B.3)** |
-| GAP-3 | OGD weights during scoring | Learned per-token weights | DEFAULT_WEIGHTS only (H6 fix) | Required for CPCV statistical validity | **D** (carefully) |
+| GAP-3 | OGD weights during scoring | Learned per-token weights | DEFAULT_WEIGHTS (CPCV) + chronological OGD simulation (WFV) | **Dual-track shipped 2026-05-26 (Phase D.1)** | **D.1 — DONE 2026-05-26 (dual-track)** |
 | GAP-4 | Walk-forward validation | N/A (live IS sequential) | WFV + CPCV both report | RESOLVED via Phase C — `walk_forward.py` (expanding window) runs every backtest, reports decay | **C — DONE 2026-05-26** |
 | GAP-5 | Held-out validation window | All live data is implicitly held-out | `HELD_OUT_DAYS` env opt-in (default 90 in promote_baseline) | RESOLVED via Phase C — held-out lockbox shipped; protocol documented in `docs/held_out_protocol.md` | **C — DONE 2026-05-26** |
 | GAP-6 | Concept drift auto-action | Drift detector adapts ADX/RSI thresholds | Drift detector doesn't run in backtest | Live-only need; backtest sees all data | partial **D** |
@@ -172,23 +172,35 @@ The work `live-backtest-consistency-checker` validates at 10/10 score:
 - **B.2:** Turn OFF live DR gate → matches backtest, more permissive in live, more potential losses on weak DR locations
 - **B.3:** Accept the divergence permanently, but EXPLICITLY model the WR impact in the honest-metrics report
 
-### GAP-3: OGD weights in backtest (H6)
+### GAP-3: OGD weights in backtest (H6) — DUAL-TRACK SHIPPED 2026-05-26
 
-**Current state:** `backtest.py:1014-1019` uses `AE_DEFAULT_WEIGHTS` (uniform priors). Live (`crypto_alert.py`) uses per-token learned weights from `token_weights` table.
+**Original concern:** `backtest.py` uses `AE_DEFAULT_WEIGHTS` for scoring (H6 isolation). Live (`crypto_alert.py`) uses per-token learned weights from `token_weights`. Unquantified divergence → operator can't trust backtest WR/Sharpe as a live predictor until H6 is validated.
 
-**Why isolated:**
-- Per H6 fix: if backtest used OGD-learned weights from prior trials, each trial inherits prior trial's learning → trials become temporally correlated → CPCV's "independent fold" assumption breaks → DSR meaningless
-- The bot trains OGD on closed paper signals only — the cycle that uses learned weights is the cycle that updates them, with a one-cycle delay
+**Why H6 isolation was correct (and still is) for CPCV:**
+- Per H6 fix: if backtest used OGD-learned weights, CPCV's combinatorial fold assembly breaks chronology → "future" trials inform "past" fold scoring → independence assumption broken → DSR meaningless
+- This argument is sound — but only for **combinatorial** k-fold validation.
 
-**Cost of divergence:**
-- Backtest WR is "what the strategy looks like with default weights" — likely PESSIMISTIC vs reality once OGD has learned
-- After 100+ live signals, learned weights should add 2-5pp WR — but backtest can't validate this directly
+**Why H6 isolation was over-conservative:**
+- Sequential walk-forward validation has NO leakage: at signal time T, the model only knows what happened before T. Using OGD weights in WFV is statistically valid (and literature-recommended per Lopez de Prado AFML §8).
+- The codebase already had walk_forward.py infrastructure (Phase C). Adding an OGD-aware variant is a natural extension.
 
-**Fix:** Phase D — once we have 100+ closed paper signals, A/B compare:
-- Backtest with default weights (current)
-- Backtest with snapshot of learned weights (matches live)
-- If gap > 2pp WR: H6 isolation hurts but matters for stat validity. Keep it.
-- If gap < 2pp WR: learned weights are statistically noise. H6 isolation can be relaxed.
+**Solution shipped (`walk_forward.walk_forward_with_ogd`, 2026-05-26):**
+- Sandboxed `AdaptiveWeightEngine` (persist=False, weights wiped to defaults at start — does NOT touch live DB)
+- Processes signals chronologically: for each signal, captures `default_score` (matches H6 backtest scoring) + `ogd_score` (matches live's at-that-time scoring)
+- Reports: mean score delta, abs mean delta, corr(score, outcome), top-decile vs bottom-decile WR, per-window WFV WR, parity verdict (STRONG_LIFT / WEAK_LIFT / NEUTRAL / INVERTED / INSUFFICIENT_SAMPLE)
+- Wired into `backtest.py` after Phase C WFV block — every backtest now produces BOTH:
+  - **CPCV with defaults** (selection-bias correction, DSR — unchanged)
+  - **WFV with OGD** (live-parity estimate — new)
+
+**First production verdict (Run-81, n=35):** NEUTRAL. With 3-4 signals per token, no token hits `OGD_MIN_SAMPLES=10` → OGD never moves from defaults → H6 isolation has zero practical impact at this sample size. Live and backtest should track essentially identically.
+
+**What the verdict will show at larger samples:**
+- STRONG_LIFT (>=15pp top vs bottom): OGD learned real discriminating power → live should outperform backtest's default estimate
+- WEAK_LIFT (5-15pp): marginal lift, backtest is close to live but slightly conservative
+- NEUTRAL (<5pp): defaults are essentially as good as learned weights at this point
+- INVERTED (top decile underperforms): degenerate weights or feature/outcome anti-correlation — investigate
+
+**No 6-month wait required.** The original Phase D.1 plan (snapshot live weights + re-run) is now subsumed by this on-the-fly simulation. Phase D.2 (concept drift auto-pause) remains paper-data-blocked.
 
 ### GAP-4 / GAP-5: Walk-forward + held-out
 
