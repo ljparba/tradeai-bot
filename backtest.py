@@ -1229,7 +1229,13 @@ def run_backtest_token(token, c5m, c1h, c4h, btc_c1h=None, btc_c5m=None, config=
         top = sorted(rejection_counts.items(), key=lambda x: -x[1])[:20]
         print(f"  Gate rejections: " + " | ".join(f"{r}×{n}" for r, n in top))
 
-    return signals
+    # D2 diagnostic (cycle-5 audit 2026-05-26): return rejection_counts so the
+    # main backtest loop can aggregate across tokens and surface structural
+    # gate-misalignment patterns (e.g. "100% of BUY-signal-candidates are in
+    # PREMIUM dr_location → DR gate blocks them all"). The per-token printout
+    # above only shows the top-20 per-token rejection reasons; cross-token
+    # aggregation in print_report() reveals the structural picture.
+    return signals, rejection_counts
 
 
 # ══════════════════════════════════════════════════════════
@@ -1369,6 +1375,45 @@ def print_report(all_signals):
     print(f"  NOTE(M11): Portfolio limits (MAX_OPEN_POSITIONS=4, MAX_SAME_DIRECTION=2) not simulated.")
     print(f"             Non-binding at current signal rate (~3-4/month). Re-evaluate if rate >8/month.")
     print(div)
+
+    # D2 diagnostic (cycle-5 audit 2026-05-26): cross-token gate-rejection
+    # landscape — reveals structural patterns invisible in per-token logs.
+    # Identifies the kind of gate-strategy conflict that caused Phase B.1's
+    # n=43→7 collapse (DR gate blocking 100% of classified signals because
+    # ICT strategy structurally enters at PREMIUM/DISCOUNT FVG retraces).
+    _global_rej = globals().get("_GLOBAL_REJECTIONS", {}) or {}
+    if _global_rej:
+        print()
+        print("  GATE-REJECTION LANDSCAPE (cross-token aggregate)")
+        print("  " + "-" * 64)
+        # DR-misalignment specific breakdown
+        _dr_premium_buy   = _global_rej.get("4H DR: PREMIUM (BUY misaligned)", 0)
+        _dr_discount_sell = _global_rej.get("4H DR: DISCOUNT (SELL misaligned)", 0)
+        _dr_equilibrium   = sum(v for k, v in _global_rej.items()
+                                if k.startswith("4H DR: EQUILIBRIUM"))
+        _dr_total_blocked = _dr_premium_buy + _dr_discount_sell + _dr_equilibrium
+        _admitted          = len(all_signals)
+        _admitted_plus_dr  = _admitted + _dr_total_blocked
+        if _dr_total_blocked > 0:
+            _pct = (_dr_total_blocked / max(_admitted_plus_dr, 1)) * 100
+            print(f"  DR-gate blocks (post-fvg/post-mss):")
+            print(f"    BUY-in-PREMIUM    blocked = {_dr_premium_buy}")
+            print(f"    SELL-in-DISCOUNT  blocked = {_dr_discount_sell}")
+            print(f"    EQUILIBRIUM       blocked = {_dr_equilibrium}")
+            print(f"    DR-blocked / (DR-blocked + admitted) = {_pct:.1f}%")
+            if _pct >= 50:
+                print(f"  *** WARN: DR gate is the dominant filter — likely structural")
+                print(f"      mismatch between ICT entry pattern (FVG retrace post-")
+                print(f"      displacement) and dealing-range location semantics.")
+                print(f"      Inspect rejection ratios before reading WR/DSR as meaningful.")
+        # Top 10 rejection reasons overall
+        print()
+        print("  Top rejection reasons (all gates, all tokens):")
+        _top10 = sorted(_global_rej.items(), key=lambda x: -x[1])[:10]
+        for _reason, _n in _top10:
+            print(f"    {_n:6d} × {_reason}")
+        print("  " + "-" * 64)
+        print()
 
     by_token = defaultdict(list)
     for s in all_signals:
@@ -3052,6 +3097,13 @@ def main():
         print(f"[CKPT] {_ckpt_summary}")
     all_signals: list = []
     completed_tokens: set = set()
+    # D2 diagnostic (cycle-5 audit): aggregate per-token rejection_counts
+    # across all 10 tokens so print_report can surface structural patterns
+    # (e.g. "DR gate blocked 100% of classified BUY signals — PREMIUM
+    # dr_location was 100% of BUY candidates"). Cross-token aggregation
+    # reveals patterns invisible in per-token top-20 lists.
+    global _GLOBAL_REJECTIONS
+    _GLOBAL_REJECTIONS = {}
     started_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     if not args.no_resume:
         _resumed = load_checkpoint(_run_config_hash)
@@ -3108,7 +3160,7 @@ def main():
             btc_c4h_ref = c4h
 
         print(f"[{token}] Simulating ICT signals...", end=" ", flush=True)
-        sigs = run_backtest_token(
+        sigs, _tok_rejections = run_backtest_token(
             token, c5m, c1h, c4h,
             btc_c1h=None if token == "BTC" else btc_c1h_ref,
             btc_c5m=None if token == "BTC" else btc_c5m_ref,
@@ -3117,6 +3169,10 @@ def main():
         )
         print(f"{len(sigs)} signals generated")
         all_signals.extend(sigs)
+        # D2 diagnostic — accumulate token-level rejections into a global pool
+        # so print_report can surface structural patterns
+        for _r_k, _r_v in _tok_rejections.items():
+            _GLOBAL_REJECTIONS[_r_k] = _GLOBAL_REJECTIONS.get(_r_k, 0) + _r_v
         completed_tokens.add(token)
         # Persist progress after every token so a kill mid-run loses at most one token's work.
         if save_checkpoint(_run_config_hash, completed_tokens, all_signals, started_at=started_at):
