@@ -1,0 +1,40 @@
+[Unit]
+# TradeAI daily OGD-weight monitor — runs scripts/run_monitoring_with_alert.sh
+# once per day to detect bootstrap-pool degeneracy, floor-pin patterns
+# (Run-46 collapse fingerprint), entropy drift, and cross-token homogeneity.
+# Sends a Telegram alert if global_alert_level=CRIT.
+#
+# R5 fix (master audit 2026-05-26): the OGD-MON-SCOPE patch wired
+# monitoring.py to read the bootstrap pool but no scheduled job was
+# running it, so the safeguard was operationally dormant. This unit
+# is the scheduled trigger.
+#
+# Install (one-time):
+#     sudo cp deploy/tradeai-monitor.service deploy/tradeai-monitor.timer \
+#         /etc/systemd/system/
+#     sudo systemctl daemon-reload
+#     sudo systemctl enable --now tradeai-monitor.timer
+#
+# Verify:
+#     systemctl list-timers tradeai-monitor.timer
+#     sudo systemctl start tradeai-monitor.service   # manual run
+#     journalctl -u tradeai-monitor -n 50
+#     ls -la /home/tradeai/TradeAI/data/monitoring/
+Description=TradeAI Daily OGD Weight Monitor (alert on CRIT)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=tradeai
+WorkingDirectory=/home/tradeai/TradeAI
+EnvironmentFile=-/home/tradeai/TradeAI/.env
+ExecStart=/home/tradeai/TradeAI/scripts/run_monitoring_with_alert.sh
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=300
+
+# No automatic restart — this is a oneshot scheduled by tradeai-monitor.timer
+
+[Install]
+WantedBy=multi-user.target

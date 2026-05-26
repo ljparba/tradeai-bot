@@ -538,7 +538,9 @@ def walk_forward_with_ogd(
       top_decile_wr           WR of top-10% signals ranked by ogd_score
       bottom_decile_wr        WR of bottom-10% signals ranked by ogd_score
       top_decile_lift         top - bottom (the OGD discrimination metric)
-      parity_verdict          STRONG_LIFT | WEAK_LIFT | INVERTED | INSUFFICIENT_SAMPLE
+      parity_verdict          STRONG_LIFT (>=15pp) | WEAK_LIFT (>=5pp) |
+                              NEUTRAL (-10..+5pp noise band) |
+                              INVERTED (<=-10pp) | INSUFFICIENT_SAMPLE (n<10)
     """
     # Defer heavy imports — keeps walk_forward.py importable even on installs
     # that don't have adaptive_engine wired (e.g. minimal CI environments).
@@ -699,16 +701,38 @@ def walk_forward_with_ogd(
     return out
 
 
-def walk_forward_ogd_text_report(wf_ogd: Dict[str, Any]) -> str:
-    """Compact human-readable WFV-with-OGD report block."""
+def walk_forward_ogd_text_report(
+    wf_ogd: Dict[str, Any],
+    *,
+    baseline_wfv_wr: Optional[float] = None,
+) -> str:
+    """Compact human-readable WFV-with-OGD report block.
+
+    NEW-M-2 fix (cycle-6 audit 2026-05-26): accepts an optional
+    ``baseline_wfv_wr`` from the parent ``walk_forward()`` call so the report
+    prints BOTH the default-weights WFV WR AND the OGD-weights WFV WR side by
+    side, plus their delta. Without this, the operator could only read the
+    top-decile ranking-lift verdict (NEUTRAL/STRONG_LIFT/...) — which is a
+    discrimination metric, NOT the same quantity as WR-on-WFV-folds. A
+    scenario like OGD-WFV-WR=62% vs baseline-WFV-WR=72% would report
+    WEAK_LIFT with no visible warning about the WR regression.
+    """
     lines = []
     lines.append("-----------------------------------------------------------------")
     lines.append("  WFV WITH ADAPTIVE OGD WEIGHTS (Phase D.1 — live-parity track)")
     lines.append("-----------------------------------------------------------------")
     lines.append(f"  n_signals              = {wf_ogd.get('n_signals', 0)}")
     lines.append(f"  n_valid_windows        = {wf_ogd.get('n_valid_windows', 0)}")
-    lines.append(f"  WFV-OGD WR (mean)      = {wf_ogd.get('wfv_ogd_wr_mean', 0):.2f}%  "
+    _ogd_wr = wf_ogd.get('wfv_ogd_wr_mean', 0) or 0.0
+    lines.append(f"  WFV-OGD WR (mean)      = {_ogd_wr:.2f}%  "
                  f"std={wf_ogd.get('wfv_ogd_wr_std', 0):.2f}%")
+    if isinstance(baseline_wfv_wr, (int, float)):
+        lines.append(f"  WFV-DEFAULT WR (mean)  = {baseline_wfv_wr:.2f}%  "
+                     f"(from parent walk_forward() — baseline reference)")
+        _delta_wr = _ogd_wr - float(baseline_wfv_wr)
+        lines.append(f"  WR delta (OGD - DEF)   = {_delta_wr:+.2f} pp")
+    else:
+        lines.append("  WFV-DEFAULT WR (mean)  = n/a (parent walk_forward not run)")
     lines.append("")
     lines.append("  Scoring parity (default vs learned OGD):")
     lines.append(f"    mean(ogd_score - default_score)   = "

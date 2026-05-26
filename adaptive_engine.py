@@ -385,6 +385,21 @@ class AdaptiveWeightEngine:
         else:
             reward = _base_reward
 
+        # R8 fix (master audit 2026-05-26): alert when reward magnitude is
+        # unusually large. The blended reward CAN reach ±1.5 (base ±1.0 +
+        # PnL-scaled ±2.0, mean = ±1.5 in extreme cases). Magnitudes above
+        # 1.2 indicate either (a) an unusually large trade outcome — fine,
+        # operator should know — or (b) `profit_pct` arriving in wrong
+        # units (% instead of fraction, missing /100 conversion). The
+        # caller's contract is `profit_pct as fraction` per the comment
+        # above; this alert catches contract violations silently corrupting
+        # the gradient signal.
+        if abs(reward) > 1.2:
+            print(f"[ADAPTIVE] WARN reward magnitude {reward:+.3f} on {token} "
+                  f"outcome={outcome} profit_pct={profit_pct} — verify "
+                  f"profit_pct is a fraction (e.g. -0.0085 for -0.85% P&L), "
+                  f"NOT a percentage. See _compute_reward docstring.")
+
         if reward == 0.0:
             self._n[token] = n + 1
             if persist:

@@ -3183,6 +3183,33 @@ def main():
     wf_results = run_rolling_walk_forward(all_signals, train_days=90, test_days=30, step_days=30)
     print_rolling_wf_report(wf_results)
 
+    # FLAW-2 fix (cycle-6 audit 2026-05-26): pre-compute held-out split BEFORE
+    # the primary CPCV call so the headline CPCV runs on tuning-only when
+    # HELD_OUT_DAYS > 0. Previously the primary cpcv_summary used all_signals
+    # — held-out signals were silently leaking into CPCV's combinatorial folds.
+    # When HELD_OUT_DAYS=0 (default), _tune_sigs = list(all_signals) so the
+    # primary CPCV runs on the full pool exactly as before — no behavior change.
+    # Also closes MOD-1: pre-init guards Phase D.1's _tune_sigs reference at
+    # line 3335 against NameError if walk_forward.py import fails downstream.
+    _tune_sigs = list(all_signals)
+    _held_sigs: list = []
+    _held_out_cutoff_iso = None
+    if HELD_OUT_DAYS > 0:
+        try:
+            from walk_forward import split_held_out as _split_held_out_early
+            _split_early = _split_held_out_early(all_signals, held_out_days=HELD_OUT_DAYS)
+            _tune_sigs = _split_early["tuning"]
+            _held_sigs = _split_early["held_out"]
+            _held_out_cutoff_iso = _split_early.get("cutoff_iso")
+            print(f"\n[HELD-OUT] cutoff={_held_out_cutoff_iso} | "
+                  f"tuning={len(_tune_sigs)} | held_out={len(_held_sigs)}")
+        except Exception as _split_exc:
+            print(f"\n[WARN] HELD-OUT split FAILED — "
+                  f"{type(_split_exc).__name__}: {_split_exc}. "
+                  f"Falling back to FULL POOL for CPCV (lockbox NOT enforced).")
+            _tune_sigs = list(all_signals)
+            _held_sigs = []
+
     # Sprint 3 item 4 / Top-10 #5: CPCV + Deflated Sharpe — honest metrics
     # alongside the single-split walk-forward above. Skipped silently if the
     # module is missing so this never breaks the existing backtest flow.
@@ -3248,7 +3275,7 @@ def main():
         except Exception:
             _n_trials_dsr = None
         _cpcv = cpcv_summary(
-            all_signals,
+            _tune_sigs,  # FLAW-2 fix: tuning-only pool when HELD_OUT_DAYS>0; equals all_signals at default
             n_trials_for_dsr=_n_trials_dsr,
             sr_trial_std_for_dsr=_sr_trial_std_honest,  # None falls back to proxy
         )
@@ -3263,44 +3290,25 @@ def main():
     # WFV is informational (decay detection); held-out is the one-shot final
     # validation gate. Both skipped silently on import failure to preserve
     # backward compatibility.
+    #
+    # FLAW-2 fix (cycle-6): the held-out split is now pre-computed above
+    # before the primary CPCV call, so the headline CPCV already reflects
+    # the tuning-only pool. The duplicate "CPCV ON TUNING-ONLY POOL" block
+    # has been removed since primary CPCV == tuning-only CPCV when HELD>0.
+    _wfv = None
     try:
         from walk_forward import (
             walk_forward, walk_forward_text_report,
-            split_held_out, held_out_summary, held_out_text_report,
+            held_out_summary, held_out_text_report,
         )
-        # FLAW-1 fix (cycle-4 audit): when HELD_OUT_DAYS > 0, the held-out
-        # window must NEVER be touched during tuning/analysis — including
-        # WFV decay detection. Split FIRST, then run WFV on tuning-only.
-        # When HELD_OUT_DAYS=0 (default), WFV runs on the full pool as
-        # before (no lockbox in effect, no contamination concern).
-        if HELD_OUT_DAYS > 0:
-            _split = split_held_out(all_signals, held_out_days=HELD_OUT_DAYS)
-            _tune_sigs = _split["tuning"]
-            _held_sigs = _split["held_out"]
-            print(f"\n[HELD-OUT] cutoff={_split['cutoff_iso']} | "
-                  f"tuning={len(_tune_sigs)} | held_out={len(_held_sigs)}")
-        else:
-            _tune_sigs = list(all_signals)
-            _held_sigs = []
-
-        # WFV runs on tuning pool only (lockbox-respecting)
+        # WFV runs on tuning pool only (lockbox-respecting per FLAW-1)
         _wfv = walk_forward(_tune_sigs, n_windows=12, min_train_signals=10)
         print("\n" + walk_forward_text_report(_wfv))
 
-        # Held-out lockbox + dual CPCV: only when HELD_OUT_DAYS > 0
+        # Held-out lockbox: only when HELD_OUT_DAYS > 0
         if HELD_OUT_DAYS > 0:
-            # Re-run CPCV on tuning-only for dual-metric reporting
-            try:
-                _cpcv_tune = cpcv_summary(
-                    _tune_sigs,
-                    n_trials_for_dsr=_n_trials_dsr,
-                    sr_trial_std_for_dsr=_sr_trial_std_honest,
-                )
-                print("\n[CPCV ON TUNING-ONLY POOL]")
-                print(cpcv_text_report(_cpcv_tune))
-                _tune_wr_ref = _cpcv_tune.get("wr_mean")
-            except Exception:
-                _tune_wr_ref = None
+            # Primary CPCV (above) already runs on tuning-only — reuse its WR.
+            _tune_wr_ref = _cpcv.get("wr_mean") if isinstance(_cpcv, dict) else None
             _ho = held_out_summary(
                 _held_sigs,
                 tuning_wr=_tune_wr_ref,
@@ -3332,9 +3340,16 @@ def main():
     # CPCV statistical validity report.
     try:
         from walk_forward import walk_forward_with_ogd, walk_forward_ogd_text_report
+        # MOD-1 fix: _tune_sigs is pre-initialized at the top of the CPCV block,
+        # so it is always defined regardless of Phase C import success.
         _wfv_ogd_input = _tune_sigs if HELD_OUT_DAYS > 0 else list(all_signals)
         _wfv_ogd = walk_forward_with_ogd(_wfv_ogd_input, n_windows=12, min_train_signals=10)
-        print("\n" + walk_forward_ogd_text_report(_wfv_ogd))
+        # NEW-M-2 fix: pass baseline WFV WR so the report can print the
+        # default-vs-OGD WR delta alongside the top-decile lift verdict.
+        _baseline_wfv_wr = (_wfv.get("test_wr_mean") if isinstance(_wfv, dict) else None)
+        print("\n" + walk_forward_ogd_text_report(
+            _wfv_ogd, baseline_wfv_wr=_baseline_wfv_wr,
+        ))
     except Exception as _ogd_exc:
         print(f"\n[WARN] Phase D.1 WFV-OGD SKIPPED — "
               f"{type(_ogd_exc).__name__}: {_ogd_exc}")
@@ -3368,9 +3383,20 @@ def main():
     # (audit found 9,240/9,240 rows with NULL run_id).
     # The underlying bootstrap still samples from the full history pool;
     # the run_id only tags the snapshot rows for audit attribution.
-    if run_id:
+    # R3 fix (master audit 2026-05-26): env-gate the bootstrap step. Previously
+    # bootstrap_from_backtest ran on EVERY `python3 backtest.py` invocation —
+    # an ad-hoc 30-day backtest would silently overwrite the canonical
+    # backtest_token_weights pool. Now opt-in via `BOOTSTRAP_AFTER_RUN=1` (the
+    # default preserves prior behavior for the official baseline-promotion
+    # workflow; explorer + ad-hoc runs should set =0).
+    _BOOTSTRAP_AFTER_RUN = os.environ.get("BOOTSTRAP_AFTER_RUN", "1") == "1"
+    if run_id and _BOOTSTRAP_AFTER_RUN:
         print(f"\n[ADAPTIVE] Bootstrapping weights from full backtest history (current run #{run_id} included)...")
         weight_engine.bootstrap_from_backtest(run_id=run_id, verbose=True)
+    elif run_id:
+        print(f"\n[ADAPTIVE] Bootstrap SKIPPED (BOOTSTRAP_AFTER_RUN=0). "
+              f"backtest_token_weights pool unchanged — set BOOTSTRAP_AFTER_RUN=1 "
+              f"to refresh after a canonical baseline run.")
 
     with open(OUTPUT_FILE, "w") as f:
         json.dump(all_signals, f, indent=2)

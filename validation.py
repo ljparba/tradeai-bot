@@ -528,7 +528,8 @@ def cpcv_summary(
     if n == 0:
         out.update({
             "wr_mean": 0.0, "wr_std": 0.0,
-            "wr_q05": 0.0, "wr_q50": 0.0, "wr_q95": 0.0,
+            "wr_q05": 0.0, "wr_min_split": 0.0,
+            "wr_q50": 0.0, "wr_q95": 0.0,
             "sharpe_mean": 0.0, "sharpe_std": 0.0,
             "psr": 0.5, "dsr": None, "dsr_bench_sharpe": None,
             "verdict": "INSUFFICIENT_SAMPLE",
@@ -605,12 +606,22 @@ def cpcv_summary(
         out["wr_mean"] = sum(wr_list) / len(wr_list)
         out["wr_std"]  = _safe_std(wr_list)
         sorted_wr = sorted(wr_list)
+        # NEW-M-5 honest-labeling fix (cycle-6 audit 2026-05-26): the index
+        # formula `int(0.05 * N)` returns 0 for N <= 19, so for typical CPCV
+        # configurations (K=5/k=2 → 10 splits) wr_q05 IS the per-split MINIMUM,
+        # not a true 5th-percentile interpolation (Harrell-Davis or linear).
+        # The field name is preserved for back-compat (tracker.py + autonomous
+        # explorer parse `q05=` from the report text via regex), but the
+        # operator should read this as "floor across CPCV splits". The
+        # `wr_min_split` alias below makes the actual semantics explicit.
         out["wr_q05"] = sorted_wr[max(0, int(0.05 * len(sorted_wr)))]
+        out["wr_min_split"] = sorted_wr[0]  # explicit alias — true minimum
         out["wr_q50"] = sorted_wr[len(sorted_wr) // 2]
         out["wr_q95"] = sorted_wr[min(len(sorted_wr) - 1, int(0.95 * len(sorted_wr)))]
     else:
         out["wr_mean"] = out["wr_std"] = 0.0
-        out["wr_q05"] = out["wr_q50"] = out["wr_q95"] = 0.0
+        out["wr_q05"] = out["wr_min_split"] = 0.0
+        out["wr_q50"] = out["wr_q95"] = 0.0
 
     if sr_list:
         out["sharpe_mean"] = sum(sr_list) / len(sr_list)
@@ -710,9 +721,17 @@ def cpcv_summary(
     if wr_mean >= 58.0 and dsr_passes:
         out["verdict"] = "PASS"
     elif wr_mean >= 55.0 and (dsr_passes or not dsr_present):
-        # MARGINAL covers both "DSR present but borderline" and "DSR unavailable"
-        # cases. In the second case, the verdict honestly reflects unverified
-        # selection-bias status — operator must investigate before promoting.
+        # NEW-M-1 fix (cycle-6 audit 2026-05-26): comment corrected.
+        # MARGINAL covers two specific cases:
+        #   (a) WR is borderline (55-58%) AND DSR PASSES (>=0.95) — solid
+        #       evidence of multiple-testing-survived edge but WR below the
+        #       PASS bar, so operator review is warranted.
+        #   (b) WR >= 55% AND DSR is UNAVAILABLE (n_trials_for_dsr<2 or no
+        #       cross_config_std) — verdict honestly reflects unverified
+        #       selection-bias status; operator must investigate.
+        # DSR-PRESENT-BUT-FAILING never lands here — dsr_passes=False AND
+        # dsr_present=True makes the elif condition False, so the run
+        # correctly falls through to FAIL.
         out["verdict"] = "MARGINAL"
     else:
         out["verdict"] = "FAIL"
@@ -742,7 +761,13 @@ def cpcv_text_report(summary: Dict[str, Any]) -> str:
         "",
         f"  WR (CPCV)      mean={summary.get('wr_mean', 0):.2f}%  "
         f"std={summary.get('wr_std', 0):.2f}%",
-        f"                 q05={summary.get('wr_q05', 0):.1f}%  "
+        # NEW-M-5: `q05=` label retained verbatim for back-compat (regex
+        # parsers in tracker.py + autonomous_explorer.py expect literal `q05=`).
+        # The trailing `(floor)` annotation tells the operator that at typical
+        # K=5/k=2 → 10 splits this index returns the per-split MINIMUM, not a
+        # 5th-percentile interpolation (the int(0.05*N) formula yields 0 for
+        # N<=19). The regex `q05=([\d.]+)%` is unaffected.
+        f"                 q05={summary.get('wr_q05', 0):.1f}% (floor)  "
         f"q50={summary.get('wr_q50', 0):.1f}%  "
         f"q95={summary.get('wr_q95', 0):.1f}%",
         f"  Sharpe (CPCV)  mean={summary.get('sharpe_mean', 0):.3f}  "

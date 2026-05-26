@@ -1,0 +1,21 @@
+[Unit]
+# Daily trigger for tradeai-monitor.service (OGD weight monitor).
+# Fires once per day at 02:30 UTC (≈ low-activity window for crypto markets;
+# avoids overlap with hourly heartbeat + dashboard activity).
+#
+# R5 fix (master audit 2026-05-26).
+#
+# Verify schedule:
+#     systemctl list-timers tradeai-monitor.timer
+Description=Daily OGD weight-monitor trigger
+Requires=tradeai-monitor.service
+
+[Timer]
+# 02:30 UTC daily; Persistent=true means a missed trigger (e.g. VPS reboot
+# straddling the schedule) fires immediately on next boot rather than skipping.
+OnCalendar=*-*-* 02:30:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

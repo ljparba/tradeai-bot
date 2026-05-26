@@ -278,8 +278,15 @@ def _point_estimate(values: Sequence[float], statistic: str) -> float:
     if statistic == "sharpe":
         if len(values) < 2:
             return 0.0
+        # NEW-M-6 fix (cycle-6 audit 2026-05-26): use sample std (n-1 ddof)
+        # to match validation.py:_safe_std + sharpe_ratio(). Previously this
+        # used statistics.pstdev (population n divisor), making the bootstrap
+        # CI Sharpe upward-biased relative to the CPCV Sharpe by ~sqrt(n/(n-1))
+        # — about 3.8% at n=14 (typical per-fold count at Run-81 sample size).
+        # Bootstrap CI is informational only (not gated), but the inconsistency
+        # was latent technical debt across two honest-metric estimators.
         mu = statistics.fmean(values)
-        sd = statistics.pstdev(values)
+        sd = statistics.stdev(values)  # n-1 ddof
         if sd == 0.0:
             return 0.0
         return mu / sd

@@ -347,6 +347,12 @@ LIVE_CONFIG_KWARGS: dict = {
     "smt_gate":             LIVE_SMT_GATE,
     "liquid_hours":         _liquid_hours_from_env(),
     "blocked_weekdays":     _DEFAULT_BLOCKED_WEEKDAYS,
+    # L-B / M-1 fix (cycle-6 audit 2026-05-26): explicitly wire the canonical
+    # _DEFAULT_BLOCKED_REGIMES constant so edits here actually take effect.
+    # Previously, the constant at line 281 was dead — runtime defaults came
+    # from strategy_engine.py:71-77 (a different literal that coincidentally
+    # matched). Classic M24-class silent-default trap.
+    "blocked_regimes":      _DEFAULT_BLOCKED_REGIMES,
 }
 
 BACKTEST_CONFIG_KWARGS: dict = {
@@ -361,6 +367,9 @@ BACKTEST_CONFIG_KWARGS: dict = {
     "smt_gate":             BACKTEST_SMT_GATE,
     "liquid_hours":         _liquid_hours_from_env(),
     "blocked_weekdays":     _DEFAULT_BLOCKED_WEEKDAYS,
+    # L-B / M-1 fix (cycle-6) — mirror live so both sides consume the same
+    # canonical constant. Symmetry is the M24-prevention invariant.
+    "blocked_regimes":      _DEFAULT_BLOCKED_REGIMES,
 }
 
 
