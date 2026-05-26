@@ -36,7 +36,7 @@ This roadmap is **focused on parity only**. For broader scope:
 - **C2** (no true walk-forward hold-out) → Phase C → DONE 2026-05-26
 - **C4** (regime ADX static vs DriftDetector) → Phase D
 - **C-N3** (cooldown anchor live vs backtest) → known minor, accepted
-- **DR-1** (DEALING_RANGE_GATE divergence) → Phase B → DONE 2026-05-26
+- **DR-1** (DEALING_RANGE_GATE divergence) → Phase B → REVERTED 2026-05-26 (Option B.3) — see Phase B revert block below
 - **H6** (OGD weight isolation in backtest) → Phase D
 
 ---
@@ -76,7 +76,7 @@ Concrete checklist of what makes a quant system "enterprise-grade" on parity, fr
 
 ---
 
-## 4. Current parity status (snapshot 2026-05-26 post Phase B.1)
+## 4. Current parity status (snapshot 2026-05-26 post Phase B REVERT)
 
 ### Category A: IDENTICAL across live and backtest
 
@@ -101,7 +101,7 @@ The work `live-backtest-consistency-checker` validates at 10/10 score:
 | Gap ID | Component | Live | Backtest | Why diverged | Phase |
 |---|---|---|---|---|---|
 | GAP-1 | Execution model | Real latency 10-30s + spreads + partial fills | Instant fill at signal price, flat 30bps cost | Standard retail backtest convention; needs realistic friction modeling | **A — DONE 2026-05-26** |
-| GAP-2 | Dealing-range gate (DR-1) | `LIVE_DEALING_RANGE_GATE = True` | `BACKTEST_DEALING_RANGE_GATE = True` | RESOLVED via B.1 (2026-05-26) — gate symmetric; n=7 cliff documented | **B — DONE 2026-05-26** |
+| GAP-2 | Dealing-range gate (DR-1) | `LIVE_DEALING_RANGE_GATE = False` | `BACKTEST_DEALING_RANGE_GATE = False` | REVERTED 2026-05-26 via B.3 (after D2 instrumentation found 98.5% block rate) — DR-1 documented KNOWN STRUCTURAL; both gates OFF (symmetric absence preserves parity) | **B — REVERTED 2026-05-26 (Option B.3)** |
 | GAP-3 | OGD weights during scoring | Learned per-token weights | DEFAULT_WEIGHTS only (H6 fix) | Required for CPCV statistical validity | **D** (carefully) |
 | GAP-4 | Walk-forward validation | N/A (live IS sequential) | WFV + CPCV both report | RESOLVED via Phase C — `walk_forward.py` (expanding window) runs every backtest, reports decay | **C — DONE 2026-05-26** |
 | GAP-5 | Held-out validation window | All live data is implicitly held-out | `HELD_OUT_DAYS` env opt-in (default 90 in promote_baseline) | RESOLVED via Phase C — held-out lockbox shipped; protocol documented in `docs/held_out_protocol.md` | **C — DONE 2026-05-26** |
@@ -315,37 +315,57 @@ These are out of scope for the parity roadmap (some addressed in `ENTERPRISE_ROA
 
 ---
 
-### Phase B outcome (closed 2026-05-26 via B.1)
+### Phase B REVERT outcome (Option B.3, 2026-05-26 PM)
+
+After cycle-5 D2 diagnostic (commit `35c0ed9`) instrumented cross-token gate-rejection landscape and revealed the symmetric DR gate was blocking **98.5% of post-FVG/post-MSS signals**, Phase B was reverted via Option B.3. Both `LIVE_DEALING_RANGE_GATE` and `BACKTEST_DEALING_RANGE_GATE` set to `False`. DR-1 is now documented KNOWN STRUCTURAL with evidence.
+
+**Why the symmetric-gate approach (B.1) was wrong:**
+- D2 diagnostic showed: BUY-in-PREMIUM blocked = 150, SELL-in-DISCOUNT blocked = 305, EQUILIBRIUM blocked = 5. Total DR-blocked = 460 vs admitted = 7 → DR-blocked / (DR-blocked + admitted) = **98.5%**
+- Pre-Phase-B.1 (Run-76, gate OFF): 100% of classified BUY were in PREMIUM, 100% of classified SELL were in DISCOUNT — meaning the gate would (and did) block all 37 classified signals when activated.
+- The geometry: ICT strategy enters at FVG retrace AFTER displacement. Displacement is by definition a LARGE move → the new range is dominated by it → FVG sits in the upper half (PREMIUM for BUY) or lower half (DISCOUNT for SELL). The gate as written says "BUY in PREMIUM = blocked because extended" — which conflicts with the entry geometry.
+- The roadmap's predicate "live is source of truth" was wrong only because the live gate was ALSO suppressing ~98% of signals (consistent with 0/30 paper signals after weeks of operation).
+
+**Phase B.1 → B.3 revert chain:**
 
 | Sub-phase | Commit | Outcome |
 |---|---|---|
-| B.1 — Flip `BACKTEST_DEALING_RANGE_GATE: false → true` | this commit | Run-78 verification: n=7, CPCV mean WR 87.5%, DSR 99.9%, VERDICT PASS. Gate now symmetric live + backtest. DR-1 RESOLVED. |
-| H-D prep — `execution.py:derive_seed()` → `hashlib.blake2b` | this commit | Cross-process determinism verified across PYTHONHASHSEED=0,12345; 29/29 tests still pass. |
+| B.1 (AM) — Flip BT DR gate to True | `239262b` | Run-78: n=7, CPCV mean WR 87.5%, DSR (inflated) 99.9%. "Symmetric — RESOLVED" claim. |
+| C-NEW-1 fix (PM) — honest DSR | `aeae55c` | Run-79: same config_hash, honest DSR drops 99.9% → 89.1%, verdict flips PASS → FAIL. |
+| D2 diagnostic (PM) | `35c0ed9` | GATE-REJECTION LANDSCAPE block added; verification backtest shows 98.5% DR-block ratio. |
+| **B revert (this commit)** — both gates → False | this commit | Run-81: **n=35, CPCV mean WR 70.0%, DSR 98.7%, VERDICT PASS**. Honest baseline restored. |
 
-**Honest baseline shift** (Run-77 → Run-78, same execution model, only DR gate symmetry changed):
-- n: 34 → 7 (−27; DR gate filter rate ~79%, much more aggressive than the roadmap's predicted ~50-60%)
-- Headline WR: 85.3% → 85.7% (+0.4pp)
-- CPCV mean: 85.27% → 87.50% (+2.23pp)
-- CPCV std: 6.01% → 16.32% (variance explodes at n=7)
-- CPCV Sharpe mean: 1.180 → 5.425 (and std=12.44 — pure noise at this sample size)
-- DSR: 100% → 99.9% (n_trials=27 anchor holds)
+**Honest baseline shift (Run-79 → Run-81):**
+- n: 7 → 35 (+28 / 5× restoration)
+- CPCV mean WR: 87.5% → 70.0% (drops 17pp because n=7 was cherry-picking UNKNOWN survivors)
+- CPCV std: 16.32% → 7.93% (variance halved → statistically meaningful)
+- CPCV Sharpe mean: 5.425 → 1.007 (and std drops 12.44 → 0.247 → no longer noise)
+- DSR: 89.1% → **98.7%** (n_trials=27 anchor still active)
+- PSR(OOS): 89.8% → 99.6%
+- **Verdict: FAIL → PASS**
 
-**The n=7 sample-size cliff is the honest result.** Backtest is no longer a precise predictor of live WR — it now functions as a structural validation that the strategy survives realistic execution + symmetric DR gating. For ongoing R&D, treat CPCV mean as VERDICT-only at this sample size; CPCV q05 + DSR are the only reliable discriminators. Phase B met its acceptance criteria (WR > 55% floor, DSR > 80% floor), so the gate stays ON; the cliff is documented as a known operating condition, not a regression.
+**The strategy IS valid.** The 7 surviving signals in Run-79 were not "the best 7" — they were the 7 lucky enough to have dr_location=UNKNOWN. The actual edge lives in the 35 signals Run-81 produces with both gates honestly OFF.
 
-**What changes for the explorer:** Optuna will struggle at n=7. The session GATES floors should already be lower than 55% / 80% — but the explorer's `CPCV_MEAN_FLOOR` and `DSR_FLOOR` should be reviewed in next session to ensure n=7 trials don't get auto-rejected for missing arbitrary thresholds that were calibrated against n=34.
+### Phase B alternative (deferred — Option 2)
+
+A future revisit could redefine `dr_location` relative to the SWEEP rather than the dealing-range midpoint:
+- After SSL sweep + bullish MSS, treat the FVG itself as the "discount zone" (within the post-displacement range, the FVG IS the cheaper retrace)
+- This would give the DR gate meaningful filtering power without conflicting with entry geometry
+- Estimated effort: ~15 hours (structural change to `compute_dealing_range` semantics + downstream callers)
+- Not in scope this session; tracked as Phase B alternative
 
 ---
 
 ### PHASE B — DR-1 Resolution
 
-**Status:** DONE (closed 2026-05-26 via B.1; see outcome block above)
-**Effort:** ~10 hours (mostly re-validation, minimal code) — actual: ~1 hour
-**Closes:** GAP-2 (DR-1 known structural) → RESOLVED in CROSS_REF
+**Status:** REVERTED via B.3 (closed 2026-05-26 PM after D2 diagnostic; see revert outcome above)
+**Effort:** ~10 hours scoped — actual: ~3 hours across B.1 + D2 + revert
+**Closes:** GAP-2 (DR-1) → documented KNOWN STRUCTURAL with cycle-5 D2 evidence
 **Files affected:**
-- MODIFIED: `config.py` (`BACKTEST_DEALING_RANGE_GATE: False → True`)
-- MODIFIED: `execution.py` (H-D fix: `derive_seed()` → `hashlib.blake2b` for cross-process determinism)
-- MODIFIED: `docs/comprehensive/CROSS_REF.md` (DR-1 entry: KNOWN STRUCTURAL → RESOLVED)
-- MODIFIED: `data/baseline_pin.json` (Run-77 → Run-78, predecessor preserved)
+- MODIFIED: `config.py:319` (`LIVE_DEALING_RANGE_GATE: True → False`)
+- MODIFIED: `config.py:329` (`BACKTEST_DEALING_RANGE_GATE: True → False`)
+- MODIFIED: `docs/comprehensive/CROSS_REF.md` (DR-1 entry: RESOLVED → KNOWN STRUCTURAL with documented evidence)
+- MODIFIED: `data/baseline_pin.json` (Run-79 → Run-81; Run-79 preserved as predecessor)
+- D2 instrumentation in `backtest.py` print_report (commit `35c0ed9`) provides permanent operator-visible diagnostic for future gate-rejection landscape inspection
 
 **The decision (must be made before Phase B can be implemented):**
 

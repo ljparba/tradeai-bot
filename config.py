@@ -316,7 +316,7 @@ LIVE_ENABLE_BUY:           bool = _env_bool("LIVE_ENABLE_BUY", True)
 LIVE_ENABLE_SELL:          bool = _env_bool("LIVE_ENABLE_SELL", True)     # learning phase
 LIVE_BIAS_4H_GATE:         str  = _env_choice("LIVE_BIAS_4H_GATE", "none", ("strict", "loose", "none"))
 LIVE_TREND_1H_GATE:        str  = _env_choice("LIVE_TREND_1H_GATE", "strict", ("strict", "loose", "none"))  # TP-2-b PROMOTED 2026-05-24 (stacked on F-8 + P-2b): loose->strict. CPCV mean 77.78->79.11%, CPCV std 7.86->5.40% (tighter), Sharpe 0.870->0.933, n=45->43.
-LIVE_DEALING_RANGE_GATE:   bool = _env_bool("LIVE_DEALING_RANGE_GATE", True)
+LIVE_DEALING_RANGE_GATE:   bool = _env_bool("LIVE_DEALING_RANGE_GATE", False)  # Phase B revert 2026-05-26 (after D2 finding): true->false. The DR gate was structurally killing the strategy — 98.5% of post-FVG/post-MSS signals were blocked because ICT FVG-retrace entries sit in PREMIUM for BUY (and DISCOUNT for SELL) of the post-displacement dealing range. Live had 0/30 paper signals after weeks for this exact reason. DR-1 returns to KNOWN STRUCTURAL with documented evidence (cycle-5 D2 diagnostic at backtest.py:1378+).
 LIVE_MSS_MIN_QUALITY:      str  = _env_choice("LIVE_MSS_MIN_QUALITY", "LOW", ("LOW", "MEDIUM", "HIGH"))
 LIVE_FVG_MIN_QUALITY:      str  = _env_choice("LIVE_FVG_MIN_QUALITY", "HIGH", ("LOW", "MEDIUM", "HIGH"))
 LIVE_SMT_GATE:             bool = _env_bool("LIVE_SMT_GATE", False)
@@ -326,7 +326,7 @@ BACKTEST_ENABLE_BUY:           bool = _env_bool("BACKTEST_ENABLE_BUY", True)
 BACKTEST_ENABLE_SELL:          bool = _env_bool("BACKTEST_ENABLE_SELL", True)
 BACKTEST_BIAS_4H_GATE:         str  = _env_choice("BACKTEST_BIAS_4H_GATE", "none", ("strict", "loose", "none"))  # F-8 (2026-05-23): strict->none. D-2 reversal: 365d bias=strict over-filters (n=37, CPCV std=15.56%); bias=none restores Run-110 baseline (n=46, CPCV std=8.85%, q05=63.2%).
 BACKTEST_TREND_1H_GATE:        str  = _env_choice("BACKTEST_TREND_1H_GATE", "strict", ("strict", "loose", "none"))  # TP-2-b PROMOTED 2026-05-24 — mirrors LIVE_TREND_1H_GATE for live/BT parity
-BACKTEST_DEALING_RANGE_GATE:   bool = _env_bool("BACKTEST_DEALING_RANGE_GATE", True)  # Phase B.1 (2026-05-26): false->true. DR-1 RESOLVED — mirrors LIVE_DEALING_RANGE_GATE for live/BT parity. Live is source of truth; the structural divergence is closed even at the cost of thinner sample size.
+BACKTEST_DEALING_RANGE_GATE:   bool = _env_bool("BACKTEST_DEALING_RANGE_GATE", False)  # Phase B revert 2026-05-26 (after D2 finding): true->false. Restored to pre-Phase-B.1 state. Both gates now OFF; DR-1 is documented KNOWN STRUCTURAL (symmetric absence preserves parity). The cycle-5 D2 diagnostic at print_report showed DR gate was blocking 98.5% of post-FVG/post-MSS signals — fundamental geometry mismatch between ICT entry pattern and dealing-range location semantics.
 BACKTEST_MSS_MIN_QUALITY:      str  = _env_choice("BACKTEST_MSS_MIN_QUALITY", "LOW", ("LOW", "MEDIUM", "HIGH"))
 BACKTEST_FVG_MIN_QUALITY:      str  = _env_choice("BACKTEST_FVG_MIN_QUALITY", "HIGH", ("LOW", "MEDIUM", "HIGH"))
 BACKTEST_SMT_GATE:             bool = _env_bool("BACKTEST_SMT_GATE", False)
