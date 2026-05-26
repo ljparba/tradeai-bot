@@ -181,6 +181,12 @@ BACKTEST_DAYS  = 365    # Z-0 REVERT 2026-05-23: D-1 730d reversed (Session 4 pr
                         # OOS sample unchanged (~18 signals). POL/MATIC rename Sept 2024 may cause
                         # partial-history for POL pre-rename — accepted gracefully (other 8 tokens
                         # get full 730d coverage).
+# Phase C (2026-05-26): held-out lockbox. When > 0, the most-recent
+# `HELD_OUT_DAYS` of signals are split out of the CPCV pool and reported
+# separately as the held-out verdict. When 0 (default), behavior is
+# byte-identical to pre-Phase-C — the explorer + manual backtests keep
+# working as before. Opt-in to honest one-shot validation by setting the env.
+HELD_OUT_DAYS  = int(os.environ.get("HELD_OUT_DAYS", "0") or "0")
 WARMUP_BARS    = 210    # 5M bars before first signal (~17.5H warmup)
 FORWARD_BARS   = 288    # 5M bars to look ahead for TP/SL = 24H  (extended for 2.0R targets)
 REGIME_WINDOW  = 360    # 5M bars for rolling regime = 30H window (was 120×15M)
@@ -3185,6 +3191,52 @@ def main():
         print("\n" + cpcv_text_report(_cpcv))
     except Exception as _cpcv_exc:
         print(f"\n[CPCV] skipped — {type(_cpcv_exc).__name__}: {_cpcv_exc}")
+
+    # Phase C (2026-05-26): Walk-Forward Validation + Held-Out Lockbox.
+    # WFV is informational (decay detection); held-out is the one-shot final
+    # validation gate. Both skipped silently on import failure to preserve
+    # backward compatibility.
+    try:
+        from walk_forward import (
+            walk_forward, walk_forward_text_report,
+            split_held_out, held_out_summary, held_out_text_report,
+        )
+        # WFV always runs (informational decay test)
+        _wfv = walk_forward(all_signals, n_windows=12, min_train_signals=10)
+        print("\n" + walk_forward_text_report(_wfv))
+
+        # Held-out lockbox: only runs when HELD_OUT_DAYS > 0
+        if HELD_OUT_DAYS > 0:
+            _split = split_held_out(all_signals, held_out_days=HELD_OUT_DAYS)
+            _tune_sigs = _split["tuning"]
+            _held_sigs = _split["held_out"]
+            print(f"\n[HELD-OUT] cutoff={_split['cutoff_iso']} | "
+                  f"tuning={len(_tune_sigs)} | held_out={len(_held_sigs)}")
+            # Re-run CPCV on tuning-only for dual-metric reporting
+            try:
+                _cpcv_tune = cpcv_summary(
+                    _tune_sigs,
+                    n_trials_for_dsr=_n_trials_dsr,
+                    sr_trial_std_for_dsr=_sr_trial_std_honest,
+                )
+                print("\n[CPCV ON TUNING-ONLY POOL]")
+                print(cpcv_text_report(_cpcv_tune))
+                _tune_wr_ref = _cpcv_tune.get("wr_mean")
+            except Exception:
+                _tune_wr_ref = None
+            _ho = held_out_summary(
+                _held_sigs,
+                tuning_wr=_tune_wr_ref,
+                max_gap_pp=8.0,
+                min_wr_pct=58.0,
+            )
+            print("\n" + held_out_text_report(_ho, tuning_wr=_tune_wr_ref))
+            # Surface the held-out verdict alongside CPCV verdict
+            print(f"\n[PHASE C GATE] held_out_verdict={_ho['verdict']} | "
+                  f"held_out_wr={_ho['wr_pct']:.2f}% | "
+                  f"gap_pp={_ho.get('gap_pp') if _ho.get('gap_pp') is not None else 'n/a'}")
+    except Exception as _wfv_exc:
+        print(f"\n[WFV/HELD-OUT] skipped — {type(_wfv_exc).__name__}: {_wfv_exc}")
 
     tmpl_report    = template_comparison_report(all_signals)
     print_template_report(tmpl_report)

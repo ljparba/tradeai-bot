@@ -722,6 +722,65 @@ def cpcv_text_report(summary: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 5) Phase C: dual-pool helper (tuning CPCV + held-out one-shot)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def cpcv_summary_split(
+    signals: Sequence[dict],
+    *,
+    held_out_days: int,
+    n_groups: int = _DEFAULT_N_GROUPS,
+    n_test_groups: int = _DEFAULT_N_TEST_GROUPS,
+    embargo_pct: float = _DEFAULT_EMBARGO_FRAC,
+    n_trials_for_dsr: Optional[int] = None,
+    sr_trial_std_for_dsr: Optional[float] = None,
+    max_gap_pp: float = 8.0,
+    min_held_out_wr_pct: float = 58.0,
+) -> Dict[str, Any]:
+    """Phase C convenience wrapper. Runs CPCV on the tuning pool + a one-shot
+    held-out evaluation on the most-recent `held_out_days` of signals.
+
+    Returns a unified dict:
+        {
+          "cutoff_iso":   ISO timestamp at the tuning/held-out boundary,
+          "n_tuning":     int,
+          "n_held_out":   int,
+          "tuning":       <full cpcv_summary dict on the tuning pool>,
+          "held_out":     <held_out_summary dict>,
+          "verdict_dual": "ROBUST" | "BORDERLINE" | "OVERFIT" | "INSUFFICIENT_SAMPLE"
+        }
+
+    The dual verdict is the held-out summary's verdict (the multiple-testing
+    correction lives in the tuning-pool DSR, not duplicated here).
+    """
+    # Defer import to avoid hard coupling on a module that may not exist in
+    # legacy installs (walk_forward is Phase C).
+    from walk_forward import split_held_out, held_out_summary
+    split = split_held_out(signals, held_out_days=held_out_days)
+    tune_sigs, held_sigs = split["tuning"], split["held_out"]
+    tune_cpcv = cpcv_summary(
+        tune_sigs,
+        n_groups=n_groups, n_test_groups=n_test_groups, embargo_pct=embargo_pct,
+        n_trials_for_dsr=n_trials_for_dsr,
+        sr_trial_std_for_dsr=sr_trial_std_for_dsr,
+    )
+    held = held_out_summary(
+        held_sigs,
+        tuning_wr=tune_cpcv.get("wr_mean"),
+        max_gap_pp=max_gap_pp,
+        min_wr_pct=min_held_out_wr_pct,
+    )
+    return {
+        "cutoff_iso":   split["cutoff_iso"],
+        "n_tuning":     len(tune_sigs),
+        "n_held_out":   len(held_sigs),
+        "tuning":       tune_cpcv,
+        "held_out":     held,
+        "verdict_dual": held["verdict"],
+    }
+
+
 __all__ = [
     "combinatorial_purged_kfold",
     "expected_max_sharpe",
@@ -729,6 +788,7 @@ __all__ = [
     "deflated_sharpe_ratio",
     "sharpe_ratio",
     "cpcv_summary",
+    "cpcv_summary_split",
     "cpcv_text_report",
     "CPCVSplitMetrics",
 ]

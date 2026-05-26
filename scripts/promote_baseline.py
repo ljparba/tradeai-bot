@@ -161,6 +161,53 @@ def rollback_to_run(target_run_id: int):
     print(f"[rollback] baseline pin reverted from {prev_pin_run} to Run-{target_run_id}")
 
 
+def _check_held_out_gate(run_id: int, held_out_days: int,
+                          max_gap_pp: float, min_wr_pct: float) -> dict:
+    """Phase C gate: pull the run's signals, run cpcv_summary_split, return
+    the verdict + key metrics. Used by auto-promotion to block configs that
+    pass tuning-CPCV but fail held-out generalization.
+
+    Returns dict with keys:
+        verdict      "ROBUST" | "BORDERLINE" | "OVERFIT" | "INSUFFICIENT_SAMPLE"
+        held_out_wr  headline WR on held-out signals
+        gap_pp       |tuning_wr - held_out_wr|
+        n_held_out
+        cutoff_iso
+        pass_gate    True iff verdict in ("ROBUST", "BORDERLINE")
+    """
+    sys.path.insert(0, _ROOT)
+    from validation import cpcv_summary_split
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute(
+        "SELECT ts, outcome, realized_r FROM backtest_signals "
+        "WHERE run_id=? ORDER BY ts",
+        (run_id,),
+    )
+    rows = cur.fetchall()
+    con.close()
+    sigs = [
+        {"ts": r[0], "outcome": r[1], "realized_r": r[2]}
+        for r in rows
+    ]
+    summary = cpcv_summary_split(
+        sigs,
+        held_out_days=held_out_days,
+        max_gap_pp=max_gap_pp,
+        min_held_out_wr_pct=min_wr_pct,
+    )
+    verdict = summary["verdict_dual"]
+    held = summary["held_out"]
+    return {
+        "verdict":     verdict,
+        "held_out_wr": held.get("wr_pct", 0.0),
+        "gap_pp":      held.get("gap_pp"),
+        "n_held_out":  summary["n_held_out"],
+        "cutoff_iso":  summary["cutoff_iso"],
+        "pass_gate":   verdict in ("ROBUST", "BORDERLINE"),
+    }
+
+
 def main():
     ap = argparse.ArgumentParser(description="Promote a backtest run as canonical baseline")
     ap.add_argument("--run-id", type=int, default=None)
@@ -179,6 +226,14 @@ def main():
                     help="Tag tune_history row as AUTO_PROMOTED (called by autonomous explorer)")
     ap.add_argument("--rollback-to-run", type=int, default=None,
                     help="Roll baseline_pin.json back to this prior run_id (operator path)")
+    # Phase C (2026-05-26): held-out gate (default 0 = disabled for backward compat)
+    ap.add_argument("--held-out-days", type=int, default=int(os.environ.get("HELD_OUT_DAYS", "0") or "0"),
+                    help="Phase C: enforce held-out PASS gate over the final N days. "
+                         "Auto-promotion is BLOCKED if the held-out verdict is OVERFIT.")
+    ap.add_argument("--held-out-max-gap-pp", type=float, default=8.0,
+                    help="Phase C: max |tuning_wr - held_out_wr| for ROBUST/BORDERLINE (default 8.0)")
+    ap.add_argument("--held-out-min-wr-pct", type=float, default=58.0,
+                    help="Phase C: held-out WR floor for ROBUST/BORDERLINE (default 58.0)")
     args = ap.parse_args()
 
     if args.rollback_to_run is not None:
@@ -186,6 +241,24 @@ def main():
 
     if args.run_id is None:
         ap.error("--run-id is required (unless using --rollback-to-run)")
+
+    # Phase C gate: check held-out BEFORE any promotion writes happen.
+    if args.held_out_days > 0:
+        gate = _check_held_out_gate(
+            args.run_id, args.held_out_days,
+            args.held_out_max_gap_pp, args.held_out_min_wr_pct,
+        )
+        print(f"[promote/held-out] verdict={gate['verdict']} "
+              f"n_held_out={gate['n_held_out']} "
+              f"wr={gate['held_out_wr']:.2f}% "
+              f"gap_pp={gate['gap_pp'] if gate['gap_pp'] is not None else 'n/a'} "
+              f"cutoff={gate['cutoff_iso']}")
+        if args.auto and not gate["pass_gate"]:
+            print(f"[promote/held-out] BLOCKED auto-promotion: held-out verdict={gate['verdict']}")
+            sys.exit(2)
+        if not gate["pass_gate"]:
+            print(f"[promote/held-out] WARNING — manual promotion proceeding "
+                  f"despite held-out verdict={gate['verdict']}")
 
     run = _fetch_run(args.run_id)
     settings = _current_settings()

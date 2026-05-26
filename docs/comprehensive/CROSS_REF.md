@@ -19,7 +19,7 @@
 | ID | Description | Final Status | Notes for Agents |
 |----|-------------|-------------|-----------------|
 | C1 | Real Telegram tokens hardcoded in env.bat | DONE — tokens removed from files | Manual token rotation via BotFather still required by operator |
-| C2 | Walk-forward split not a true hold-out | KNOWN STRUCTURAL | No true OOS lock possible without discarding all 15+ optimizer runs; CI warnings added to backtest output |
+| C2 | Walk-forward split not a true hold-out | **RESOLVED — 2026-05-26 (Phase C)** | Shipped `walk_forward.py` (expanding-window WFV + held-out lockbox) + `validation.py:cpcv_summary_split()` + `scripts/validate_baseline_held_out.py` (one-shot tool) + `docs/held_out_protocol.md`. `backtest.py:HELD_OUT_DAYS` env (default 0, opt-in) splits the most-recent N days as a never-tuned lockbox. `promote_baseline.py --auto` blocks promotion on OVERFIT verdict. 12 unit tests pass. Forward-looking honesty restored from 2026-05-26 onward; prior contamination of the tuning portion is acknowledged in `held_out_protocol.md` §5a (the operator's LIVE paper trading is the ground truth). |
 | C3 | iFVG spatial gate absent in backtest | DONE via M7 | Both backtest.py and crypto_alert.py now use `_ifvg_spatially_valid` |
 | C4 | Regime ADX thresholds static (backtest) vs DriftDetector-adjusted (live) | KNOWN STRUCTURAL | Architectural divergence deferred post-live; flag if DriftDetector thresholds shift regime classification by >10% |
 | C5 | OHLCV validation missing close/open bounds | DONE | `close < low` and `close > high` guards added to fetch_binance_candles() |
@@ -122,7 +122,7 @@
 
 | Severity | Total | Verified Fixed | Known Structural | Skipped | Disputed |
 |----------|-------|----------------|-----------------|---------|---------|
-| CRITICAL | 12 | 10 | 2 (C2, C4) | 0 | 0 |
+| CRITICAL | 12 | 11 | 1 (C4) | 0 | 0 |
 | HIGH | 25 | 23 | 1 (H23 operator task) | 0 | 0 |
 | MEDIUM | 27 | 26 | 0 | 0 | 1 (M24 liquid_hours) |
 | LOW | 12 | 8 | 0 | 4 | 0 |
@@ -133,7 +133,7 @@
 | **Total** | **94** | **81** | **7** | **4** | **1** |
 
 **Items agents should NOT flag as new bugs:**
-- C2 (walk-forward OOS — structural), C4 (ADX drift — deferred), H23 (auto-start — operator task)
+- C2 (walk-forward OOS) — RESOLVED 2026-05-26 Phase C; held-out lockbox shipped. C4 (ADX drift — deferred), H23 (auto-start — operator task)
 - L2, L3, L4, L5 (intentionally skipped)
 - M24 (liquid_hours — DISPUTED; only flag if LIVE vs BACKTEST configs diverge from each other)
 - DR-1 (dealing_range_gate — RESOLVED 2026-05-26 Phase B.1; gate now symmetric LIVE=true / BACKTEST=true. See Post-Audit row for n=7 caveat.)
