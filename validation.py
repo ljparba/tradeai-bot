@@ -585,13 +585,26 @@ def cpcv_summary(
         sr_benchmark=0.0,
     )
 
-    # Fix #5 per backtest-bias-detector audit: also compute PSR from the
-    # CPCV out-of-sample Sharpe distribution (uses mean of test-fold Sharpes
-    # as the point estimate). This is the honest OOS PSR — the in-sample
-    # PSR above can read 100% for an overfit strategy that fails OOS.
+    # C-NEW-1 fix (cycle-4 audit 2026-05-26): psr_oos and DSR previously used
+    # n_returns=len(pnl_pool) (full pool) while sr_observed=sharpe_mean (mean
+    # of OOS fold Sharpes computed from ~n*k/K obs each). This mismatch
+    # inflated sqrt(T-1) in the PSR standard-error denominator by ~1.67x at
+    # n=43 (sqrt(42)/sqrt(15)), overstating both psr_oos and DSR by ~12pp.
+    #
+    # Per Bailey & López de Prado 2014 eq (1)-(2), T must = the number of
+    # observations from which the Sharpe estimator was computed. For
+    # CPCV's mean-of-fold-Sharpes estimator, the conservative choice is to
+    # use the per-fold OOS observation count.
+    #
+    # Reference: validation.py audit cross-ref entry C-NEW-1 in
+    # docs/comprehensive/CROSS_REF.md.
+    n_oos_per_fold = max(1, int(n * n_test_groups / n_groups))
+    out["n_oos_per_fold"] = n_oos_per_fold
+
+    # PSR (OOS CPCV) — uses per-fold T to match the sharpe_mean estimator.
     out["psr_oos"] = probabilistic_sharpe_ratio(
         sr_observed=out["sharpe_mean"],
-        n_returns=len(pnl_pool),
+        n_returns=n_oos_per_fold,
         skew=_skew,
         kurtosis=_kurt,
         sr_benchmark=0.0,
@@ -601,7 +614,7 @@ def cpcv_summary(
     out["psr"] = out["psr_oos"]
 
     # DSR — only if caller supplied n_trials. Per Fix #5, scored against
-    # OOS mean Sharpe (sharpe_mean) so the verdict uses honest metrics.
+    # OOS mean Sharpe (sharpe_mean). Uses per-fold T per C-NEW-1 fix.
     if n_trials_for_dsr and n_trials_for_dsr > 1:
         sr_std_used = (sr_trial_std_for_dsr
                        if sr_trial_std_for_dsr is not None
@@ -616,7 +629,7 @@ def cpcv_summary(
             out["dsr_bench_sharpe"] = bench
             out["dsr"] = probabilistic_sharpe_ratio(
                 sr_observed=out["sharpe_mean"],  # OOS mean across CPCV folds
-                n_returns=len(pnl_pool),
+                n_returns=n_oos_per_fold,        # C-NEW-1: per-fold T (was len(pnl_pool))
                 skew=_skew,
                 kurtosis=_kurt,
                 sr_benchmark=bench,
@@ -694,7 +707,7 @@ def cpcv_text_report(summary: Dict[str, Any]) -> str:
         f"  PSR (in-sample) = {summary.get('psr_is', 0) * 100:.1f}%   "
         f"(informational - can read 100% for overfit strategies)",
         f"  PSR (OOS CPCV)  = {summary.get('psr_oos', 0) * 100:.1f}%   "
-        f"(HONEST - uses mean of CPCV test-fold Sharpes)",
+        f"(HONEST - mean of fold Sharpes, T={summary.get('n_oos_per_fold', '?')} per fold)",
     ]
     dsr = summary.get("dsr")
     if dsr is not None:

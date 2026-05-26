@@ -368,11 +368,21 @@ def walk_forward_text_report(wf: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def held_out_text_report(ho: Dict[str, Any], *, tuning_wr: Optional[float] = None) -> str:
-    """Compact human-readable held-out report block."""
+def held_out_text_report(
+    ho: Dict[str, Any],
+    *,
+    tuning_wr: Optional[float] = None,
+    held_out_days: int = 90,
+) -> str:
+    """Compact human-readable held-out report block.
+
+    Per S-1 fix (cycle-4 audit 2026-05-26): `held_out_days` is now a parameter
+    so the report header truthfully reflects the actual lockbox window size
+    (previously hardcoded to "90d" regardless of HELD_OUT_DAYS value).
+    """
     lines = []
     lines.append("-----------------------------------------------------------------")
-    lines.append("  HELD-OUT LOCKBOX (final 90d window, never touched during tuning)")
+    lines.append(f"  HELD-OUT LOCKBOX (final {held_out_days}d window, never touched during tuning)")
     lines.append("-----------------------------------------------------------------")
     lines.append(f"  n                 = {ho.get('n', 0)}")
     lines.append(f"  wins / losses     = {ho.get('wins', 0)} / {ho.get('losses', 0)}")

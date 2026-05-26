@@ -3201,17 +3201,27 @@ def main():
             walk_forward, walk_forward_text_report,
             split_held_out, held_out_summary, held_out_text_report,
         )
-        # WFV always runs (informational decay test)
-        _wfv = walk_forward(all_signals, n_windows=12, min_train_signals=10)
-        print("\n" + walk_forward_text_report(_wfv))
-
-        # Held-out lockbox: only runs when HELD_OUT_DAYS > 0
+        # FLAW-1 fix (cycle-4 audit): when HELD_OUT_DAYS > 0, the held-out
+        # window must NEVER be touched during tuning/analysis — including
+        # WFV decay detection. Split FIRST, then run WFV on tuning-only.
+        # When HELD_OUT_DAYS=0 (default), WFV runs on the full pool as
+        # before (no lockbox in effect, no contamination concern).
         if HELD_OUT_DAYS > 0:
             _split = split_held_out(all_signals, held_out_days=HELD_OUT_DAYS)
             _tune_sigs = _split["tuning"]
             _held_sigs = _split["held_out"]
             print(f"\n[HELD-OUT] cutoff={_split['cutoff_iso']} | "
                   f"tuning={len(_tune_sigs)} | held_out={len(_held_sigs)}")
+        else:
+            _tune_sigs = list(all_signals)
+            _held_sigs = []
+
+        # WFV runs on tuning pool only (lockbox-respecting)
+        _wfv = walk_forward(_tune_sigs, n_windows=12, min_train_signals=10)
+        print("\n" + walk_forward_text_report(_wfv))
+
+        # Held-out lockbox + dual CPCV: only when HELD_OUT_DAYS > 0
+        if HELD_OUT_DAYS > 0:
             # Re-run CPCV on tuning-only for dual-metric reporting
             try:
                 _cpcv_tune = cpcv_summary(
@@ -3230,7 +3240,9 @@ def main():
                 max_gap_pp=8.0,
                 min_wr_pct=58.0,
             )
-            print("\n" + held_out_text_report(_ho, tuning_wr=_tune_wr_ref))
+            print("\n" + held_out_text_report(
+                _ho, tuning_wr=_tune_wr_ref, held_out_days=HELD_OUT_DAYS,
+            ))
             # Surface the held-out verdict alongside CPCV verdict
             print(f"\n[PHASE C GATE] held_out_verdict={_ho['verdict']} | "
                   f"held_out_wr={_ho['wr_pct']:.2f}% | "

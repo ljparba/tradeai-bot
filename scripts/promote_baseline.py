@@ -167,32 +167,74 @@ def _check_held_out_gate(run_id: int, held_out_days: int,
     the verdict + key metrics. Used by auto-promotion to block configs that
     pass tuning-CPCV but fail held-out generalization.
 
+    S-2a/b fix (cycle-4 audit 2026-05-26):
+    - SELECT now includes all PnL columns required by validation's default
+      pnl_func (was: only ts/outcome/realized_r → silent zero-Sharpe).
+    - cpcv_summary_split call now passes n_trials_for_dsr +
+      sr_trial_std_for_dsr from bot_state (was: dsr=None → silent
+      verdict=MARGINAL bypass of multiple-testing correction).
+
     Returns dict with keys:
-        verdict      "ROBUST" | "BORDERLINE" | "OVERFIT" | "INSUFFICIENT_SAMPLE"
-        held_out_wr  headline WR on held-out signals
-        gap_pp       |tuning_wr - held_out_wr|
+        verdict       "ROBUST" | "BORDERLINE" | "OVERFIT" | "INSUFFICIENT_SAMPLE"
+        held_out_wr   headline WR on held-out signals
+        gap_pp        |tuning_wr - held_out_wr|
         n_held_out
         cutoff_iso
-        pass_gate    True iff verdict in ("ROBUST", "BORDERLINE")
+        tuning_dsr    DSR on the tuning-only CPCV (after C-NEW-1 fix)
+        pass_gate     True iff verdict in ("ROBUST", "BORDERLINE")
     """
     sys.path.insert(0, _ROOT)
     from validation import cpcv_summary_split
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
     cur.execute(
-        "SELECT ts, outcome, realized_r FROM backtest_signals "
-        "WHERE run_id=? ORDER BY ts",
+        "SELECT ts, outcome, realized_r, net_tp1_pct, net_sl_pct, net_tp2_pct "
+        "FROM backtest_signals WHERE run_id=? ORDER BY ts",
         (run_id,),
     )
     rows = cur.fetchall()
+    # Read honest DSR pool parameters from bot_state (same path as
+    # backtest.py:3140-3164 — keeps CPCV + held-out gate consistent).
+    n_trials_for_dsr = None
+    sr_trial_std = None
+    try:
+        distinct = con.execute(
+            "SELECT COUNT(DISTINCT config_hash) FROM backtest_runs "
+            "WHERE config_hash IS NOT NULL"
+        ).fetchone()[0] or 0
+        has_legacy = con.execute(
+            "SELECT 1 FROM backtest_runs WHERE config_hash IS NULL LIMIT 1"
+        ).fetchone() is not None
+        cumulative = 0
+        row = con.execute(
+            "SELECT value FROM bot_state WHERE key='cumulative_min_trials'"
+        ).fetchone()
+        if row and row[0]:
+            cumulative = int(json.loads(row[0]).get("value") or 0)
+        candidate = distinct + (1 if has_legacy else 0) + 1
+        candidate = max(candidate, cumulative)
+        if candidate > 1:
+            n_trials_for_dsr = int(candidate)
+        row = con.execute(
+            "SELECT value FROM bot_state WHERE key='cross_config_sr_trial_std'"
+        ).fetchone()
+        if row and row[0]:
+            v = json.loads(row[0]).get("value")
+            if isinstance(v, (int, float)) and v > 0:
+                sr_trial_std = float(v)
+    except Exception:
+        pass
     con.close()
     sigs = [
-        {"ts": r[0], "outcome": r[1], "realized_r": r[2]}
+        {"ts": r[0], "outcome": r[1], "realized_r": r[2],
+         "net_tp1_pct": r[3], "net_sl_pct": r[4], "net_tp2_pct": r[5]}
         for r in rows
     ]
     summary = cpcv_summary_split(
         sigs,
         held_out_days=held_out_days,
+        n_trials_for_dsr=n_trials_for_dsr,
+        sr_trial_std_for_dsr=sr_trial_std,
         max_gap_pp=max_gap_pp,
         min_held_out_wr_pct=min_wr_pct,
     )
@@ -204,6 +246,7 @@ def _check_held_out_gate(run_id: int, held_out_days: int,
         "gap_pp":      held.get("gap_pp"),
         "n_held_out":  summary["n_held_out"],
         "cutoff_iso":  summary["cutoff_iso"],
+        "tuning_dsr":  summary["tuning"].get("dsr"),
         "pass_gate":   verdict in ("ROBUST", "BORDERLINE"),
     }
 

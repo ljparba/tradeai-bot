@@ -159,8 +159,11 @@ def main():
     print("\n[CPCV on tuning-only pool]")
     print(cpcv_text_report(summary["tuning"]))
 
-    print("\n" + held_out_text_report(summary["held_out"],
-                                       tuning_wr=summary["tuning"].get("wr_mean")))
+    print("\n" + held_out_text_report(
+        summary["held_out"],
+        tuning_wr=summary["tuning"].get("wr_mean"),
+        held_out_days=args.held_out_days,
+    ))
 
     verdict = summary["verdict_dual"]
     print(f"\n[PHASE C VERDICT] {verdict}")
