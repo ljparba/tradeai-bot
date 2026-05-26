@@ -21,7 +21,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 from collections import deque
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 _ROOT   = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(_ROOT, "data", "signals.db")
@@ -80,6 +80,35 @@ if OGD_DSR_GATE_MODE not in ("strict", "soft", "off"):
           f"falling back to 'soft'")
     OGD_DSR_GATE_MODE = "soft"
 OGD_DSR_FAIL_LR_SCALE = 0.25   # soft-mode LR multiplier when verdict=FAIL
+
+# R9 fix (master audit 2026-05-26): learning-freeze predicate.
+# Detects abnormal conditions and either logs (shadow) or actually
+# freezes OGD updates (active). Default = shadow per audit guidance.
+#
+# Triggers monitored:
+#   1. consecutive_loss_spike  — N consecutive LOSS outcomes globally
+#   2. dsr_fail_streak         — verdict=FAIL persisting for ≥ N hours
+#   3. weight_volatility_spike — single-update gradient_l1 exceeds threshold
+#                                 (signals an outlier reward / volatility)
+#
+# Modes (OGD_FREEZE_MODE env var):
+#   "off"    — predicate disabled (always returns frozen=False)
+#   "shadow" — predicate runs + logs + Telegram-alerts active triggers;
+#              OGD continues normally. Default — gives operator data to
+#              calibrate before going active.
+#   "active" — predicate runs + freezes OGD when ANY trigger fires;
+#              update() returns early without applying gradient
+OGD_FREEZE_MODE = os.environ.get("OGD_FREEZE_MODE", "shadow").lower()
+if OGD_FREEZE_MODE not in ("off", "shadow", "active"):
+    print(f"[ADAPTIVE] WARN OGD_FREEZE_MODE={OGD_FREEZE_MODE!r} unrecognised — "
+          f"falling back to 'shadow'")
+    OGD_FREEZE_MODE = "shadow"
+
+# Trigger thresholds (env-overridable)
+OGD_FREEZE_CONSEC_LOSSES   = int(os.environ.get("OGD_FREEZE_CONSEC_LOSSES",  "5"))   # globally consecutive LOSS count
+OGD_FREEZE_DSR_FAIL_HOURS  = float(os.environ.get("OGD_FREEZE_DSR_FAIL_HOURS", "24")) # hours of persistent DSR=FAIL
+OGD_FREEZE_VOLATILITY_L1   = float(os.environ.get("OGD_FREEZE_VOLATILITY_L1", "0.10")) # per-update gradient L1 threshold
+OGD_FREEZE_ALERT_INTERVAL  = float(os.environ.get("OGD_FREEZE_ALERT_INTERVAL", "3600")) # Telegram dedup window (s)
 
 # ── Sample-size utilities (Task 15) ──────────────────────
 def label_sample_size(n: int) -> str:
@@ -454,6 +483,146 @@ class AdaptiveWeightEngine:
         # default: soft mode
         return (OGD_DSR_FAIL_LR_SCALE, "soft_fail")
 
+    # ── R9: Learning-freeze predicate ────────────────────────────────────────
+    def _check_consecutive_loss_spike(self) -> bool:
+        """Trigger 1: ≥ OGD_FREEZE_CONSEC_LOSSES consecutive LOSS outcomes
+        globally in the `results` table. Indicates a systemic regime
+        misalignment, not a single-token drawdown.
+        """
+        try:
+            conn = _connect()
+            rows = conn.execute(
+                "SELECT result FROM results ORDER BY id DESC LIMIT ?",
+                (OGD_FREEZE_CONSEC_LOSSES,)
+            ).fetchall()
+            conn.close()
+            if len(rows) < OGD_FREEZE_CONSEC_LOSSES:
+                return False  # not enough history to evaluate
+            return all(r[0] == "LOSS" for r in rows)
+        except Exception:
+            return False
+
+    def _check_dsr_fail_streak(self) -> bool:
+        """Trigger 2: verdict=FAIL has persisted for ≥ OGD_FREEZE_DSR_FAIL_HOURS.
+
+        A single FAIL run isn't enough — could be normal small-n noise.
+        Persistence indicates a real validation breakdown that warrants
+        suspending learning.
+        """
+        try:
+            import time as _time
+            now = _time.time()
+            conn = _connect()
+            row = conn.execute(
+                "SELECT value FROM bot_state WHERE key='latest_cpcv_verdict'"
+            ).fetchone()
+            conn.close()
+            if not row or not row[0]:
+                return False
+            blob = json.loads(row[0])
+            if blob.get("verdict") != "FAIL":
+                return False
+            # Parse `updated_at` from the verdict blob (ISO format)
+            updated_iso = blob.get("updated_at")
+            if not updated_iso:
+                return False
+            try:
+                dt = datetime.strptime(updated_iso, "%Y-%m-%d %H:%M:%S")
+                dt = dt.replace(tzinfo=timezone.utc)
+                first_fail_ts = dt.timestamp()
+            except Exception:
+                return False
+            age_hours = (now - first_fail_ts) / 3600.0
+            return age_hours >= OGD_FREEZE_DSR_FAIL_HOURS
+        except Exception:
+            return False
+
+    def _check_weight_volatility_spike(self, token: str, prev_weights: dict,
+                                        new_weights: dict) -> bool:
+        """Trigger 3: a single OGD update produces gradient_l1 above the
+        configured threshold. Indicates an outlier reward or rapid weight
+        drift — possibly profit_pct unit-violation (caught earlier by R8)
+        or a true regime shock.
+        """
+        try:
+            l1 = sum(abs(new_weights.get(f, 0.0) - prev_weights.get(f, 0.0))
+                     for f in FEATURES)
+            return l1 >= OGD_FREEZE_VOLATILITY_L1
+        except Exception:
+            return False
+
+    def _evaluate_freeze_predicate(self, token: str,
+                                    prev_weights: dict,
+                                    new_weights: dict) -> Dict[str, Any]:
+        """Return {triggers: [...], frozen: bool, mode: str}.
+
+        Called from update() AFTER the new weights are computed (so the
+        weight-volatility trigger can see the proposed delta) but BEFORE
+        they are persisted in active mode.
+
+        `frozen` is True only in 'active' mode AND when ≥1 trigger fires.
+        Shadow mode never sets frozen=True (logs only).
+        """
+        if OGD_FREEZE_MODE == "off":
+            return {"triggers": [], "frozen": False, "mode": "off"}
+        triggers: List[str] = []
+        if self._check_consecutive_loss_spike():
+            triggers.append("consecutive_loss_spike")
+        if self._check_dsr_fail_streak():
+            triggers.append("dsr_fail_streak")
+        if self._check_weight_volatility_spike(token, prev_weights, new_weights):
+            triggers.append(f"weight_volatility_spike({token})")
+        return {
+            "triggers": triggers,
+            "frozen": OGD_FREEZE_MODE == "active" and len(triggers) > 0,
+            "mode": OGD_FREEZE_MODE,
+        }
+
+    def _maybe_alert_freeze(self, predicate_result: Dict[str, Any]) -> None:
+        """R9: emit a 1/hr-deduped log line + persist freeze state to bot_state.
+
+        Telegram alert wiring is intentionally not in this module (no
+        secrets access). The print() goes to journalctl where the watchdog
+        wrapper can pick it up if needed. Operator-readable.
+        """
+        triggers = predicate_result.get("triggers", [])
+        if not triggers:
+            return
+        try:
+            import time as _time
+            now = _time.time()
+            # Dedup: only alert once per OGD_FREEZE_ALERT_INTERVAL
+            conn = _connect()
+            row = conn.execute(
+                "SELECT value FROM bot_state WHERE key='learning_freeze_state'"
+            ).fetchone()
+            last_alert = 0.0
+            if row and row[0]:
+                try:
+                    blob = json.loads(row[0])
+                    last_alert = float(blob.get("last_alert_ts", 0.0))
+                except Exception:
+                    last_alert = 0.0
+            if now - last_alert >= OGD_FREEZE_ALERT_INTERVAL:
+                tag = "FREEZE" if predicate_result.get("frozen") else "WARN-SHADOW"
+                print(f"[ADAPTIVE R9-{tag}] OGD freeze predicate fired: "
+                      f"triggers={triggers} mode={predicate_result.get('mode')}")
+                new_blob = json.dumps({
+                    "frozen":          predicate_result.get("frozen", False),
+                    "active_triggers": triggers,
+                    "mode":            predicate_result.get("mode"),
+                    "last_alert_ts":   now,
+                    "since_ts":        now,
+                })
+                conn.execute(
+                    "INSERT OR REPLACE INTO bot_state(key,value) VALUES(?,?)",
+                    ("learning_freeze_state", new_blob),
+                )
+                conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"[ADAPTIVE R9] _maybe_alert_freeze error: {e}")
+
     # ── Public API ───────────────────────────────────────
     def get_weights(self, token: str) -> Dict[str, float]:
         """Return current normalised weights for token (falls back to defaults)."""
@@ -582,6 +751,29 @@ class AdaptiveWeightEngine:
         if total > 0:
             for feat in FEATURES:
                 w[feat] = round(w[feat] / total, 6)
+
+        # R9 fix (master audit 2026-05-26): learning-freeze predicate.
+        # Evaluate triggers using BOTH the look-back signals (consecutive
+        # losses, DSR fail streak) AND the proposed weight delta
+        # (volatility spike). In active mode + any trigger → DISCARD the
+        # update by restoring w_old to self._weights[token] and skipping
+        # persistence. In shadow mode → log + alert but keep the update.
+        _freeze_eval = self._evaluate_freeze_predicate(token, w_old, w)
+        if _freeze_eval.get("triggers"):
+            self._maybe_alert_freeze(_freeze_eval)
+        if _freeze_eval.get("frozen"):
+            # Active mode: revert the proposed update + skip persistence.
+            print(f"[ADAPTIVE R9-FREEZE] {token} OGD update DISCARDED — "
+                  f"triggers={_freeze_eval['triggers']} (active mode). "
+                  f"Sample-count still incremented but weights unchanged.")
+            self._weights[token]  = w_old   # restore prior weights
+            # Velocity NOT restored — momentum decay still happens so the
+            # next post-freeze update isn't blindsided by stale velocity
+            self._n[token]        = n + 1
+            self._n_effective[token] = self._n_effective.get(token, 0.0) + min(1.0, abs(reward))
+            if persist:
+                self._persist_token(token)
+            return
 
         self._weights[token]  = w
         self._velocity[token] = v
