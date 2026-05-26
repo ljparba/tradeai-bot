@@ -3259,7 +3259,15 @@ def main():
                   f"held_out_wr={_ho['wr_pct']:.2f}% | "
                   f"gap_pp={_ho.get('gap_pp') if _ho.get('gap_pp') is not None else 'n/a'}")
     except Exception as _wfv_exc:
-        print(f"\n[WFV/HELD-OUT] skipped — {type(_wfv_exc).__name__}: {_wfv_exc}")
+        # NF-5 fix (cycle-5 audit 2026-05-26): make Phase C failures
+        # operator-visible. Previously this except branch existed to keep
+        # legacy installs running if walk_forward.py wasn't present, but
+        # the silent swallow risks hiding genuine bugs (e.g. C-N4-style
+        # NameError) from the operator for weeks. Now print a prominent
+        # WARN line so the failure is impossible to miss in journalctl.
+        print(f"\n[WARN] Phase C WFV/HELD-OUT SKIPPED — {type(_wfv_exc).__name__}: {_wfv_exc}")
+        print(f"[WARN] This usually means walk_forward.py is missing/broken. "
+              f"Lockbox and decay-detection reports are NOT being produced.")
 
     tmpl_report    = template_comparison_report(all_signals)
     print_template_report(tmpl_report)

@@ -188,7 +188,7 @@ def _check_held_out_gate(run_id: int, held_out_days: int,
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
     cur.execute(
-        "SELECT ts, outcome, realized_r, net_tp1_pct, net_sl_pct, net_tp2_pct "
+        "SELECT ts, outcome, realized_r, net_tp1_pct, net_sl_pct, net_tp2_pct, tb_t1 "
         "FROM backtest_signals WHERE run_id=? ORDER BY ts",
         (run_id,),
     )
@@ -224,12 +224,31 @@ def _check_held_out_gate(run_id: int, held_out_days: int,
                 sr_trial_std = float(v)
     except Exception:
         pass
+    # NF-1 fix (cycle-5 audit 2026-05-26): derive closed_at from tb_t1
+    # (triple-barrier exit bar × 5min) so CPCV purging in the promotion
+    # gate uses real label windows instead of falling back to the median-
+    # horizon heuristic. Matches the H-A pattern already applied in
+    # scripts/compute_cross_config_sr_std.py.
+    sigs = []
+    for r in rows:
+        ts, outcome, realized_r, n_tp1, n_sl, n_tp2, tb_t1 = r
+        if tb_t1 is not None and tb_t1 > 0:
+            closed_at_row = con.execute(
+                "SELECT datetime(?, '+' || ? || ' minutes')",
+                (ts, int(tb_t1) * 5),
+            ).fetchone()
+            closed_at = closed_at_row[0] if closed_at_row else ts
+        else:
+            closed_at_row = con.execute(
+                "SELECT datetime(?, '+24 hours')", (ts,),
+            ).fetchone()
+            closed_at = closed_at_row[0] if closed_at_row else ts
+        sigs.append({
+            "ts": ts, "outcome": outcome, "realized_r": realized_r,
+            "closed_at": closed_at,
+            "net_tp1_pct": n_tp1, "net_sl_pct": n_sl, "net_tp2_pct": n_tp2,
+        })
     con.close()
-    sigs = [
-        {"ts": r[0], "outcome": r[1], "realized_r": r[2],
-         "net_tp1_pct": r[3], "net_sl_pct": r[4], "net_tp2_pct": r[5]}
-        for r in rows
-    ]
     summary = cpcv_summary_split(
         sigs,
         held_out_days=held_out_days,
