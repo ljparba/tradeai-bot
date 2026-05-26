@@ -543,6 +543,15 @@ class AdaptiveWeightEngine:
         A single FAIL run isn't enough — could be normal small-n noise.
         Persistence indicates a real validation breakdown that warrants
         suspending learning.
+
+        M-CY7-4 fix (cycle-7 audit 2026-05-26): prefer `first_fail_onset` over
+        `updated_at`. Previously the streak timer measured age of the latest
+        backtest write, so a FAIL→FAIL re-run within the 24h window kept
+        resetting the clock and the trigger could never actually fire. The
+        backtest writer now stamps `first_fail_onset` at the START of a FAIL
+        streak and preserves it across subsequent FAIL writes; falls back to
+        `updated_at` for back-compat with verdict blobs written before
+        cycle-7 (no semantic regression — old behavior on missing field).
         """
         try:
             import time as _time
@@ -557,12 +566,12 @@ class AdaptiveWeightEngine:
             blob = json.loads(row[0])
             if blob.get("verdict") != "FAIL":
                 return False
-            # Parse `updated_at` from the verdict blob (ISO format)
-            updated_iso = blob.get("updated_at")
-            if not updated_iso:
+            # Prefer first_fail_onset (tight semantics); fall back to updated_at
+            onset_iso = blob.get("first_fail_onset") or blob.get("updated_at")
+            if not onset_iso:
                 return False
             try:
-                dt = datetime.strptime(updated_iso, "%Y-%m-%d %H:%M:%S")
+                dt = datetime.strptime(onset_iso, "%Y-%m-%d %H:%M:%S")
                 dt = dt.replace(tzinfo=timezone.utc)
                 first_fail_ts = dt.timestamp()
             except Exception:
@@ -798,14 +807,22 @@ class AdaptiveWeightEngine:
             self._maybe_alert_freeze(_freeze_eval)
         if _freeze_eval.get("frozen"):
             # Active mode: revert the proposed update + skip persistence.
+            # M-CY7-3 fix (cycle-7 audit 2026-05-26): when the update is
+            # DISCARDED, n_effective MUST NOT be incremented — the gradient
+            # contributed zero effective learning. Previously this branch
+            # bumped n_effective alongside raw n, causing the n_eff
+            # diagnostic to overstate real learning during freeze periods
+            # (inert today because R9 default mode is shadow, not active).
+            # Raw n IS still incremented so the regular learning-rate ramp
+            # (warmup → MIN_SAMPLES) reflects elapsed signals.
             print(f"[ADAPTIVE R9-FREEZE] {token} OGD update DISCARDED — "
                   f"triggers={_freeze_eval['triggers']} (active mode). "
-                  f"Sample-count still incremented but weights unchanged.")
+                  f"Sample-count still incremented but weights unchanged "
+                  f"and n_effective NOT bumped.")
             self._weights[token]  = w_old   # restore prior weights
             # Velocity NOT restored — momentum decay still happens so the
             # next post-freeze update isn't blindsided by stale velocity
             self._n[token]        = n + 1
-            self._n_effective[token] = self._n_effective.get(token, 0.0) + min(1.0, abs(reward))
             if persist:
                 self._persist_token(token)
             return

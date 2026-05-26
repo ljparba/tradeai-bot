@@ -3203,10 +3203,6 @@ def main():
             print(f"[CKPT] saved — {len(completed_tokens)} tokens done, {len(all_signals)} signals")
         time.sleep(0.5)
 
-    print_report(all_signals)
-    wf_results = run_rolling_walk_forward(all_signals, train_days=90, test_days=30, step_days=30)
-    print_rolling_wf_report(wf_results)
-
     # FLAW-2 fix (cycle-6 audit 2026-05-26): pre-compute held-out split BEFORE
     # the primary CPCV call so the headline CPCV runs on tuning-only when
     # HELD_OUT_DAYS > 0. Previously the primary cpcv_summary used all_signals
@@ -3215,6 +3211,11 @@ def main():
     # primary CPCV runs on the full pool exactly as before — no behavior change.
     # Also closes MOD-1: pre-init guards Phase D.1's _tune_sigs reference at
     # line 3335 against NameError if walk_forward.py import fails downstream.
+    # M-CY7-2 fix (cycle-7 audit 2026-05-26): split moved ABOVE print_report
+    # and run_rolling_walk_forward so the display/WFV layer also consumes the
+    # tuning-only pool when HELD_OUT_DAYS>0 — eliminates the cosmetic
+    # inconsistency where the printed WFV header included held-out signals
+    # while CPCV correctly used tuning-only.
     _tune_sigs = list(all_signals)
     _held_sigs: list = []
     _held_out_cutoff_iso = None
@@ -3233,6 +3234,10 @@ def main():
                   f"Falling back to FULL POOL for CPCV (lockbox NOT enforced).")
             _tune_sigs = list(all_signals)
             _held_sigs = []
+
+    print_report(_tune_sigs)
+    wf_results = run_rolling_walk_forward(_tune_sigs, train_days=90, test_days=30, step_days=30)
+    print_rolling_wf_report(wf_results)
 
     # Sprint 3 item 4 / Top-10 #5: CPCV + Deflated Sharpe — honest metrics
     # alongside the single-split walk-forward above. Skipped silently if the
@@ -3324,13 +3329,42 @@ def main():
             # The flag is produced by validation.py:cpcv_summary as part of the
             # C-B verdict-cap fix (cycle-2). Default True via .get() if absent
             # so older verdict computations don't regress to soft-scale.
+            #
+            # M-CY7-4 fix (cycle-7 audit 2026-05-26): track `first_fail_onset`
+            # separately from `updated_at` so a FAIL→FAIL re-run doesn't reset
+            # the 24h DSR-fail-streak timer used by R9's freeze predicate.
+            # When the new verdict is FAIL and the previous verdict was also
+            # FAIL with a recorded onset, we preserve that onset; otherwise we
+            # stamp a new onset = updated_at. When verdict != FAIL the onset
+            # is cleared so the next FAIL streak starts fresh.
+            _now_iso = _dt.now(_tz.utc).strftime("%Y-%m-%d %H:%M:%S")
+            _prev_first_fail_onset = None
+            try:
+                _vconn_r = _sqlite3.connect(BT_DB_PATH, timeout=10)
+                _row_prev = _vconn_r.execute(
+                    "SELECT value FROM bot_state WHERE key='latest_cpcv_verdict'"
+                ).fetchone()
+                _vconn_r.close()
+                if _row_prev and _row_prev[0]:
+                    _prev_blob = json.loads(_row_prev[0])
+                    if (isinstance(_prev_blob, dict)
+                            and _prev_blob.get("verdict") == "FAIL"
+                            and _prev_blob.get("first_fail_onset")):
+                        _prev_first_fail_onset = _prev_blob["first_fail_onset"]
+            except Exception:
+                _prev_first_fail_onset = None
+            if _cpcv.get("verdict") == "FAIL":
+                _first_fail_onset = _prev_first_fail_onset or _now_iso
+            else:
+                _first_fail_onset = None
             _verdict_blob = json.dumps({
                 "verdict":           _cpcv.get("verdict"),
                 "wr_mean":           _cpcv.get("wr_mean"),
                 "dsr":               _cpcv.get("dsr"),
                 "dsr_gate_applied":  _cpcv.get("dsr_gate_applied", True),
                 "n_signals":         _cpcv.get("n_signals"),
-                "updated_at":        _dt.now(_tz.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                "updated_at":        _now_iso,
+                "first_fail_onset":  _first_fail_onset,
                 "source":            "backtest.cpcv_summary",
                 "config_hash":       _run_config_hash,
             })
