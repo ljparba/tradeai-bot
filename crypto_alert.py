@@ -19,6 +19,7 @@ Project layout:
   scripts/          — start_bot.bat, start_tracker.bat
 """
 import os, sqlite3, requests, time, json, logging, html, re
+import signal as _sig_module  # M-C fix (cycle-4): SIGTERM handler for graceful shutdown
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -1447,6 +1448,28 @@ def fetch_binance_candles(symbol, interval, limit):
             _sc   = getattr(_resp, 'status_code', None)
             if _sc == 418:
                 print(f"[BINANCE] {symbol} {interval}: IP BANNED (418) — aborting fetch")
+                # L-A fix (cycle-4 audit 2026-05-26): emit Telegram alert with
+                # 1-per-hour dedup. Previously silent: bot just stopped fetching
+                # without operator notification. With the watchdog providing
+                # partial coverage (no heartbeat → alert), the direct 418 alert
+                # closes the reaction-time gap.
+                _now = time.time()
+                _last_alert = globals().get("_BINANCE_418_ALERT_TS", 0.0)
+                if (_now - _last_alert) >= 3600.0:
+                    globals()["_BINANCE_418_ALERT_TS"] = _now
+                    try:
+                        send_telegram(
+                            "<b>[BINANCE 418 — IP BANNED]</b>\n"
+                            f"Symbol: <code>{html.escape(str(symbol))}</code> "
+                            f"interval: <code>{html.escape(str(interval))}</code>\n\n"
+                            "Binance returned HTTP 418 — IP-level ban. Fetches "
+                            "are silently aborting. Check VPN status + Binance "
+                            "API console for active bans.\n\n"
+                            "<i>This alert auto-suppresses for 1 hour while the "
+                            "ban persists.</i>"
+                        )
+                    except Exception:
+                        pass
                 return {}
             if _sc == 429:
                 _wait = min(int(getattr(_resp, 'headers', {}).get("Retry-After", 30)), 30)
@@ -3011,7 +3034,31 @@ def maybe_send_daily_summary(prices):
 # ══════════════════════════════════════════════════════════
 # MAIN
 # ══════════════════════════════════════════════════════════
+# M-C fix (cycle-4 audit 2026-05-26): graceful SIGTERM handler. systemctl
+# restart sends SIGTERM; without a handler the Python process exits
+# uncaught mid-cycle → in-flight Telegram sends may truncate, atomic
+# DB writes survive but the operator gets no "shutting down" notice.
+# Now: SIGTERM sets _SHUTDOWN_REQUESTED so the main loop exits cleanly
+# at the next safe point (between cycles) + sends a final Telegram alert.
+_SHUTDOWN_REQUESTED = False
+
+
+def _on_shutdown(signum, frame):
+    global _SHUTDOWN_REQUESTED
+    _SHUTDOWN_REQUESTED = True
+    print(f"\n[SIGTERM] graceful shutdown requested (signal {signum}); "
+          f"will exit at next safe point.")
+
+
 def main():
+    # M-C fix: install SIGTERM handler. SIGINT (Ctrl+C) already raises
+    # KeyboardInterrupt which the main loop catches at line 3311.
+    try:
+        _sig_module.signal(_sig_module.SIGTERM, _on_shutdown)
+    except (ValueError, OSError) as _e:
+        # ValueError: not in main thread; OSError: signal not available
+        print(f"[BOOT] SIGTERM handler not installed: {_e}")
+
     if not TELEGRAM_TOKEN:
         print("ERROR: Set TELEGRAM_TOKEN first")
         print("  CMD:        set TELEGRAM_TOKEN=your_token")
@@ -3307,6 +3354,16 @@ def main():
                 "restart_count": _persisted.get("restart_count", 1),
             })
             print(f"[{datetime.now().strftime('%H:%M')}] Done {elapsed:.0f}s — sleep {sleep_t:.0f}s")
+            # M-C fix: check shutdown flag between cycles; honor SIGTERM
+            # without waiting through a full sleep.
+            if _SHUTDOWN_REQUESTED:
+                print("[SHUTDOWN] SIGTERM received — exiting main loop cleanly.")
+                try:
+                    send_telegram("<b>TradeAI v13 STOPPED</b>\n\nSIGTERM received "
+                                  "(graceful shutdown — likely systemctl restart).")
+                except Exception:
+                    pass
+                break
             time.sleep(sleep_t)
         except KeyboardInterrupt:
             print("\n[STOPPED]"); send_telegram("<b>TradeAI v13 STOPPED</b>\n\nKeyboard interrupt received."); break
