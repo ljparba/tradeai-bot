@@ -302,6 +302,12 @@ class AdaptiveWeightEngine:
         self._weights:          Dict[str, Dict[str, float]] = {}
         self._velocity:         Dict[str, Dict[str, float]] = {}
         self._n:                Dict[str, int]               = {}  # closed-signal count per token
+        # R6 fix (master audit 2026-05-26): per-token last-decay timestamp for
+        # event-driven decay. Loaded from bot_state.last_decay_times on init;
+        # persisted on every apply_decay_if_due() call. Default 0.0 means
+        # "first call will apply a full decay step since epoch" which the
+        # rate-limit + 7-day suppression guards protect against.
+        self._last_decay_time:  Dict[str, float]             = {}
         # OGD-PHASEA (cycle-4 audit 2026-05-26): track effective sample count
         # alongside raw n. Each update contributes |reward| ∈ [0, 1] to
         # n_effective. Phase A's stale-reject raised PARTIAL_TP1 share from
@@ -328,6 +334,7 @@ class AdaptiveWeightEngine:
             self._n[token]                = 0
             self._n_effective[token]      = 0.0
             self._last_update_time[token] = 0.0
+            self._last_decay_time[token]  = 0.0
 
     def _load_all(self):
         rows = []
@@ -375,6 +382,24 @@ class AdaptiveWeightEngine:
                     self._velocity[token][feature] = float(velocity or 0.0)
         except Exception:
             pass  # backtest table may not have data yet — not a failure
+
+        # R6 fix (master audit 2026-05-26): load per-token last_decay_time
+        # from bot_state.last_decay_times so event-driven decay state
+        # survives bot restarts. Absence is fine — fresh tokens default
+        # to 0.0 which the rate-limit + suppression guards handle safely.
+        try:
+            conn = _connect()
+            row = conn.execute(
+                "SELECT value FROM bot_state WHERE key='last_decay_times'"
+            ).fetchone()
+            conn.close()
+            if row and row[0]:
+                blob = json.loads(row[0])
+                for tok, ts in blob.items():
+                    if isinstance(ts, (int, float)):
+                        self._last_decay_time[tok] = float(ts)
+        except Exception:
+            pass  # bot_state row absent on fresh install — first decay creates it
 
         loaded = list(self._weights.keys())
         if loaded:
@@ -888,10 +913,21 @@ class AdaptiveWeightEngine:
 
     def decay_toward_default(self, token: str, decay_rate: float = 0.0004) -> None:
         """Task 16: gently pull weights toward defaults to prevent long-term divergence.
-        Called every 30 min (~48×/day). At decay_rate=0.0004, ~82% of learned deviation
-        survives the ~514-call gap between signals (34 signals/year). Previously 0.002
-        erased 64% per inter-signal gap — see H9 fix. Option B (per-trade decay) deferred.
-        LOW #4: suppressed for 7 days after a live OGD update to protect freshly learned weights."""
+
+        DEPRECATED post-R6 (master audit 2026-05-26): use `apply_decay_if_due()`
+        instead — it scales decay by actual elapsed time rather than assuming
+        a fixed 30-min cron cadence (which decayed weights on weekends/dead
+        hours when no signals were happening). This method is retained as a
+        no-cadence-knowledge fallback for legacy callers + the explorer's
+        bootstrap path.
+
+        At decay_rate=0.0004, ~82% of learned deviation survives the ~514-call
+        gap between signals (34 signals/year). Previously 0.002 erased 64%
+        per inter-signal gap — see H9 fix.
+
+        LOW #4: suppressed for 7 days after a live OGD update to protect
+        freshly learned weights.
+        """
         self._ensure_token(token)
         import time as _time
         if _time.time() - self._last_update_time.get(token, 0.0) < 7 * 86400:
@@ -906,6 +942,96 @@ class AdaptiveWeightEngine:
                 any_change = True
         if any_change:
             self._persist_token(token)
+
+    # R6 fix (master audit 2026-05-26): event-driven decay constants.
+    # `DECAY_RATE_PER_HOUR` is calibrated so a 30-min cycle (the old cron
+    # cadence) produces a decay step equivalent to the old `decay_rate=0.0004`
+    # constant — preserves observed long-term retention behavior exactly.
+    #   0.0004 per 30 min = 0.0008 per hour = DECAY_RATE_PER_HOUR.
+    # The maximum effective decay per call is capped at MAX_DECAY_PER_CALL
+    # so a long-stale token (e.g. 90 days no signals) doesn't snap back to
+    # defaults in one step on first scoring after a hiatus.
+
+    def apply_decay_if_due(self, token: str,
+                            decay_rate_per_hour: float = 0.0008,
+                            min_interval_sec: int = 1800,
+                            max_decay_per_call: float = 0.05) -> bool:
+        """R6 fix (master audit 2026-05-26): event-driven decay.
+
+        Replaces the wall-clock 30-min cron loop. Scales decay magnitude to
+        actual elapsed wall-time since the last decay call. Effects:
+
+        - Weekend / dead-hour drift is unchanged (decay still accumulates
+          time-wise, just applied when the token is next checked)
+        - If the bot is down for hours and comes back up, the first call
+          applies the accumulated decay in one shot (capped at
+          `max_decay_per_call` to prevent shocks)
+        - 7-day OGD-suppression guard is still honored (M-I-style protection
+          for freshly learned weights)
+        - Rate-limited to `min_interval_sec` between calls (default 30 min)
+          so this is safe to invoke per-cycle from the main loop without
+          excessive DB churn
+
+        Returns True if any weight was changed; False otherwise.
+        """
+        self._ensure_token(token)
+        import time as _time
+        now = _time.time()
+
+        # Protect freshly learned weights (M-I)
+        if now - self._last_update_time.get(token, 0.0) < 7 * 86400:
+            return False
+
+        # Rate-limit between decay applications
+        last_decay = self._last_decay_time.get(token, 0.0)
+        elapsed = now - last_decay if last_decay > 0 else float(min_interval_sec)
+        if elapsed < min_interval_sec:
+            return False  # too soon since last decay
+
+        # Compute time-scaled decay magnitude with cap
+        hours_elapsed = elapsed / 3600.0
+        effective_rate = min(max_decay_per_call,
+                             decay_rate_per_hour * hours_elapsed)
+
+        w = self._weights[token]
+        dw = DEFAULT_WEIGHTS
+        any_change = False
+        for feat in FEATURES:
+            delta = effective_rate * (dw[feat] - w[feat])
+            new_v = round(w[feat] + delta, 6)
+            if abs(delta) > 0.0001:
+                any_change = True
+            w[feat] = new_v
+
+        self._last_decay_time[token] = now
+        if any_change:
+            self._persist_token(token)
+        # Always persist last_decay_time even if no weight changed
+        # (so the rate-limit timer resets)
+        self._persist_last_decay_times()
+        return any_change
+
+    def _persist_last_decay_times(self) -> None:
+        """R6: persist the per-token last-decay timestamps to bot_state.
+
+        Single-row JSON blob to minimize write churn — the dict is small
+        (10 tokens × 1 float) and updates are infrequent (≤ once per 30 min
+        per token).
+        """
+        try:
+            payload = json.dumps(dict(self._last_decay_time))
+            conn = _connect()
+            conn.execute(
+                "INSERT OR REPLACE INTO bot_state(key,value) VALUES(?,?)",
+                ("last_decay_times", payload),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            # Non-fatal — in-memory state still correct, only restart-
+            # survival is affected. Log once per error class via the
+            # standard print pattern.
+            print(f"[ADAPTIVE] _persist_last_decay_times error: {e}")
 
     # ── Diagnostics ──────────────────────────────────────
     def summary(self) -> str:

@@ -3273,9 +3273,15 @@ def main():
             print(f"\n[{datetime.now().strftime('%H:%M')}] === Cycle {cycle} ===")
             if time.time() - _last_perf_load >= PERF_CHECK_INTERVAL:
                 load_performance_state(); _last_perf_load = time.time()
-                # Gently pull weights toward defaults to prevent long-term drift/collapse
+                # R6 fix (master audit 2026-05-26): event-driven decay replaces
+                # the prior wall-clock cron (which decayed every 30 min whether
+                # or not signals were happening). `apply_decay_if_due()` scales
+                # decay to actual elapsed time, is rate-limited internally
+                # (default 30-min min_interval), respects the 7-day post-OGD
+                # suppression guard, and persists last_decay_time to bot_state
+                # so restart survival is correct.
                 for _decay_tok in BINANCE_TOKENS:
-                    weight_engine.decay_toward_default(_decay_tok)
+                    weight_engine.apply_decay_if_due(_decay_tok)
                 print(weight_engine.summary())
             for token in BINANCE_TOKENS:
                 print(f"  Fetching {token}...")
