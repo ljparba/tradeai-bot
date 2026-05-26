@@ -368,6 +368,9 @@ def _precache_warm(cache_minutes_max: int = 30) -> None:
     env = os.environ.copy()
     # H-CY7-1: same opt-out as trial subprocesses (don't touch backtest_token_weights)
     env["BOOTSTRAP_AFTER_RUN"] = "0"
+    # Stale-verdict opt-out (audit 2026-05-27): pre-cache backtest must also
+    # not overwrite the canonical verdict — see _params_to_env for rationale.
+    env["WRITE_CPCV_VERDICT"] = "0"
     started = time.time()
     # Snapshot before so we only clean OUR precache row (FIX C1)
     max_id_before = 0
@@ -426,6 +429,12 @@ def _params_to_env(params: dict) -> dict:
     # backtest_token_weights (R3 protection). Backtest.py honors BOOTSTRAP_AFTER_RUN=0
     # to skip the post-run weight write. Explorer is opt-out by default.
     env["BOOTSTRAP_AFTER_RUN"] = "0"
+    # Stale-verdict pollution fix (audit 2026-05-27): explorer trials must NOT
+    # overwrite `bot_state.latest_cpcv_verdict`. Otherwise a low-WR exploratory
+    # config leaves verdict=FAIL in bot_state, which then silently downscales
+    # the adaptive engine's OGD learning rate by 4× on the next live signal
+    # close. backtest.py honors WRITE_CPCV_VERDICT=0 to skip the verdict write.
+    env["WRITE_CPCV_VERDICT"] = "0"
     return env
 
 

@@ -3319,6 +3319,21 @@ def main():
         # learning is now suppressed (or down-scaled) when the latest CPCV
         # verdict is FAIL. See adaptive_engine.AdaptiveWeightEngine.update()
         # for the gate logic + OGD_DSR_GATE env var (strict / soft / off).
+        #
+        # Stale-verdict pollution fix (audit 2026-05-27): explorer trials and
+        # other non-canonical backtests should NOT overwrite the verdict that
+        # R1 reads at OGD update time. Otherwise an exploratory low-WR config
+        # leaves `latest_cpcv_verdict = FAIL` in bot_state, which then silently
+        # downscales LR by 4× on the next live signal close. Opt-out via
+        # `WRITE_CPCV_VERDICT=0` (explorer sets this by default). Manual
+        # canonical backtests leave it unset → default "1" → writes verdict.
+        _WRITE_CPCV_VERDICT = os.environ.get("WRITE_CPCV_VERDICT", "1") == "1"
+        if not _WRITE_CPCV_VERDICT:
+            print(f"\n[R1] Verdict write SKIPPED (WRITE_CPCV_VERDICT=0). "
+                  f"bot_state.latest_cpcv_verdict preserved — set "
+                  f"WRITE_CPCV_VERDICT=1 to overwrite. Computed verdict was: "
+                  f"{_cpcv.get('verdict')} (WR={_cpcv.get('wr_mean')}%, "
+                  f"DSR={(_cpcv.get('dsr') or 0)*100:.1f}%)")
         try:
             import sqlite3 as _sqlite3
             from datetime import datetime as _dt, timezone as _tz
@@ -3368,16 +3383,21 @@ def main():
                 "source":            "backtest.cpcv_summary",
                 "config_hash":       _run_config_hash,
             })
-            _vconn = _sqlite3.connect(BT_DB_PATH, timeout=10)
-            _vconn.execute(
-                "INSERT OR REPLACE INTO bot_state(key,value) VALUES(?,?)",
-                ("latest_cpcv_verdict", _verdict_blob),
-            )
-            _vconn.commit()
-            _vconn.close()
-            print(f"[R1] persisted latest_cpcv_verdict = {_cpcv.get('verdict')} "
-                  f"(DSR={(_cpcv.get('dsr') or 0)*100:.1f}%, "
-                  f"n={_cpcv.get('n_signals')})")
+            # Stale-verdict pollution fix (audit 2026-05-27): see WRITE_CPCV_VERDICT
+            # check above. If the env opted out, we computed the blob above (for
+            # the print/diagnostic path) but skip the actual DB write here so
+            # the canonical baseline's verdict in bot_state stays untouched.
+            if _WRITE_CPCV_VERDICT:
+                _vconn = _sqlite3.connect(BT_DB_PATH, timeout=10)
+                _vconn.execute(
+                    "INSERT OR REPLACE INTO bot_state(key,value) VALUES(?,?)",
+                    ("latest_cpcv_verdict", _verdict_blob),
+                )
+                _vconn.commit()
+                _vconn.close()
+                print(f"[R1] persisted latest_cpcv_verdict = {_cpcv.get('verdict')} "
+                      f"(DSR={(_cpcv.get('dsr') or 0)*100:.1f}%, "
+                      f"n={_cpcv.get('n_signals')})")
         except Exception as _vexc:
             print(f"[R1] could not persist latest_cpcv_verdict: "
                   f"{type(_vexc).__name__}: {_vexc}")
