@@ -55,7 +55,36 @@ def _ts_to_epoch(ts: Any) -> float:
 
 
 def _default_is_win(s: dict) -> bool:
+    """Boolean win classifier — True for any win/partial outcome.
+
+    Kept for back-compat of the `is_win_func` parameter. New WR
+    calculations use `_default_win_score()` instead so the TT-7
+    convention (PARTIAL = 0.5 weight) is honored — see MOD-3 fix
+    (cycle-4 audit 2026-05-26).
+    """
     return s.get("outcome") in ("WIN", "PARTIAL_TP1", "PARTIAL_TP2")
+
+
+def _default_win_score(s: dict) -> float:
+    """TT-7-consistent weighted win scorer.
+
+    Returns:
+      1.0 for WIN
+      0.5 for PARTIAL_TP1 / PARTIAL_TP2  (full TP1 hit + retrace to BE)
+      0.0 otherwise
+    Mirrors tracker.py _canonical_wr() + the per-fold PnL convention in
+    validation.py. MOD-3 fix (cycle-4 audit 2026-05-26) — previously
+    `walk_forward` counted PARTIAL as full-win, inflating WFV test_wr
+    and decay-slope readings in PARTIAL-heavy periods (Phase A's
+    stale-reject raised PARTIAL share from 18.6% → 28.6% across recent
+    runs).
+    """
+    outcome = s.get("outcome")
+    if outcome == "WIN":
+        return 1.0
+    if outcome in ("PARTIAL_TP1", "PARTIAL_TP2"):
+        return 0.5
+    return 0.0
 
 
 def _safe_mean(xs: Sequence[float]) -> float:
@@ -79,6 +108,7 @@ def walk_forward(
     n_windows: int = 12,
     min_train_signals: int = 10,
     is_win_func: Callable[[dict], bool] = _default_is_win,
+    score_func: Callable[[dict], float] = _default_win_score,
     decay_threshold_pp: float = 10.0,
 ) -> Dict[str, Any]:
     """Run expanding-window WFV.
@@ -162,8 +192,9 @@ def walk_forward(
             sorted_sigs[j] for j in range(n)
             if t_split <= t_eps[j] < t_test_end
         ]
-        train_wins = sum(1 for s in train_sigs if is_win_func(s))
-        test_wins  = sum(1 for s in test_sigs  if is_win_func(s))
+        # MOD-3 fix: weighted scorer honors PARTIAL=0.5 (TT-7 convention)
+        train_wins = sum(score_func(s) for s in train_sigs)
+        test_wins  = sum(score_func(s) for s in test_sigs)
         train_wr = (train_wins / len(train_sigs) * 100.0) if train_sigs else 0.0
         test_wr  = (test_wins  / len(test_sigs)  * 100.0) if test_sigs  else 0.0
         insufficient = len(train_sigs) < min_train_signals or len(test_sigs) == 0
@@ -270,6 +301,7 @@ def held_out_summary(
     held_out_signals: Sequence[dict],
     *,
     is_win_func: Callable[[dict], bool] = _default_is_win,
+    score_func: Callable[[dict], float] = _default_win_score,
     tuning_wr: Optional[float] = None,
     max_gap_pp: float = 8.0,
     min_wr_pct: float = 58.0,
@@ -314,16 +346,22 @@ def held_out_summary(
     }
     if n == 0:
         return out
-    wins = sum(1 for s in held_out_signals if is_win_func(s))
-    losses = n - wins
-    wr = (wins / n) * 100.0
-    out["wins"]   = wins
-    out["losses"] = losses
+    # MOD-3 fix: weighted score (PARTIAL=0.5) for WR; integer wins/losses
+    # for Wilson CI retain binomial interpretation but PARTIALs are split
+    # 0.5 by counting them as half-win + half-loss in the integer split.
+    weighted_wins = sum(score_func(s) for s in held_out_signals)
+    wr = (weighted_wins / n) * 100.0
+    # For the binomial CI, round to nearest integer count (Wilson CI is
+    # defined on integer success counts).
+    wins_int = int(round(weighted_wins))
+    losses_int = n - wins_int
+    out["wins"]   = wins_int
+    out["losses"] = losses_int
     out["wr_pct"] = wr
 
     # Wilson 95% CI on a binomial proportion.
     z = 1.96
-    p = wins / n
+    p = weighted_wins / n
     denom = 1 + z * z / n
     center = (p + z * z / (2 * n)) / denom
     half = (z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))) / denom
@@ -361,8 +399,23 @@ def walk_forward_text_report(wf: Dict[str, Any]) -> str:
     lines.append(f"  test_wr (std)     = {wf.get('test_wr_std', 0.0):.2f}%")
     lines.append(f"  train_wr (mean)   = {wf.get('train_wr_mean', 0.0):.2f}%")
     lines.append(f"  decay_slope       = {wf.get('decay_slope_pp', 0.0):+.2f} pp/window")
+    # M-4 fix (cycle-4 audit 2026-05-26): warn when valid-window count is
+    # too thin to support a meaningful slope estimate. Below 5 the decay
+    # regression has ≥3-point dimensions; readings should be treated as
+    # informational only.
+    n_valid = wf.get("n_valid_windows", 0)
+    if 0 < n_valid < 5:
+        lines.append(f"  !! WARN-SPARSE-WFV: n_valid_windows={n_valid} < 5 — "
+                     f"decay slope is high-variance; treat as informational only.")
     if wf.get("decay_detected"):
+        # M-3 fix (cycle-4 audit 2026-05-26): annotate the decay flag with
+        # the sample-size caveat. At n~43 over 12 windows (~3.6 signals/window)
+        # individual WR readings have ~±26pp CIs; a random walk will trigger
+        # decay detection ~30% of the time at the current 10pp threshold.
         lines.append("  *** DECAY DETECTED *** investigate parameter drift before promoting.")
+        if n_valid < 5:
+            lines.append("      (Decay-flag confidence is LOW at this sample size — "
+                         "verify on additional data before acting.)")
     lines.append(f"  VERDICT: {wf.get('verdict', '?')}")
     lines.append("-----------------------------------------------------------------")
     return "\n".join(lines)

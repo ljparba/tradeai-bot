@@ -335,11 +335,22 @@ def probabilistic_sharpe_ratio(
     kurtosis: float = 3.0,
     sr_benchmark: float = 0.0,
 ) -> float:
-    """PSR = Φ( (SR* - SR_bench) × √(T-1) /
-                √(1 - skew·SR* + (kurt-1)/4 · SR*²) )
+    """PSR = Φ( (SR_hat - SR_bench) × √(T - 1) /
+                √(1 − skew·SR_hat + (kurt − 1)/4 · SR_hat²) )
+
+    Where:
+      SR_hat   = `sr_observed` (the OBSERVED Sharpe under test; paper's SR̂)
+      SR_bench = `sr_benchmark` (the null hypothesis Sharpe; paper's SR*)
+      T        = `n_returns`   (per-Sharpe observation count, NOT pool size)
 
     From Bailey & López de Prado (2012, 2014). Returns probability in [0,1].
     Returns 0.5 (no info) on degenerate inputs.
+
+    Note (M-A fix, cycle-4 audit 2026-05-26): the docstring previously used
+    the symbol `SR*` for the observed Sharpe, conflicting with the paper's
+    convention where `SR*` is the BENCHMARK. The notation is now
+    `SR_hat = observed`, `SR_bench = benchmark` to remove the ambiguity.
+    Code behavior unchanged.
     """
     if n_returns < 2:
         return 0.5
@@ -422,7 +433,29 @@ def _default_outcome_to_pnl(s: dict) -> float:
 
 
 def _default_is_win(s: dict) -> bool:
+    """Boolean win classifier — True for any win/partial outcome.
+
+    Retained for back-compat of the `is_win_func` parameter. CPCV WR
+    calculations now use `_default_win_score()` so the TT-7 convention
+    (PARTIAL = 0.5 weight) is honored — see MOD-3 fix (cycle-4 audit
+    2026-05-26).
+    """
     return s.get("outcome", "") in ("WIN", "PARTIAL_TP1", "PARTIAL_TP2")
+
+
+def _default_win_score(s: dict) -> float:
+    """TT-7-consistent weighted scorer for CPCV WR aggregation.
+
+    Returns 1.0 for WIN, 0.5 for PARTIAL_TP1/TP2, 0.0 otherwise.
+    Mirrors tracker.py's _canonical_wr() and the per-fold PnL pool
+    in this module. MOD-3 fix (cycle-4 audit 2026-05-26).
+    """
+    outcome = s.get("outcome", "")
+    if outcome == "WIN":
+        return 1.0
+    if outcome in ("PARTIAL_TP1", "PARTIAL_TP2"):
+        return 0.5
+    return 0.0
 
 
 def cpcv_summary(
@@ -432,6 +465,7 @@ def cpcv_summary(
     n_test_groups: int = _DEFAULT_N_TEST_GROUPS,
     embargo_pct: float = _DEFAULT_EMBARGO_FRAC,
     is_win_func: Callable[[dict], bool] = _default_is_win,
+    score_func: Callable[[dict], float] = _default_win_score,
     pnl_func: Callable[[dict], float] = _default_outcome_to_pnl,
     n_trials_for_dsr: Optional[int] = None,
     sr_trial_std_for_dsr: Optional[float] = None,
@@ -539,10 +573,13 @@ def cpcv_summary(
         train_sigs = [sorted_sigs[i] for i in train_idx]
         test_sigs  = [sorted_sigs[i] for i in test_idx]
 
-        train_wins = sum(1 for s in train_sigs if is_win_func(s))
+        # MOD-3 fix: weighted scorer honors PARTIAL=0.5 (TT-7 convention).
+        # Boolean is_win_func retained for back-compat (e.g. splits_meta
+        # legacy consumers) but WR uses the weighted score.
+        train_wins = sum(score_func(s) for s in train_sigs)
         train_wr   = (train_wins / len(train_sigs) * 100.0) if train_sigs else 0.0
 
-        test_wins  = sum(1 for s in test_sigs if is_win_func(s))
+        test_wins  = sum(score_func(s) for s in test_sigs)
         test_wr    = (test_wins / len(test_sigs) * 100.0) if test_sigs else 0.0
 
         test_pnls  = [pnl_pool[i] for i in test_idx]
