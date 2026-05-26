@@ -58,7 +58,14 @@ echo "[monitor-cron] $TS global_alert_level=$GLOBAL_LEVEL"
 if [ "$GLOBAL_LEVEL" = "CRIT" ]; then
     if [ -n "${TELEGRAM_TOKEN:-}" ] && [ -n "${CHAT_ID:-}" ]; then
         # Pull a 20-line summary from the log
-        SUMMARY=$(head -40 "$LOG_OUT" | tail -30)
+        # H-CY7-2 fix (cycle-7 audit 2026-05-26): SUMMARY is monitoring.py
+        # free-form text that may contain `<`, `>`, or `&`. With parse_mode=HTML,
+        # any of those chars makes Telegram return HTTP 400 and the curl
+        # `> /dev/null 2>&1` silently swallows it — the one alert we cannot
+        # afford to drop. Escape & first (so we don't double-escape entities
+        # we just inserted), then < and >.
+        SUMMARY=$(head -40 "$LOG_OUT" | tail -30 \
+            | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')
         MSG="<b>[OGD MONITOR CRIT]</b>
 Time: $TS
 Global alert level: <b>CRIT</b>

@@ -3019,7 +3019,31 @@ def _compute_run_config_hash() -> str:
         # M-H ESCALATED — env-driven backtest knobs
         "REALISTIC_EXECUTION":    os.environ.get("REALISTIC_EXECUTION", "1"),
         "HELD_OUT_DAYS":          HELD_OUT_DAYS,
+        # M-CY7-1 (cycle-7 audit 2026-05-26): adaptive-layer env knobs.
+        # H6 isolation means these don't change in-backtest signal output
+        # directly, but they DO govern the bootstrap weight write that
+        # follows the run (gated by BOOTSTRAP_AFTER_RUN). Including them
+        # here prevents the M-H collision-vector pattern from recurring
+        # if the explorer (or operator) ever varies them across trials.
+        # OGD_WARMUP_FLOOR is currently a hardcoded constant in
+        # adaptive_engine.py — read via getattr so the hash captures the
+        # value (and tracks any future env override transparently).
+        "OGD_DSR_GATE":           os.environ.get("OGD_DSR_GATE", "soft").lower(),
+        "OGD_FREEZE_MODE":        os.environ.get("OGD_FREEZE_MODE", "shadow").lower(),
+        "OGD_WARMUP_FLOOR":       _ogd_warmup_floor_for_hash(),
     })
+
+
+def _ogd_warmup_floor_for_hash() -> int:
+    """Resolve OGD_WARMUP_FLOOR via adaptive_engine import (currently a
+    hardcoded constant; this indirection is forward-compat for future
+    env-driven override). Falls back to 3 if import fails to keep the
+    hash deterministic on a clean working copy."""
+    try:
+        import adaptive_engine as _ae
+        return int(getattr(_ae, "OGD_WARMUP_FLOOR", 3))
+    except Exception:
+        return 3
 
 
 def _parse_args() -> argparse.Namespace:
