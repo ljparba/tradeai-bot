@@ -76,25 +76,50 @@ _BOT_STATE_KEY = "cross_config_sr_trial_std"
 
 
 def _load_signals_for_run(conn: sqlite3.Connection, run_id: int) -> list[dict]:
-    """Load signals for a given backtest run_id, formatted for cpcv_summary()."""
+    """Load signals for a given backtest run_id, formatted for cpcv_summary().
+
+    H-A fix (cycle-4 audit 2026-05-26): `closed_at` is now derived from
+    the triple-barrier exit bar `tb_t1` (number of 5M bars to exit) +
+    the entry timestamp. Previously aliased `ts as closed_at` → zero-length
+    label window → CPCV purging silently disabled → cross-config
+    sr_trial_std computed on contaminated splits → downstream DSR
+    optimistic. When `tb_t1` is NULL (legacy rows or unfilled triple-barrier),
+    falls back to a 24h sentinel (matches validation.py's fallback at
+    line 511).
+    """
     rows = conn.execute(
-        """SELECT ts, outcome, ts as closed_at,
+        """SELECT ts, outcome, tb_t1,
                   net_tp1_pct, net_sl_pct, net_tp2_pct, net_tp3_pct
            FROM backtest_signals WHERE run_id = ?""",
         (run_id,),
     ).fetchall()
-    return [
-        {
-            "ts":          r[0],
-            "outcome":     r[1],
-            "closed_at":   r[2],
-            "net_tp1_pct": r[3] or 0.0,
-            "net_sl_pct":  r[4] or 0.0,
-            "net_tp2_pct": r[5],
-            "net_tp3_pct": r[6],
-        }
-        for r in rows
-    ]
+    out = []
+    for r in rows:
+        ts, outcome, tb_t1, n_tp1, n_sl, n_tp2, n_tp3 = r
+        # 5-minute bars: closed_at = ts + tb_t1 * 5min
+        if tb_t1 is not None and tb_t1 > 0:
+            # SQLite datetime modifier needs minutes
+            closed_at_row = conn.execute(
+                "SELECT datetime(?, '+' || ? || ' minutes')",
+                (ts, int(tb_t1) * 5),
+            ).fetchone()
+            closed_at = closed_at_row[0] if closed_at_row else ts
+        else:
+            # Fallback: 24h horizon (matches validation.py:511 default)
+            closed_at_row = conn.execute(
+                "SELECT datetime(?, '+24 hours')", (ts,),
+            ).fetchone()
+            closed_at = closed_at_row[0] if closed_at_row else ts
+        out.append({
+            "ts":          ts,
+            "outcome":     outcome,
+            "closed_at":   closed_at,
+            "net_tp1_pct": n_tp1 or 0.0,
+            "net_sl_pct":  n_sl or 0.0,
+            "net_tp2_pct": n_tp2,
+            "net_tp3_pct": n_tp3,
+        })
+    return out
 
 
 def _list_distinct_configs(conn: sqlite3.Connection, min_signals: int) -> list[tuple[str, int, int]]:

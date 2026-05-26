@@ -140,10 +140,19 @@ def _purge_train_indices(train_idx: List[int],
 def _apply_embargo(train_idx: List[int],
                    test_idx: List[int],
                    t0: Sequence[float],
-                   embargo_pct: float) -> List[int]:
+                   embargo_pct: float,
+                   t1: Optional[Sequence[float]] = None) -> List[int]:
     """Remove training samples within `embargo_pct` of total time-span after
     each contiguous test block. Prevents serial-dependence leakage when
     label windows are shorter than the natural autocorrelation horizon.
+
+    H-B fix (cycle-4 audit 2026-05-26): embargo now anchors at `t1[b_end]`
+    (the END of the test block's label window) instead of `t0[b_end]`
+    (the test block's entry time). Per López de Prado AFML §7.4, the
+    embargo must extend from the test event's label-window EXIT, since
+    that is when post-test autocorrelation contamination begins.
+    When `t1` is omitted (legacy callers), falls back to t0 anchor for
+    backward compatibility — but all callers in this module pass t1.
     """
     if not test_idx or embargo_pct <= 0:
         return list(train_idx)
@@ -166,10 +175,11 @@ def _apply_embargo(train_idx: List[int],
             block_end = i
     blocks.append((block_start, block_end))
 
-    # For each block, exclude any training event whose t0 falls within
-    # [t0_at_block_end, t0_at_block_end + embargo_dt]
+    # H-B fix: anchor at t1[b_end] (label-window EXIT) when available.
+    # Falls back to t0[b_end] for backward compatibility.
+    anchor = t1 if t1 is not None else t0
     forbidden_windows: List[Tuple[float, float]] = [
-        (t0[b_end], t0[b_end] + embargo_dt) for (_, b_end) in blocks
+        (anchor[b_end], anchor[b_end] + embargo_dt) for (_, b_end) in blocks
     ]
     keep: List[int] = []
     for i in train_idx:
@@ -217,7 +227,7 @@ def combinatorial_purged_kfold(
         test_idx  = list(range(cut, n))
         if t0 is not None and t1 is not None:
             train_idx = _purge_train_indices(train_idx, test_idx, t0, t1)
-            train_idx = _apply_embargo(train_idx, test_idx, t0, embargo_pct)
+            train_idx = _apply_embargo(train_idx, test_idx, t0, embargo_pct, t1=t1)
         yield train_idx, test_idx
         return
 
@@ -235,7 +245,7 @@ def combinatorial_purged_kfold(
                 train_idx.extend(groups[g])
         if t0 is not None and t1 is not None:
             train_idx = _purge_train_indices(train_idx, test_idx, t0, t1)
-            train_idx = _apply_embargo(train_idx, test_idx, t0, embargo_pct)
+            train_idx = _apply_embargo(train_idx, test_idx, t0, embargo_pct, t1=t1)
         yield sorted(train_idx), sorted(test_idx)
 
 

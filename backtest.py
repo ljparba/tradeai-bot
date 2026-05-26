@@ -2941,6 +2941,14 @@ def _compute_run_config_hash() -> str:
 
     Any change here means a checkpoint written by a previous run cannot be
     safely resumed — the new run will start fresh.
+
+    M-H ESCALATED fix (cycle-4 audit 2026-05-26): env-driven knobs that
+    materially affect backtest output are now included in the hash.
+    Previously REALISTIC_EXECUTION (Phase A) and HELD_OUT_DAYS (Phase C)
+    were outside the payload, causing two backtests differing only on
+    these flags to collide on config_hash — undercounting `n_trials` in
+    DSR's selection-bias correction at `backtest.py:3135` and corrupting
+    Pareto-archive uniqueness in the autonomous explorer.
     """
     return compute_config_hash({
         "ACTIVE_CONFIG":          ACTIVE_CONFIG,
@@ -2963,6 +2971,9 @@ def _compute_run_config_hash() -> str:
         "FEE_PCT":                FEE_PCT,
         "SLIPPAGE_PCT":           SLIPPAGE_PCT,
         "STRATEGY_VERSION":       STRATEGY_VERSION,
+        # M-H ESCALATED — env-driven backtest knobs
+        "REALISTIC_EXECUTION":    os.environ.get("REALISTIC_EXECUTION", "1"),
+        "HELD_OUT_DAYS":          HELD_OUT_DAYS,
     })
 
 

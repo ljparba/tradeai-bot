@@ -609,7 +609,31 @@ class AdaptiveWeightEngine:
         # closed paper signals accumulate. This is data-quality enforcement at the
         # bootstrap layer, not a behavioral change at scoring time.
         _rejected_tokens: list = []
+        _thin_tokens: list = []
+        # M-J fix (cycle-4 audit 2026-05-26): tokens with thin bootstrap data
+        # (e.g. n < BOOTSTRAP_MIN_N_PER_TOKEN, default 5) cannot honestly
+        # support a learned weight vector. Run-78/79 produced n=7 total →
+        # tokens with 0-1 sample retained DEFAULT_WEIGHTS but masqueraded
+        # as `_has_bootstrap=True` if any feature-weight drift survived
+        # rounding. Refuse the import for these tokens at the source —
+        # substitute uniform DEFAULT_WEIGHTS and force n_bootstrap=0 so the
+        # downstream `_has_bootstrap` predicate in crypto_alert.py:2031
+        # correctly reads "not bootstrapped yet".
+        _BOOTSTRAP_MIN_N_PER_TOKEN = int(
+            __import__("os").environ.get("BOOTSTRAP_MIN_N_PER_TOKEN", "5") or "5"
+        )
         for _tok in list(scratch_w.keys()):
+            _n_for_tok = scratch_n.get(_tok, 0)
+            if _n_for_tok < _BOOTSTRAP_MIN_N_PER_TOKEN:
+                scratch_w[_tok] = dict(DEFAULT_WEIGHTS)
+                scratch_v[_tok] = {f: 0.0 for f in FEATURES}
+                scratch_n[_tok] = 0  # force n_bootstrap=0 so _has_bootstrap reads False
+                _thin_tokens.append((_tok, _n_for_tok))
+                print(f"[ADAPTIVE] bootstrap THIN {_tok} — "
+                      f"n_bootstrap={_n_for_tok} < {_BOOTSTRAP_MIN_N_PER_TOKEN} "
+                      f"(substituted uniform DEFAULT_WEIGHTS + n_bootstrap=0; live OGD "
+                      f"will learn organically once paper signals close)")
+                continue
             _is_degen, _worst_feat, _worst_val = self._check_degenerate(scratch_w[_tok])
             if _is_degen:
                 scratch_w[_tok] = dict(DEFAULT_WEIGHTS)
@@ -643,6 +667,11 @@ class AdaptiveWeightEngine:
             print(f"[ADAPTIVE] bootstrap degenerate-reject summary: "
                   f"{len(_rejected_tokens)} token(s) substituted with uniform defaults: "
                   f"{', '.join(f'{t}({f}={v:.2f})' for t, f, v in _rejected_tokens)}")
+        if _thin_tokens:
+            print(f"[ADAPTIVE] bootstrap thin-sample summary (M-J fix): "
+                  f"{len(_thin_tokens)} token(s) below n_bootstrap floor of "
+                  f"{_BOOTSTRAP_MIN_N_PER_TOKEN}: "
+                  f"{', '.join(f'{t}(n={n})' for t, n in _thin_tokens)}")
 
         # M14: Soft-threshold alert — warn when any feature weight exceeds 3× its
         # default (e.g., dr_location > 0.15 given default 0.05).  Does not block;

@@ -88,8 +88,27 @@ def _connect_ro(db_path: str) -> sqlite3.Connection:
     return sqlite3.connect(uri, uri=True, timeout=5.0)
 
 
-def _fetch_current_weights(db_path: str) -> Dict[str, Dict[str, float]]:
-    """Return {token: {feature: weight}} from token_weights."""
+# OGD-MON-SCOPE fix (cycle-4 audit 2026-05-26): the monitor previously
+# read ONLY the live `token_weights` table. 99% of OGD learning lives
+# in `backtest_token_weights` (populated by bootstrap_from_backtest).
+# Run-46-style degeneration in the bootstrap pool was invisible. The
+# fetch helpers now accept an explicit `table` argument so callers can
+# audit either source via the `--source {live,bootstrap}` CLI flag.
+_TABLE_LIVE      = "token_weights"
+_TABLE_BOOTSTRAP = "backtest_token_weights"
+_VALID_TABLES    = (_TABLE_LIVE, _TABLE_BOOTSTRAP)
+
+
+def _fetch_current_weights(db_path: str,
+                            table: str = _TABLE_LIVE
+                            ) -> Dict[str, Dict[str, float]]:
+    """Return {token: {feature: weight}} from `table`.
+
+    `table` defaults to live `token_weights` for backward compatibility.
+    Set to `backtest_token_weights` to audit the bootstrap-learned pool.
+    """
+    if table not in _VALID_TABLES:
+        raise ValueError(f"invalid table {table!r}; expected one of {_VALID_TABLES}")
     out: Dict[str, Dict[str, float]] = {}
     try:
         conn = _connect_ro(db_path)
@@ -97,7 +116,7 @@ def _fetch_current_weights(db_path: str) -> Dict[str, Dict[str, float]]:
         return out
     try:
         rows = conn.execute(
-            "SELECT token, feature, weight FROM token_weights"
+            f"SELECT token, feature, weight FROM {table}"  # noqa: S608 (whitelisted)
         ).fetchall()
     except sqlite3.Error:
         rows = []
@@ -109,7 +128,9 @@ def _fetch_current_weights(db_path: str) -> Dict[str, Dict[str, float]]:
     return out
 
 
-def _fetch_n_updates(db_path: str) -> Dict[str, int]:
+def _fetch_n_updates(db_path: str, table: str = _TABLE_LIVE) -> Dict[str, int]:
+    if table not in _VALID_TABLES:
+        raise ValueError(f"invalid table {table!r}")
     out: Dict[str, int] = {}
     try:
         conn = _connect_ro(db_path)
@@ -117,7 +138,7 @@ def _fetch_n_updates(db_path: str) -> Dict[str, int]:
         return out
     try:
         rows = conn.execute(
-            "SELECT token, MAX(n_updates) FROM token_weights GROUP BY token"
+            f"SELECT token, MAX(n_updates) FROM {table} GROUP BY token"
         ).fetchall()
     except sqlite3.Error:
         rows = []
@@ -127,7 +148,9 @@ def _fetch_n_updates(db_path: str) -> Dict[str, int]:
     return out
 
 
-def _fetch_last_updated(db_path: str) -> Dict[str, Optional[str]]:
+def _fetch_last_updated(db_path: str, table: str = _TABLE_LIVE) -> Dict[str, Optional[str]]:
+    if table not in _VALID_TABLES:
+        raise ValueError(f"invalid table {table!r}")
     out: Dict[str, Optional[str]] = {}
     try:
         conn = _connect_ro(db_path)
@@ -135,7 +158,7 @@ def _fetch_last_updated(db_path: str) -> Dict[str, Optional[str]]:
         return out
     try:
         rows = conn.execute(
-            "SELECT token, MAX(updated_at) FROM token_weights GROUP BY token"
+            f"SELECT token, MAX(updated_at) FROM {table} GROUP BY token"
         ).fetchall()
     except sqlite3.Error:
         rows = []
@@ -357,12 +380,20 @@ def _per_token_report(token: str,
 # ── Top-level report ──────────────────────────────────────────────────────────
 
 def generate_report(db_path: str = _DEFAULT_DB_PATH,
-                    now: Optional[datetime] = None) -> Dict[str, Any]:
-    """Build the full monitoring snapshot. Read-only, never raises."""
+                    now: Optional[datetime] = None,
+                    table: str = _TABLE_LIVE) -> Dict[str, Any]:
+    """Build the full monitoring snapshot. Read-only, never raises.
+
+    `table` selects which weight table to audit:
+      - `token_weights` (default, live OGD updates)
+      - `backtest_token_weights` (bootstrap pool — where most OGD
+        learning actually lives until paper trading accumulates)
+    See OGD-MON-SCOPE fix (cycle-4 audit 2026-05-26).
+    """
     now = now or datetime.now(timezone.utc)
-    snapshot = _fetch_current_weights(db_path)
-    n_map    = _fetch_n_updates(db_path)
-    last_map = _fetch_last_updated(db_path)
+    snapshot = _fetch_current_weights(db_path, table=table)
+    n_map    = _fetch_n_updates(db_path, table=table)
+    last_map = _fetch_last_updated(db_path, table=table)
 
     per_token: Dict[str, Dict[str, Any]] = {}
     for token, weights in snapshot.items():
@@ -396,6 +427,7 @@ def generate_report(db_path: str = _DEFAULT_DB_PATH,
     return {
         "generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "schema_version": 1,
+        "source_table": table,  # OGD-MON-SCOPE — surfaces which pool was audited
         "summary": {
             "tokens_monitored":   len(per_token),
             "tokens_degenerate":  degen,
@@ -529,9 +561,15 @@ def cli_main(argv: Optional[Iterable[str]] = None) -> int:
                         help="emit Prometheus metrics (requires prometheus_client)")
     parser.add_argument("--exit-on-crit", action="store_true",
                         help="exit code 2 if global alert level is CRIT")
+    parser.add_argument("--source", choices=("live", "bootstrap"), default="live",
+                        help="weight table to audit: 'live' = token_weights "
+                             "(live OGD updates), 'bootstrap' = "
+                             "backtest_token_weights (where most learning lives "
+                             "until paper trading accumulates). OGD-MON-SCOPE fix.")
     args = parser.parse_args(list(argv) if argv is not None else None)
+    table = _TABLE_LIVE if args.source == "live" else _TABLE_BOOTSTRAP
 
-    report = generate_report(args.db)
+    report = generate_report(args.db, table=table)
 
     if args.json:
         write_report_json(args.json, report)

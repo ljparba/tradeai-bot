@@ -168,6 +168,7 @@ BTC_STATE = {
     "last_candle_fetch": 0,
     "last_dom_fetch":    0,
     "feed_ok":           False,   # H18: False until first successful 1H candle fetch
+    "feed_alert_ts":     0.0,     # H-F (cycle-4): last Telegram-alert epoch for feed-down dedup
 }
 
 # Performance state — updated by load_performance_state() every 30 min
@@ -1523,10 +1524,33 @@ def fetch_btc_state():
     BTC_STATE["trend_15m"] = get_trend(c15m) if c15m else "NEUTRAL"
     BTC_STATE["last_candle_fetch"] = now
     if not c1h:
+        was_ok = BTC_STATE.get("feed_ok", True)
         BTC_STATE["feed_ok"] = False
         print(f"[BTC FEED FAIL] BTC 1H candles empty — macro filter BLOCKED. "
               f"Alt signals suppressed until BTC data recovers.")
+        # H-F fix (cycle-4 audit 2026-05-26): emit a Telegram alert when
+        # the BTC feed transitions from healthy → failed, with a 1-per-hour
+        # rate limit while the outage persists. Operator was previously
+        # blind to BTC feed outages — only saw the symptom (no alt signals)
+        # hours later. Rate-limit ensures alert is not spammed during
+        # extended outages.
+        _now_ts = time.time()
+        _last_alert = BTC_STATE.get("feed_alert_ts", 0.0)
+        if was_ok or (_now_ts - _last_alert >= 3600.0):
+            BTC_STATE["feed_alert_ts"] = _now_ts
+            try:
+                send_telegram(
+                    "<b>[BTC FEED DOWN]</b>\n"
+                    "BTC 1H candles empty — macro filter is now BLOCKING all alt signals.\n\n"
+                    "<i>This alert auto-suppresses for 1 hour while the outage persists. "
+                    "A new alert will fire if the feed recovers and fails again.</i>"
+                )
+            except Exception:
+                pass
     else:
+        if not BTC_STATE.get("feed_ok", True):
+            # Recovered — clear the dedup timer so a future outage re-alerts.
+            BTC_STATE["feed_alert_ts"] = 0.0
         BTC_STATE["feed_ok"] = True
     print(f"[BTC] 1H:{BTC_STATE['trend_1h']} 15M:{BTC_STATE['trend_15m']} feed_ok={BTC_STATE['feed_ok']}")
 
