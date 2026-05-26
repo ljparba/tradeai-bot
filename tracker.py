@@ -4,6 +4,7 @@ Run:  python tracker.py
 Open: http://localhost:8888
 """
 import sqlite3, json, os, threading, subprocess, sys, re, shutil, ast
+from typing import Any, Dict, List
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from datetime import datetime, timedelta, timezone
@@ -250,6 +251,153 @@ def get_rolling_wf(run_id: int = None, train_days: int = 90, test_days: int = 30
     except Exception as e:
         return {"ok": False, "error": str(e), "windows": [], "summary": {}}
 
+def get_adaptive_forensic(limit_per_token: int = 10):
+    """R10 forensic panel (master audit 2026-05-26): per-token recent OGD
+    update history with the R4 forensic columns (reward, gradient_l1,
+    profit_pct) + R7 regime label. Joins with current token_weights for
+    health flags + n_updates.
+
+    Returns:
+      {
+        ok: bool,
+        tokens: {
+          "BTC": {
+            n_updates: int,
+            last_update_iso: str,
+            current_weights: {feature: float},
+            health_flags: ["DEGENERATE", "FROZEN", "STALE", ...],
+            recent_updates: [
+              {ts, trigger, regime, reward, gradient_l1, profit_pct,
+               weight_after: {feature: float}},
+              ...
+            ]
+          },
+          ...
+        },
+        global: {
+          freeze_state: bot_state.learning_freeze_state blob (or null),
+          dsr_verdict: bot_state.latest_cpcv_verdict (or null),
+          last_decay_times: {token: epoch} (or null),
+        }
+      }
+    """
+    from datetime import datetime as _dt, timezone as _tz
+    out = {"ok": False, "tokens": {}, "global": {}}
+    try:
+        conn = _connect()
+        # Live token_weights wins for tokens that have updates; fall back to
+        # the bootstrap pool (backtest_token_weights) for the remaining
+        # tokens. This guarantees all 10 active tokens appear in the panel
+        # even when live OGD has only touched a subset.
+        live_rows = conn.execute(
+            "SELECT token, feature, weight, n_updates, updated_at FROM token_weights"
+        ).fetchall()
+        live_tokens = {r[0] for r in live_rows}
+        bt_rows = conn.execute(
+            "SELECT token, feature, weight, n_bootstrap, updated_at "
+            "FROM backtest_token_weights"
+        ).fetchall()
+        # Filter bootstrap rows to tokens NOT already in live (avoids
+        # duplicates — live weights win for any token with live updates)
+        bt_rows = [r for r in bt_rows if r[0] not in live_tokens]
+        cur_rows = list(live_rows) + bt_rows
+        tokens: Dict[str, Dict[str, Any]] = {}
+        for token, feat, w, n_u, ts in cur_rows:
+            entry = tokens.setdefault(token, {
+                "n_updates": 0, "last_update_iso": None,
+                "current_weights": {}, "health_flags": [],
+                "recent_updates": [],
+            })
+            entry["current_weights"][feat] = round(float(w or 0), 4)
+            entry["n_updates"] = max(entry["n_updates"], int(n_u or 0))
+            if ts and (entry["last_update_iso"] is None or str(ts) > entry["last_update_iso"]):
+                entry["last_update_iso"] = str(ts)
+
+        # Recent forensic rows per token (R4 + R7 columns from weight_history)
+        for token in tokens:
+            rows = conn.execute(
+                """SELECT recorded_at, trigger, regime, reward, gradient_l1,
+                          profit_pct, feature, weight_after, n_updates
+                   FROM weight_history
+                   WHERE token = ?
+                   ORDER BY id DESC
+                   LIMIT ?""",
+                (token, limit_per_token * 6 + 10)   # 6 features × limit + slack
+            ).fetchall()
+            # Group by (recorded_at, trigger) into update events
+            events: List[Dict[str, Any]] = []
+            seen_keys: set = set()
+            cur_event = None
+            for ts, trig, regime, reward, grad_l1, profit_pct, feat, w_a, n_u in rows:
+                key = (ts, trig)
+                if key not in seen_keys:
+                    if cur_event is not None and len(events) >= limit_per_token:
+                        break
+                    cur_event = {
+                        "ts":          str(ts),
+                        "trigger":     trig,
+                        "regime":      regime,
+                        "reward":      None if reward is None else round(float(reward), 4),
+                        "gradient_l1": None if grad_l1 is None else round(float(grad_l1), 6),
+                        "profit_pct":  None if profit_pct is None else round(float(profit_pct), 6),
+                        "n_updates":   int(n_u or 0),
+                        "weight_after": {},
+                    }
+                    events.append(cur_event)
+                    seen_keys.add(key)
+                if cur_event is not None and feat:
+                    cur_event["weight_after"][feat] = round(float(w_a or 0), 4)
+            tokens[token]["recent_updates"] = events[:limit_per_token]
+
+            # Health flags
+            cw = tokens[token]["current_weights"]
+            if cw:
+                max_w = max(cw.values())
+                min_w = min(cw.values())
+                if max_w > 0.40:
+                    tokens[token]["health_flags"].append("DEGENERATE")
+                pinned = [f for f, v in cw.items() if abs(v - 0.05) <= 0.015]
+                if len(pinned) >= 3:
+                    tokens[token]["health_flags"].append("FLOOR-PINNED")
+                if tokens[token]["last_update_iso"]:
+                    try:
+                        dt = _dt.strptime(str(tokens[token]["last_update_iso"]),
+                                          "%Y-%m-%d %H:%M:%S").replace(tzinfo=_tz.utc)
+                        age_days = (_dt.now(_tz.utc) - dt).total_seconds() / 86400.0
+                        if age_days > 21:
+                            tokens[token]["health_flags"].append(f"STALE-{int(age_days)}d")
+                    except Exception:
+                        pass
+
+        # Global state (freeze, dsr verdict, decay times)
+        global_state: Dict[str, Any] = {}
+        for key in ("learning_freeze_state", "latest_cpcv_verdict", "last_decay_times"):
+            row = conn.execute(
+                "SELECT value FROM bot_state WHERE key=?", (key,)
+            ).fetchone()
+            if row and row[0]:
+                try:
+                    global_state[key] = json.loads(row[0])
+                except Exception:
+                    global_state[key] = None
+            else:
+                global_state[key] = None
+        # Layer freeze status onto per-token flags
+        fs = global_state.get("learning_freeze_state") or {}
+        if fs.get("frozen"):
+            for tok in tokens:
+                tokens[tok]["health_flags"].append("FROZEN")
+
+        conn.close()
+        out["ok"] = True
+        out["tokens"] = tokens
+        out["global"] = global_state
+        return out
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+        return out
+
+
 def get_ogd_weight_history(limit_per_series: int = 30):
     """Per-token, per-feature weight trajectory for sparklines (C3, 2026-05-22).
 
@@ -479,7 +627,21 @@ _RISK_PER_TRADE_PCT = 0.01  # mirrors RISK_PER_TRADE_PCT in crypto_alert.py
 # _MAX_OPEN, _MAX_SAME_DIR, _MAX_RISK_PCT imported from adaptive_engine above (mode-aware)
 
 def _get_adaptive_weights_raw():
-    """Read per-token OGD weight matrix from token_weights table."""
+    """Read per-token OGD weight matrix from token_weights, falling back to
+    backtest_token_weights (bootstrap pool) for tokens with no live row.
+
+    C-2 fix (tracker audit 2026-05-26 cycle-6): previously read only from
+    `token_weights` (the live OGD pool). At PAPER-mode startup that table
+    typically has at most 1 row (the most-recently-seeded token, currently
+    TON), so the Adaptive tab silently rendered weights for 1 token when the
+    bootstrap pool actually carries full priors for all 10 tokens in
+    `backtest_token_weights`. Operator wrongly believed the bot had no
+    learning state for BTC/ETH/XRP/HBAR/AVAX/LINK/BNB/ADA/POL.
+
+    Each token now carries a `source` field: "live" if from token_weights,
+    "bootstrap" if from backtest_token_weights (uses the most recent run's
+    seeded weights). The frontend can render a BOOTSTRAP badge accordingly.
+    """
     _OGD_MIN = 10  # mirrors OGD_MIN_SAMPLES in adaptive_engine (not SAMPLE_N_OBSERVE=30)
     try:
         conn = _connect()
@@ -493,12 +655,42 @@ def _get_adaptive_weights_raw():
                 tokens[token] = {f: _ADAP_DEFAULT_W for f in _ADAP_FEATURES}
                 tokens[token]["n_updates"] = 0
                 tokens[token]["updated_at"] = updated_at or ""
+                tokens[token]["source"] = "live"
             if feature in _ADAP_FEATURES:
                 tokens[token][feature] = round(float(weight or _ADAP_DEFAULT_W), 6)
                 tokens[token]["n_updates"] = max(tokens[token]["n_updates"],
                                                  int(n_updates or 0))
                 if updated_at:
                     tokens[token]["updated_at"] = updated_at
+
+        # C-2 fallback: for any token NOT in token_weights, read the bootstrap
+        # row from backtest_token_weights. Schema (no run_id column): each
+        # (token, feature) is updated in-place by adaptive_engine's bootstrap
+        # path, so a single SELECT returns the current state. Mark with
+        # source="bootstrap" so the frontend can distinguish from live updates.
+        try:
+            bs_rows = conn.execute(
+                "SELECT token, feature, weight, n_bootstrap, updated_at "
+                "FROM backtest_token_weights ORDER BY token, feature"
+            ).fetchall()
+            for token, feature, weight, n_bootstrap, recorded_at in bs_rows:
+                if token in tokens:
+                    continue  # already have a live row — live takes precedence
+                if token not in tokens:
+                    tokens[token] = {f: _ADAP_DEFAULT_W for f in _ADAP_FEATURES}
+                    tokens[token]["n_updates"] = 0
+                    tokens[token]["updated_at"] = recorded_at or ""
+                    tokens[token]["source"] = "bootstrap"
+                if feature in _ADAP_FEATURES:
+                    tokens[token][feature] = round(float(weight or _ADAP_DEFAULT_W), 6)
+                    tokens[token]["n_updates"] = max(tokens[token]["n_updates"],
+                                                     int(n_bootstrap or 0))
+                    if recorded_at:
+                        tokens[token]["updated_at"] = recorded_at
+        except Exception:
+            # Bootstrap fallback is best-effort; live-only path remains correct
+            # if the bootstrap table is unavailable.
+            pass
         # Attach OGD blend %, per-token recent win rate, degenerate flag, orphan flag
         for tok in tokens:
             n = tokens[tok]["n_updates"]
@@ -2131,9 +2323,18 @@ def _paper_progress() -> dict:
     rate_source = "default"
     try:
         conn = _connect()
+        # C-1 fix (tracker audit 2026-05-26 cycle-6): crypto_alert.py:687
+        # writes an `INSERT INTO results (signal_id) VALUES (?)` row with
+        # `result='OPEN'` at signal-fire time. The previous EXISTS clause
+        # therefore matched every OPEN signal as "closed", inflating the
+        # LIVE-clearance `closed/30` countdown the moment any signal fires.
+        # The correct closed-set predicate mirrors what _canonical_wr uses
+        # everywhere else in this file: result in the terminal outcomes.
         row = conn.execute(
-            "SELECT COUNT(*) FROM signals WHERE status='CLOSED' OR "
-            "EXISTS (SELECT 1 FROM results r WHERE r.signal_id=signals.id)"
+            "SELECT COUNT(*) FROM signals WHERE status='CLOSED' OR EXISTS ("
+            "  SELECT 1 FROM results r WHERE r.signal_id=signals.id "
+            "    AND r.result IN ('WIN','LOSS','PARTIAL','PARTIAL_TP1','PARTIAL_TP2','EXPIRED')"
+            ")"
         ).fetchone()
         if row and row[0]:
             closed = int(row[0])
@@ -2267,9 +2468,30 @@ def get_honest_metrics() -> dict:
         except Exception:
             pass
 
+    # C-3 fix (tracker audit 2026-05-26 cycle-6): surface the real execution
+    # mode so the Honest Metrics tab can stop hardcoding "PAPER mode". Prefer
+    # heartbeat.json (authoritative — written by the running bot each cycle)
+    # and fall back to the env var, then to "UNKNOWN" if neither is available.
+    execution_mode = "UNKNOWN"
+    try:
+        hb_path = os.path.join(_ROOT, "data", "heartbeat.json")
+        if os.path.isfile(hb_path):
+            with open(hb_path, "r") as _hb_fh:
+                _hb = json.load(_hb_fh)
+            _mode = _hb.get("execution_mode")
+            if isinstance(_mode, str) and _mode:
+                execution_mode = _mode.upper()
+    except Exception:
+        pass
+    if execution_mode == "UNKNOWN":
+        _env_mode = os.environ.get("EXECUTION_MODE", "").strip()
+        if _env_mode:
+            execution_mode = _env_mode.upper()
+
     return {
         "ok": True,
         "bot_version":       BOT_VERSION_TAG,
+        "execution_mode":    execution_mode,
         "latest_run":        latest_run,
         "honest_metrics":    honest,
         "ogd_health":        _ogd_health_snapshot(),
@@ -2395,6 +2617,9 @@ class Handler(BaseHTTPRequestHandler):
                             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
         elif self.path == "/api/adaptive/summary":
             self.send_json(get_adaptive_summary())
+        elif self.path == "/api/adaptive/forensic" or self.path.startswith("/api/adaptive/forensic?"):
+            # R10 forensic panel (master audit 2026-05-26)
+            self.send_json(get_adaptive_forensic())
         elif self.path == "/api/adaptive/health":
             self.send_json(get_adaptive_health())
         elif self.path == "/api/honest-metrics":

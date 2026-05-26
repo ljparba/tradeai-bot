@@ -1277,6 +1277,29 @@ tr:hover td{background:rgba(37,37,56,.45)}
     <div id="adaptCacheAge" class="adap-stale" style="display:none"></div>
   </div>
 
+  <!-- ROW 5: R10 Per-Token Forensic Panel (master audit 2026-05-26) -->
+  <div class="intel-sec">
+    <div class="intel-sec-title">
+      Per-Token Adaptive Forensic Panel
+      <span class="badge" style="font-size:.7rem;text-transform:none;letter-spacing:0;font-weight:400">
+        Last update detail · health flags · regime label · reward / gradient_l1
+      </span>
+    </div>
+    <div class="honest-section-intro" style="margin:.4rem 0 .8rem 0;border-left-color:#06b6d4">
+      For each token: current weight top-feature, n_updates, the latest OGD update's
+      <b>reward</b> + <b>gradient_l1</b> + <b>regime</b> + <b>profit_pct</b>
+      (R4 + R7 forensic columns from <code>weight_history</code>), plus health flags
+      (<span class="badge warn">FLOOR-PINNED</span> <span class="badge crit">DEGENERATE</span>
+      <span class="badge crit">FROZEN</span> <span class="badge warn">STALE</span>).
+      Global DSR-gate verdict + freeze state shown in the header strip.
+      Updates after each closed signal.
+    </div>
+    <div id="adaptForensicHeader" style="margin-bottom:.6rem;font-size:.85rem;color:var(--muted)"></div>
+    <div id="adaptForensicBody">
+      <div class="empty">No forensic data yet — populates after first signal closes</div>
+    </div>
+  </div>
+
   </div><!-- /panelAdaptive -->
 
   <!-- HONEST METRICS PANEL (Sprint 3 + FIX 1 Part 2 surfaces) -->
@@ -3806,8 +3829,16 @@ async function loadHonestMetrics(){
 
     // ─── Top status row ─────────────────────────────────────
     document.getElementById('hmBotVersion').textContent = d.bot_version || '—';
-    document.getElementById('hmExecutionMode').textContent =
-      'PAPER mode (signal-only)';
+    // C-3 fix (tracker audit 2026-05-26 cycle-6): read execution_mode from
+    // the API instead of hardcoding "PAPER mode". A future LIVE flip is now
+    // reflected in the dashboard within one poll cycle. Suffix annotates
+    // signal-only PAPER semantics so the operator still sees that context.
+    const _mode = (d.execution_mode || 'UNKNOWN').toUpperCase();
+    const _modeLabel = _mode === 'PAPER' ? 'PAPER mode (signal-only)'
+                     : _mode === 'LIVE'  ? 'LIVE mode (real capital)'
+                     : _mode === 'UNKNOWN' ? 'UNKNOWN mode (no heartbeat / env)'
+                     : _mode + ' mode';
+    document.getElementById('hmExecutionMode').textContent = _modeLabel;
 
     const auditScore = d.audit && d.audit.score !== null ? d.audit.score : null;
     const auditEl = document.getElementById('hmAuditScore');
@@ -4081,6 +4112,16 @@ async function loadAdaptive(){
             const tooltip = maxW != null ? 'max_w='+maxW.toFixed(3)+(ent!=null?', entropy='+ent.toFixed(3):'') : '';
             badgeHtml = '<span title="'+tooltip+'" style="font-size:.68rem;padding:.12rem .45rem;border-radius:10px;letter-spacing:.05em;font-weight:700;'+badgeStyle+'">'+badgeLabel+'</span>';
           }
+          // C-2 fix (tracker audit 2026-05-26 cycle-6): annotate the source.
+          // Tokens without a live `token_weights` row fall back to the
+          // bootstrap pool (`backtest_token_weights`). The BOOTSTRAP badge
+          // tells the operator the weights are seeded priors, not the result
+          // of any closed-signal OGD updates yet.
+          if(tw.source === 'bootstrap'){
+            badgeHtml += ' <span title="Seeded from backtest_token_weights; no live updates yet" '
+              + 'style="font-size:.62rem;padding:.10rem .40rem;border-radius:10px;letter-spacing:.05em;font-weight:700;'
+              + 'background:rgba(148,163,184,.12);color:var(--muted);border:1px solid rgba(148,163,184,.2);margin-left:.25rem">BOOTSTRAP</span>';
+          }
           return '<div class="wt-token-block" data-token="'+tok+'">'
             +'<div class="wt-token-hdr">'
             +'<div class="wt-token-name">'+tok+' '+badgeHtml+'</div>'
@@ -4159,11 +4200,103 @@ async function loadAdaptive(){
 
     document.getElementById('adaptCount').textContent = Object.keys(wtokens).length || '0';
 
+    // ── R10 Per-Token Forensic Panel ───────────────────────────────────
+    // Fetch + render the new R4 (reward, gradient_l1, profit_pct) +
+    // R7 (regime) forensic columns from weight_history, plus R1
+    // (DSR verdict) + R9 (freeze state) global health.
+    try {
+      const fr = await fetch('/api/adaptive/forensic');
+      if (fr.ok) {
+        const fd = await fr.json();
+        renderAdaptiveForensicPanel(fd);
+      }
+    } catch (e) {
+      console.warn('forensic panel', e);
+    }
+
   } catch(e){
     console.error('adaptive', e);
     const el = document.getElementById('adaptError');
     if(el){ el.textContent = 'Failed to load adaptive data: ' + e.message; el.style.display = 'block'; }
   }
+}
+
+function renderAdaptiveForensicPanel(data) {
+  const headerEl = document.getElementById('adaptForensicHeader');
+  const bodyEl   = document.getElementById('adaptForensicBody');
+  if (!bodyEl) return;
+  if (!data || !data.ok) {
+    bodyEl.innerHTML = '<div class="empty">forensic endpoint error</div>';
+    return;
+  }
+
+  // Header strip: global verdict + freeze state
+  const g = data.global || {};
+  const verdict = (g.latest_cpcv_verdict || {}).verdict || '—';
+  const verdictClass = verdict === 'PASS' ? 'g' :
+                       verdict === 'MARGINAL' ? 'y' :
+                       verdict === 'FAIL' ? 'r' : '';
+  const fs = g.learning_freeze_state || {};
+  const frozenLabel = fs.frozen ? '<span class="badge crit">FROZEN</span>' :
+                      (fs.active_triggers && fs.active_triggers.length > 0) ?
+                      '<span class="badge warn">SHADOW: ' + (fs.active_triggers||[]).join(', ') + '</span>' :
+                      '<span class="badge ok">OK</span>';
+  headerEl.innerHTML =
+    '<b>Latest CPCV Verdict:</b> <span class="' + verdictClass + '">' + verdict + '</span>' +
+    '  ·  <b>R9 freeze:</b> ' + frozenLabel +
+    '  ·  <b>Updated:</b> ' + ((g.latest_cpcv_verdict||{}).updated_at || '—');
+
+  const tokens = data.tokens || {};
+  const sorted = Object.keys(tokens).sort();
+  if (sorted.length === 0) {
+    bodyEl.innerHTML = '<div class="empty">No forensic data yet</div>';
+    return;
+  }
+
+  // Compact per-token rows
+  const rows = sorted.map(tok => {
+    const t = tokens[tok] || {};
+    const cw = t.current_weights || {};
+    let topFeat = '—', topVal = 0;
+    Object.entries(cw).forEach(([f, v]) => { if (v > topVal) { topVal = v; topFeat = f; } });
+    const flags = (t.health_flags || []).map(f => {
+      const cls = f.startsWith('FROZEN') ? 'crit' :
+                  f.startsWith('DEGENERATE') ? 'crit' :
+                  f.startsWith('FLOOR-PINNED') ? 'warn' :
+                  f.startsWith('STALE') ? 'warn' : '';
+      return '<span class="badge ' + cls + '" style="margin-right:.2rem">' + f + '</span>';
+    }).join('') || '<span style="color:var(--muted);font-size:.75rem">—</span>';
+
+    const recent = (t.recent_updates || [])[0] || {};
+    const reward = recent.reward != null ? recent.reward.toFixed(3) : '—';
+    const grad   = recent.gradient_l1 != null ? recent.gradient_l1.toFixed(5) : '—';
+    const regime = recent.regime || '—';
+    const profit = recent.profit_pct != null ? (recent.profit_pct*100).toFixed(2) + '%' : '—';
+    const lastTs = recent.ts || t.last_update_iso || '—';
+    const rewardColor = recent.reward > 0 ? 'g' : recent.reward < 0 ? 'r' : '';
+
+    return '<tr>' +
+      '<td><b>' + tok + '</b></td>' +
+      '<td style="text-align:center">' + (t.n_updates || 0) + '</td>' +
+      '<td style="font-size:.8rem">' + topFeat + ':' + (topVal*100).toFixed(1) + '%</td>' +
+      '<td class="' + rewardColor + '">' + reward + '</td>' +
+      '<td>' + grad + '</td>' +
+      '<td style="font-size:.8rem">' + regime + '</td>' +
+      '<td>' + profit + '</td>' +
+      '<td style="font-size:.7rem;color:var(--muted)">' + lastTs + '</td>' +
+      '<td>' + flags + '</td>' +
+      '</tr>';
+  }).join('');
+
+  bodyEl.innerHTML =
+    '<table class="data-table" style="width:100%;font-size:.85rem">' +
+      '<thead><tr>' +
+        '<th>Token</th><th>n_updates</th><th>Top Feature</th>' +
+        '<th>Last Reward</th><th>Grad L1</th><th>Regime</th>' +
+        '<th>P&amp;L</th><th>Last Update</th><th>Flags</th>' +
+      '</tr></thead>' +
+      '<tbody>' + rows + '</tbody>' +
+    '</table>';
 }
 
 function _startAdaptivePoll(){
