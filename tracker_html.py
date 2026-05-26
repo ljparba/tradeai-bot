@@ -4045,7 +4045,12 @@ async function loadAdaptive(){
     // ── OGD Weights ──
     const wdata = d.weights || {};
     const wtokens = wdata.tokens || {};
-    const feats = wdata.feature_order || ['rsi','trend','sr','mtf','volume','momentum'];
+    // M-2 fix (tracker audit cycle-7 2026-05-26): the fallback feature list
+    // was carrying stale names from a long-dead schema (rsi/trend/sr/mtf/...).
+    // Real ICT-bot features are the six in adaptive_engine.FEATURES. Without
+    // this fix, any transient /api/adaptive/summary failure briefly rendered
+    // six phantom feature bars with bogus labels.
+    const feats = wdata.feature_order || ['fvg_quality','mss_quality','session','confidence','trend_strength','dr_location'];
     const defW = wdata.default_weight || 0.1667;
     const ogdMin = wdata.ogd_min_samples || 30;
     const wbEl = document.getElementById('adaptWeightsBody');

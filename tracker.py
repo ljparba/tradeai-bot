@@ -2453,7 +2453,14 @@ def get_honest_metrics() -> dict:
         pass
 
     # Find the matching backtest_reports/RunNN_*.txt
-    honest = {"cpcv_wr_mean": None, "dsr": None, "verdict": None}
+    # M-1 fix (tracker audit cycle-7 2026-05-26): fallback dict must mirror
+    # the FULL schema returned by `_parse_honest_metrics_from_report()` (9
+    # keys). Previously only 3 keys were set; frontend `toFixed()` on the
+    # missing 6 keys threw `undefined.toFixed is not a function` and crashed
+    # the whole Honest Metrics tab on a fresh install (no backtest_runs row).
+    honest = {"cpcv_wr_mean": None, "cpcv_wr_std": None, "cpcv_wr_q05": None,
+              "overall_sharpe": None, "psr_oos": None, "dsr": None,
+              "dsr_proxy_used": None, "verdict": None, "n_signals": None}
     if latest_run["id"] is not None:
         try:
             rpt_dir = os.path.join(_ROOT, "backtest_reports")
