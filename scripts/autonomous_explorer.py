@@ -972,6 +972,15 @@ def _objective_factory(study_name: str, guard: _GuardState, sess: dict):
                     )
                     guard.pin_dsr = _read_pin_dsr()
                     guard.pin_run = _read_pin_run()
+                    # M-4 fix (audit 2026-05-27): refresh `start_sr_std` after our
+                    # own auto-promote. Without this, the very next trial trips
+                    # the sr_trial_std_jump guard because the just-promoted run
+                    # legitimately moved the cross-config pool. Re-baseline so
+                    # the drift guard only catches EXTERNAL changes (manual
+                    # promotes, DB tampering) from this point forward.
+                    guard.start_sr_std = _read_cross_config_std()
+                    print(f"[explorer] M-4: guard.start_sr_std refreshed to "
+                          f"{guard.start_sr_std:.4f} after auto-promote")
                     sess["auto_promotions"] = sess.get("auto_promotions", 0) + 1
                     _write_session(sess)
                 elif promo_result.startswith("skipped"):
@@ -1035,7 +1044,17 @@ def _objective_factory(study_name: str, guard: _GuardState, sess: dict):
             print(f"[explorer] objective: FAIL score={_score:.2f} "
                   f"(cpcv_mean={m['cpcv_mean']:.2f} - 30.0 + n_bonus={_n_bonus:.2f} @ n={_n_obs})")
             return _score
-        return 0.0
+        # H-1 fix (audit 2026-05-27): error/timeout/empty-metrics path. Previously
+        # returned 0.0, which is HIGHER than legitimately catastrophic FAIL scores
+        # (e.g. WR=20%, n=1 → -10.0 at α=0; even worse with negative cpcv_mean cases).
+        # TPE would then steer toward error-prone param regions. -100.0 sentinel is
+        # strictly below any valid score envelope: minimum valid FAIL score floor at
+        # α=5.0 ≈ (cpcv_mean=0 - 30 + 5*log(1)) = -30; minimum at α=10.0 with
+        # cpcv_mean=0 and n=1 ≈ -30. -100 leaves ~70-point safety margin.
+        _err_reason = m.get("error", "unknown") if m else "no_metrics"
+        print(f"[explorer] objective: ERROR sentinel score=-100.00 "
+              f"(reason={_err_reason}, n={_n_obs}) — TPE will avoid this region")
+        return -100.0
     return _objective
 
 
