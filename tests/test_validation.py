@@ -402,11 +402,17 @@ class TestVerdictGate:
             )
 
     def test_pass_requires_both_wr_and_dsr(self):
-        # 100% WR with NO DSR computed → DSR=None, so PASS allowed by WR alone
+        # C-B fix (audit 2026-05-25): when DSR is None (no honest cross-config
+        # std + n_trials_for_dsr default), the verdict is capped at MARGINAL —
+        # PASS now requires dsr_present AND dsr >= 0.95. This protects against
+        # selection-bias-uncorrected configs slipping through as PASS.
         sigs = _make_signals_stream(40, ["WIN"])
         out = v.cpcv_summary(sigs, n_groups=5, n_test_groups=2)
         assert out["dsr"] is None
-        assert out["verdict"] == "PASS"
+        assert out["verdict"] == "MARGINAL", (
+            f"DSR=None must cap verdict at MARGINAL (C-B fix); got {out['verdict']}"
+        )
+        assert out["dsr_gate_applied"] is False
 
 
 class TestOOSPSR:
