@@ -3283,6 +3283,38 @@ def main():
             print(f"\n[CPCV] Using HONEST cross-config sr_trial_std={_sr_trial_std_honest:.4f} "
                   f"(FIX 1 Part 2; bypasses within-fold proxy)")
         print("\n" + cpcv_text_report(_cpcv))
+
+        # R1 fix (master audit 2026-05-26): persist CPCV verdict + headline
+        # metrics to bot_state so adaptive_engine can read them at OGD update
+        # time. Closes L-H "no DSR-aware learning gate on OGD updates" —
+        # learning is now suppressed (or down-scaled) when the latest CPCV
+        # verdict is FAIL. See adaptive_engine.AdaptiveWeightEngine.update()
+        # for the gate logic + OGD_DSR_GATE env var (strict / soft / off).
+        try:
+            import sqlite3 as _sqlite3
+            from datetime import datetime as _dt, timezone as _tz
+            _verdict_blob = json.dumps({
+                "verdict":     _cpcv.get("verdict"),
+                "wr_mean":     _cpcv.get("wr_mean"),
+                "dsr":         _cpcv.get("dsr"),
+                "n_signals":   _cpcv.get("n_signals"),
+                "updated_at":  _dt.now(_tz.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                "source":      "backtest.cpcv_summary",
+                "config_hash": _run_config_hash,
+            })
+            _vconn = _sqlite3.connect(BT_DB_PATH, timeout=10)
+            _vconn.execute(
+                "INSERT OR REPLACE INTO bot_state(key,value) VALUES(?,?)",
+                ("latest_cpcv_verdict", _verdict_blob),
+            )
+            _vconn.commit()
+            _vconn.close()
+            print(f"[R1] persisted latest_cpcv_verdict = {_cpcv.get('verdict')} "
+                  f"(DSR={(_cpcv.get('dsr') or 0)*100:.1f}%, "
+                  f"n={_cpcv.get('n_signals')})")
+        except Exception as _vexc:
+            print(f"[R1] could not persist latest_cpcv_verdict: "
+                  f"{type(_vexc).__name__}: {_vexc}")
     except Exception as _cpcv_exc:
         print(f"\n[CPCV] skipped — {type(_cpcv_exc).__name__}: {_cpcv_exc}")
 

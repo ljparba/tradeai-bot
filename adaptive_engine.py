@@ -63,6 +63,24 @@ OGD_WARMUP_FLOOR = 3   # R2 fix (master audit 2026-05-26): below this, no update
                        # signal 10 got full LR). Now gradient kicks in gently
                        # at n=4, scales up to full at n=OGD_MIN_SAMPLES.
 
+# R1 fix (master audit 2026-05-26): DSR-aware learning gate.
+# When the latest backtest's CPCV verdict is FAIL, the strategy lacks
+# statistical validation → updating OGD weights on a noisy/overfit signal
+# can corrupt them. Closes L-H "no DSR-aware learning gate on OGD updates".
+#
+# Modes (set via OGD_DSR_GATE env var):
+#   "strict" — FAIL → skip update entirely (only count toward n)
+#   "soft"   — FAIL → 0.25× LR multiplier (still learning but cautiously); default
+#   "off"    — bypass gate (legacy behavior, learn unconditionally)
+#
+# When the verdict is missing or PASS/MARGINAL, the gate is inert.
+OGD_DSR_GATE_MODE = os.environ.get("OGD_DSR_GATE", "soft").lower()
+if OGD_DSR_GATE_MODE not in ("strict", "soft", "off"):
+    print(f"[ADAPTIVE] WARN OGD_DSR_GATE={OGD_DSR_GATE_MODE!r} unrecognised — "
+          f"falling back to 'soft'")
+    OGD_DSR_GATE_MODE = "soft"
+OGD_DSR_FAIL_LR_SCALE = 0.25   # soft-mode LR multiplier when verdict=FAIL
+
 # ── Sample-size utilities (Task 15) ──────────────────────
 def label_sample_size(n: int) -> str:
     """Return a human-readable sample-size tier label for reports and Telegram."""
@@ -367,6 +385,50 @@ class AdaptiveWeightEngine:
             if bt_tokens:
                 print(f"[ADAPTIVE] Bootstrap-initialized (no live data yet): {', '.join(sorted(bt_tokens))}")
 
+    # ── DSR-aware learning gate (R1, master audit 2026-05-26) ────────────
+    def _latest_cpcv_verdict(self) -> Optional[str]:
+        """Read the most-recent CPCV verdict persisted by backtest.py.
+
+        Returns "PASS" | "MARGINAL" | "FAIL" | None. The verdict is written
+        to `bot_state.latest_cpcv_verdict` at the end of each backtest run
+        (see backtest.py around line 3285). When None, the gate is inert
+        (no backtest has run yet → preserves cold-start back-compat).
+        """
+        try:
+            conn = _connect()
+            row = conn.execute(
+                "SELECT value FROM bot_state WHERE key='latest_cpcv_verdict'"
+            ).fetchone()
+            conn.close()
+            if not row or not row[0]:
+                return None
+            blob = json.loads(row[0])
+            v = blob.get("verdict")
+            if isinstance(v, str) and v in ("PASS", "MARGINAL", "FAIL"):
+                return v
+            return None
+        except Exception:
+            return None
+
+    def _dsr_gate_lr_scale(self) -> Tuple[float, str]:
+        """R1: returns (lr_scale, reason). Called from update().
+
+        Policy:
+          - mode='off'    → (1.0, "off")
+          - mode='strict' + verdict FAIL → (0.0, "strict_fail")
+          - mode='soft'   + verdict FAIL → (OGD_DSR_FAIL_LR_SCALE, "soft_fail")
+          - any other case → (1.0, "inert")
+        """
+        if OGD_DSR_GATE_MODE == "off":
+            return (1.0, "off")
+        v = self._latest_cpcv_verdict()
+        if v != "FAIL":
+            return (1.0, "inert")
+        if OGD_DSR_GATE_MODE == "strict":
+            return (0.0, "strict_fail")
+        # default: soft mode
+        return (OGD_DSR_FAIL_LR_SCALE, "soft_fail")
+
     # ── Public API ───────────────────────────────────────
     def get_weights(self, token: str) -> Dict[str, float]:
         """Return current normalised weights for token (falls back to defaults)."""
@@ -467,6 +529,16 @@ class AdaptiveWeightEngine:
             1.0 + n / max(LEARNING_RATE_DECAY, 1))
         # R2: soft-ramp LR scaling during warmup window
         _lr = _lr * ramp_scale
+
+        # R1: DSR-aware gate scaling. When latest CPCV verdict is FAIL,
+        # downscale (soft) or zero (strict) the LR. Strict-mode at lr_scale=0
+        # produces a no-op OGD step (velocity decays via momentum but no
+        # gradient contribution) while still counting toward n.
+        _dsr_lr_scale, _dsr_reason = self._dsr_gate_lr_scale()
+        if _dsr_lr_scale < 1.0:
+            print(f"[ADAPTIVE] DSR gate {_dsr_reason}: lr_scale={_dsr_lr_scale:.2f} "
+                  f"(latest CPCV verdict is FAIL) — learning {'suppressed' if _dsr_lr_scale == 0 else 'softened'}")
+        _lr = _lr * _dsr_lr_scale
 
         for feat in FEATURES:
             score   = feature_scores.get(feat, 1.0 / len(FEATURES))
