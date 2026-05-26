@@ -347,6 +347,8 @@ def _precache_warm(cache_minutes_max: int = 30) -> None:
     print("[explorer] pre-cache warm — running 1 backtest with current code state")
     sys.stdout.flush()
     env = os.environ.copy()
+    # H-CY7-1: same opt-out as trial subprocesses (don't touch backtest_token_weights)
+    env["BOOTSTRAP_AFTER_RUN"] = "0"
     started = time.time()
     # Snapshot before so we only clean OUR precache row (FIX C1)
     max_id_before = 0
@@ -401,6 +403,10 @@ def _params_to_env(params: dict) -> dict:
     env = os.environ.copy()
     for k, v in params.items():
         env[k] = str(v)
+    # H-CY7-1 (cycle-7 audit 2026-05-26): explorer trials must NOT overwrite
+    # backtest_token_weights (R3 protection). Backtest.py honors BOOTSTRAP_AFTER_RUN=0
+    # to skip the post-run weight write. Explorer is opt-out by default.
+    env["BOOTSTRAP_AFTER_RUN"] = "0"
     return env
 
 

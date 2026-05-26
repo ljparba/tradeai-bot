@@ -464,24 +464,59 @@ class AdaptiveWeightEngine:
         except Exception:
             return None
 
+    def _latest_cpcv_verdict_blob(self) -> Optional[dict]:
+        """S-CY7-1 fix (cycle-7 audit 2026-05-26): return the full verdict
+        blob so the gate can read auxiliary fields like `dsr_gate_applied`.
+
+        Returns the parsed dict, or None if no verdict has been persisted
+        yet / blob is malformed. Used by `_dsr_gate_lr_scale()` to
+        distinguish DSR-passed MARGINAL (safe) from DSR-absent MARGINAL
+        (no honest selection-bias correction → soft-scale).
+        """
+        try:
+            conn = _connect()
+            row = conn.execute(
+                "SELECT value FROM bot_state WHERE key='latest_cpcv_verdict'"
+            ).fetchone()
+            conn.close()
+            if not row or not row[0]:
+                return None
+            blob = json.loads(row[0])
+            return blob if isinstance(blob, dict) else None
+        except Exception:
+            return None
+
     def _dsr_gate_lr_scale(self) -> Tuple[float, str]:
-        """R1: returns (lr_scale, reason). Called from update().
+        """R1 + S-CY7-1: returns (lr_scale, reason). Called from update().
 
         Policy:
-          - mode='off'    → (1.0, "off")
+          - mode='off' → (1.0, "off")
           - mode='strict' + verdict FAIL → (0.0, "strict_fail")
-          - mode='soft'   + verdict FAIL → (OGD_DSR_FAIL_LR_SCALE, "soft_fail")
+          - mode='soft' + verdict FAIL → (OGD_DSR_FAIL_LR_SCALE, "soft_fail")
+          - **S-CY7-1 (any non-off mode):** verdict MARGINAL + dsr_gate_applied=False
+            → (0.5, "marginal_no_dsr") — protects against full-rate learning
+            on a verdict that was never stress-tested by the DSR multiple-
+            testing correction (C-B fix produces MARGINAL when dsr=None).
+            Verdict-blob field defaults to True for back-compat with older
+            backtests written before cycle-7.
           - any other case → (1.0, "inert")
         """
         if OGD_DSR_GATE_MODE == "off":
             return (1.0, "off")
-        v = self._latest_cpcv_verdict()
-        if v != "FAIL":
+        blob = self._latest_cpcv_verdict_blob() or {}
+        v = blob.get("verdict") if isinstance(blob.get("verdict"), str) else None
+        if v not in ("PASS", "MARGINAL", "FAIL"):
             return (1.0, "inert")
-        if OGD_DSR_GATE_MODE == "strict":
-            return (0.0, "strict_fail")
-        # default: soft mode
-        return (OGD_DSR_FAIL_LR_SCALE, "soft_fail")
+        # FAIL path — existing R1 behavior
+        if v == "FAIL":
+            if OGD_DSR_GATE_MODE == "strict":
+                return (0.0, "strict_fail")
+            return (OGD_DSR_FAIL_LR_SCALE, "soft_fail")
+        # MARGINAL with no honest DSR gate applied — S-CY7-1 mitigation
+        if v == "MARGINAL" and not blob.get("dsr_gate_applied", True):
+            return (0.5, "marginal_no_dsr")
+        # PASS or DSR-passed MARGINAL → inert
+        return (1.0, "inert")
 
     # ── R9: Learning-freeze predicate ────────────────────────────────────────
     def _check_consecutive_loss_spike(self) -> bool:

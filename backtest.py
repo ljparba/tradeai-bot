@@ -3293,14 +3293,22 @@ def main():
         try:
             import sqlite3 as _sqlite3
             from datetime import datetime as _dt, timezone as _tz
+            # S-CY7-1 fix (cycle-7 audit 2026-05-26): include `dsr_gate_applied`
+            # so the adaptive engine's R1 gate can distinguish DSR-passed
+            # MARGINAL (Case a — safe, full LR) from DSR-absent MARGINAL
+            # (Case b — no honest selection-bias correction; should soft-scale).
+            # The flag is produced by validation.py:cpcv_summary as part of the
+            # C-B verdict-cap fix (cycle-2). Default True via .get() if absent
+            # so older verdict computations don't regress to soft-scale.
             _verdict_blob = json.dumps({
-                "verdict":     _cpcv.get("verdict"),
-                "wr_mean":     _cpcv.get("wr_mean"),
-                "dsr":         _cpcv.get("dsr"),
-                "n_signals":   _cpcv.get("n_signals"),
-                "updated_at":  _dt.now(_tz.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                "source":      "backtest.cpcv_summary",
-                "config_hash": _run_config_hash,
+                "verdict":           _cpcv.get("verdict"),
+                "wr_mean":           _cpcv.get("wr_mean"),
+                "dsr":               _cpcv.get("dsr"),
+                "dsr_gate_applied":  _cpcv.get("dsr_gate_applied", True),
+                "n_signals":         _cpcv.get("n_signals"),
+                "updated_at":        _dt.now(_tz.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                "source":            "backtest.cpcv_summary",
+                "config_hash":       _run_config_hash,
             })
             _vconn = _sqlite3.connect(BT_DB_PATH, timeout=10)
             _vconn.execute(
