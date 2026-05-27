@@ -571,7 +571,59 @@ gates between phases.
 
 ---
 
-## 16. Document History
+## 16. Session 3 Live-Integration Requirements (live/backtest parity gates)
+
+Surfaced by the Session 2 live-backtest-consistency-checker audit. These
+items MUST be honored by the Session 3 `crypto_alert.py` integration so
+live and backtest produce identical signals from identical OHLCV inputs.
+
+### LBC-H-1 — Live `signals` table must add `source` column (REQUIRED)
+- Live `signals` table currently has no `source` column (`crypto_alert.py`
+  schema migration block around lines 307-346).
+- Session 3 must add `ALTER TABLE signals ADD COLUMN source TEXT DEFAULT
+  '5M_SWEEP'` to the live migration list AND extend the live signal
+  INSERT statement to include the source value.
+- Without this: live CRT signals can't be written to DB; per-source
+  attribution queries break.
+
+### LBC-H-2 — `consumed_sweeps` mitigation set must persist to state_store (REQUIRED)
+- Backtest creates fresh `consumed` set per call. That's correct for a
+  365-day historical replay (each backtest is a clean simulation).
+- Live bot, however, must REMEMBER mitigated C1 zones across bot
+  restarts — otherwise a restart re-emits the same CRT signal on the
+  same C1 zone. Spec §15 explicitly calls for persistence.
+- Session 3 must serialize the `consumed` set to bot_state (or
+  state_store) as a list of (c1_time, c1_high, c1_low) tuples,
+  reload at bot start, and prune entries older than ~8h ×
+  H4_CRT_C2_LOOKBACK (zone has been swept past the lookback window).
+
+### LBC-H-3 — TP cascade helper must be shared between live + backtest (REQUIRED)
+- Session 2 backtest CRT scanner inlines the TP2/TP3 RR cascade
+  (1.5R / 2.0R from named module constants CRT_TP2_RR / CRT_TP3_RR
+  per H-3 fix).
+- Session 3 live integration must use the SAME logic. The safest way
+  is to extract `compute_crt_trade_plan(direction, entry, sl, ...)`
+  into `crt_engine.py` and have both backtest and live call it.
+- Without this: live and backtest could diverge on TP placement →
+  backtest WR % invalid as live predictor.
+
+### Implementation order for Session 3
+1. Extract `compute_crt_trade_plan()` into crt_engine.py FIRST (refactor
+   backtest.py to use it) — eliminates the duplication risk before any
+   new code lands.
+2. Add `source` column to live signals table migration list.
+3. Add `consumed` set persistence via state_store.
+4. Integrate `detect_h4_crt()` call into `scan_token()` parallel to the
+   existing 5M sweep call.
+5. Live signal Telegram formatting carries source tag for operator
+   visibility.
+
+These three live/BT parity gates are NOT bugs in Session 2 — they're
+gaps that Session 3 must be designed to close. Session 2's backtest
+implementation is correctly self-contained.
+
+
+## 17. Document History
 
 - **2026-05-27 (initial)** — Created. Research consolidated from Trading
   Wyckoff long-form article + 4 web searches across ICT/CRT topic space.

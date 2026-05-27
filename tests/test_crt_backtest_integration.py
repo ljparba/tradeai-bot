@@ -62,6 +62,19 @@ class TestSourceColumnSchema(unittest.TestCase):
         self.assertIn("?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?", src,
                       "VALUES placeholder count must be 48 (47 fields + source)")
 
+    def test_config_hash_includes_crt_knobs(self):
+        """B-CRT-S2-C2 fix: _compute_run_config_hash must include CRT env knobs
+        so a CRT-enabled run and a CRT-disabled run on the same ICT params
+        produce different config_hashes (prevents DSR n_trials collision)."""
+        import backtest
+        import inspect
+        src = inspect.getsource(backtest._compute_run_config_hash)
+        for knob in ("ENABLE_H4_CRT", "H4_CRT_DISABLED_TOKENS",
+                     "H4_CRT_C2_LOOKBACK", "H4_CRT_MSS_HORIZON",
+                     "H4_CRT_VALIDATION_SCHOOL"):
+            self.assertIn(knob, src,
+                          f"config_hash payload must include CRT knob {knob}")
+
 
 class TestCrtScannerGates(unittest.TestCase):
     """Verify the default-OFF and blacklist gates short-circuit cleanly."""
@@ -77,15 +90,16 @@ class TestCrtScannerGates(unittest.TestCase):
         _clean_crt_env()
 
     def test_disabled_by_default(self):
+        # H-4 fix: scanner now returns (signals, rejections) tuple.
+        # H-1 fix: signature dropped unused c1h parameter.
         import backtest
         self.assertFalse(backtest.ENABLE_H4_CRT,
                          "ENABLE_H4_CRT must default to False")
-        c4h = _flat_candles(30, t_step=14_400_000)  # H4 = 4h in ms
-        c1h = _flat_candles(120, t_step=3_600_000)  # H1 = 1h in ms
-        c5m = _flat_candles(600, t_step=300_000)    # 5M = 5min in ms
-        result = backtest.run_backtest_token_h4_crt("BTC", c5m, c1h, c4h)
-        self.assertEqual(result, [],
-                         "default-OFF must return empty list immediately")
+        c4h = _flat_candles(30, t_step=14_400_000)
+        c5m = _flat_candles(600, t_step=300_000)
+        sigs, rej = backtest.run_backtest_token_h4_crt("BTC", c5m, c4h)
+        self.assertEqual(sigs, [], "default-OFF must return empty signals list")
+        self.assertIn("crt_default_off", rej, "rejection counter must record default-off")
 
     def test_blacklist_skips_token(self):
         os.environ["ENABLE_H4_CRT"] = "1"
@@ -95,10 +109,13 @@ class TestCrtScannerGates(unittest.TestCase):
                 del sys.modules[mod]
         import backtest
         c4h = _flat_candles(30, t_step=14_400_000)
-        c1h = _flat_candles(120, t_step=3_600_000)
         c5m = _flat_candles(600, t_step=300_000)
-        self.assertEqual(backtest.run_backtest_token_h4_crt("POL", c5m, c1h, c4h), [])
-        self.assertEqual(backtest.run_backtest_token_h4_crt("hbar", c5m, c1h, c4h), [])
+        sigs, rej = backtest.run_backtest_token_h4_crt("POL", c5m, c4h)
+        self.assertEqual(sigs, [])
+        self.assertIn("crt_blacklisted", rej)
+        sigs2, rej2 = backtest.run_backtest_token_h4_crt("hbar", c5m, c4h)
+        self.assertEqual(sigs2, [])
+        self.assertIn("crt_blacklisted", rej2)
 
     def test_missing_data_returns_empty(self):
         os.environ["ENABLE_H4_CRT"] = "1"
@@ -106,32 +123,36 @@ class TestCrtScannerGates(unittest.TestCase):
             if mod in sys.modules:
                 del sys.modules[mod]
         import backtest
-        # All-empty inputs
-        self.assertEqual(backtest.run_backtest_token_h4_crt("BTC", None, None, None), [])
+        # All-empty inputs — should return ([], {'crt_no_data': 1})
+        sigs, rej = backtest.run_backtest_token_h4_crt("BTC", None, None)
+        self.assertEqual(sigs, [])
+        self.assertIn("crt_no_data", rej)
         # Too few H4 bars
-        self.assertEqual(
-            backtest.run_backtest_token_h4_crt(
-                "BTC",
-                _flat_candles(600, t_step=300_000),
-                _flat_candles(120, t_step=3_600_000),
-                _flat_candles(5, t_step=14_400_000),  # only 5 H4 bars
-            ),
-            [],
+        sigs2, rej2 = backtest.run_backtest_token_h4_crt(
+            "BTC",
+            _flat_candles(600, t_step=300_000),
+            _flat_candles(5, t_step=14_400_000),  # only 5 H4 bars
         )
+        self.assertEqual(sigs2, [])
+        self.assertIn("crt_insufficient_data", rej2)
 
     def test_flat_data_produces_no_signals(self):
-        """Flat OHLCV with no swings → no sweep → no CRT → empty list."""
+        """Flat OHLCV with no swings → no sweep → no CRT → empty signals."""
         os.environ["ENABLE_H4_CRT"] = "1"
         for mod in ("crt_engine", "backtest"):
             if mod in sys.modules:
                 del sys.modules[mod]
         import backtest
         c4h = _flat_candles(30, t_step=14_400_000)
-        c1h = _flat_candles(120, t_step=3_600_000)
         c5m = _flat_candles(600, t_step=300_000)
-        result = backtest.run_backtest_token_h4_crt("BTC", c5m, c1h, c4h)
-        self.assertEqual(result, [],
+        sigs, rej = backtest.run_backtest_token_h4_crt("BTC", c5m, c4h)
+        self.assertEqual(sigs, [],
                          "Flat data produces no swings, no sweep, no CRT")
+        # Rejection dict should have non-zero entries (sub-windows scanned)
+        self.assertTrue(
+            "crt_no_setup" in rej or "crt_sub_window_too_small" in rej,
+            f"Expected at least one rejection counter; got {rej}",
+        )
 
 
 class TestSignalSourceTags(unittest.TestCase):

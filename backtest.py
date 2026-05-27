@@ -114,7 +114,13 @@ from crypto_alert import (
 # and merges H4_CRT signals with the existing 5M_SWEEP signals before they
 # enter the validation pipeline. Source tagging in the DB row enables
 # per-source attribution.
-from crt_engine import detect_h4_crt, ENABLE_H4_CRT, H4_CRT_DISABLED_TOKENS
+from crt_engine import (
+    detect_h4_crt, ENABLE_H4_CRT, H4_CRT_DISABLED_TOKENS,
+    H4_CRT_C2_LOOKBACK, H4_CRT_MSS_HORIZON,
+)
+# H-CRT2-1 fix (Session 2 Option B audit 2026-05-27): import SL buffer
+# directly from ict_engine (crypto_alert.py doesn't re-export it).
+from ict_engine import ICT_SL_BUFFER_PCT
 from strategy_engine import BACKTEST_CONFIG, LIVE_CONFIG, StrategyConfig, evaluate_setup, meets_quality, QUALITY_RANK
 from strategy_templates import evaluate_confluences_vs_templates
 from adaptive_engine import (
@@ -201,6 +207,17 @@ REGIME_WINDOW  = 360    # 5M bars for rolling regime = 30H window (was 120×15M)
 COOLDOWN_BARS  = 8      # rollback: F-8/F-9/F-10 reverted to F-4 level (40min); quality config
 ENTRY_WINDOW   = 72     # P-3 ACCEPTED: 48→72 (4H→6H); E-1 (72→96) rejected — 0 new signals
 OUTPUT_FILE    = os.path.join(_ROOT, "data", "backtest_results.json")
+
+# CRT v1 Session 2 H-3 fix (audit cycle-7 2026-05-27): module-level constants
+# for the H4-CRT scanner — promoted from inline magic numbers per the code-
+# quality review. Derived where possible from crt_engine constants so the
+# autonomous explorer's env-override path stays consistent across both.
+CRT_H4_WINDOW_BUFFER       = 2   # padding bars on top of H4_CRT_C2_LOOKBACK
+CRT_5M_WINDOW_SIZE         = 300 # 5M bars in the sub-window passed to detect_h4_crt
+CRT_5M_HEADROOM_BUFFER     = 5   # extra 5M bars beyond H4_CRT_MSS_HORIZON for MSS scan
+CRT_H4_BAR_DURATION_MS     = 4 * 3600 * 1000  # 4 hours in ms — for H4 close-time anchoring
+CRT_TP2_RR                 = 1.5 # TP2 R-multiple extension from entry
+CRT_TP3_RR                 = 2.0 # TP3 R-multiple extension from entry
 
 # Locked OOS start date — set once before optimization, never moved.
 # All signals with ts >= this date form the out-of-sample set.
@@ -1254,51 +1271,68 @@ def run_backtest_token(token, c5m, c1h, c4h, btc_c1h=None, btc_c5m=None, config=
 # ══════════════════════════════════════════════════════════
 # CRT v1 — PARALLEL H4 SCANNER (Session 2)
 # ══════════════════════════════════════════════════════════
-def run_backtest_token_h4_crt(token, c5m, c1h, c4h, config=None):
-    """Simulate H4 CRT signals across the historical timeline (Session 2).
+def run_backtest_token_h4_crt(token, c5m, c4h, config=None):
+    """Simulate H4 CRT signals across the historical timeline (Session 2 + Option B fixes).
 
-    Parallel to run_backtest_token() — uses the SAME 5M/1H/4H candle cache,
+    Parallel to run_backtest_token() — uses the SAME 5M/4H candle cache,
     SAME outcome simulator (check_outcome), SAME triple-barrier labeling,
-    and writes signals into the SAME pipeline tagged with source='H4_CRT'.
+    SAME session filter and 4H-bias gate as the 5M-sweep path, and writes
+    signals into the SAME pipeline tagged with source='H4_CRT'.
 
     Per the spec doc §7 (docs/exploration_runs/CRT_RESEARCH_2026_05_27.md):
       - H4 reference candle, 5M entry timeframe
       - Wyckoff/flexible validation school via crt_engine.detect_h4_crt
       - One-shot mitigation per C1 zone (timestamp-keyed)
       - (FVG OR OB) confluence required (enforced inside detect_h4_crt)
+      - 4H bias filter applied as "Daily Bias proxy" (H-CRT2-4 fix)
+      - Killzone/session filter (H-CRT2-3 fix)
+      - SL placed 0.3% beyond swept wick (H-CRT2-1 fix — matches 5M path)
 
-    Default-OFF: returns [] immediately when ENABLE_H4_CRT=0 (the canonical
-    deployment state). Operator enables via ENABLE_H4_CRT=1 in env.
+    Default-OFF: returns ([], {}) immediately when ENABLE_H4_CRT=0 (the
+    canonical deployment state). Operator enables via ENABLE_H4_CRT=1 in env.
 
     H6 isolation: backtest uses DEFAULT_WEIGHTS for OGD scoring — same
     constraint as run_backtest_token. CRT does not break this invariant.
+
+    Returns:
+        (signals: list, rejection_counts: dict) — same contract shape as
+        run_backtest_token() so the main loop can aggregate CRT rejections
+        into _GLOBAL_REJECTIONS with `crt_` prefix for D2 diagnostic
+        surfacing (H-4 fix).
     """
+    rej: dict = {}
     if not ENABLE_H4_CRT:
-        return []
+        rej["crt_default_off"] = 1
+        return [], rej
     if token.upper() in H4_CRT_DISABLED_TOKENS:
-        return []
+        rej["crt_blacklisted"] = 1
+        return [], rej
     if config is None:
         config = ACTIVE_CONFIG
 
-    if not c4h or not c5m or not c1h:
-        return []
+    if not c4h or not c5m:
+        rej["crt_no_data"] = 1
+        return [], rej
     n5 = len(c5m["closes"])
     n4 = len(c4h["closes"])
     if n5 < WARMUP_BARS + FORWARD_BARS or n4 < 20:
-        return []
+        rej["crt_insufficient_data"] = 1
+        return [], rej
 
     signals = []
-    # Mitigation set persists across H4 scan window — one-shot per C1 zone
+    # Mitigation set persists across H4 scan windows — one-shot per C1 zone
     # exactly as the spec requires. C-CRT-1 fix: keyed on c1_time (stable
     # across cache rotation), not list index.
     consumed: set = set()
 
-    # Walk H4 candles forward, scanning a sliding window at each step. We
-    # need detect_h4_crt to see ~10 H4 bars at a time so it can find C1/C2.
-    # Step by 1 H4 bar; each step also slides the 5M sub-window forward.
-    H4_WINDOW = 12   # bars passed to detector — enough for C2_LOOKBACK + headroom
-    for h4_end in range(H4_WINDOW, n4):
-        h4_start = h4_end - H4_WINDOW
+    # H-3 fix: derive H4 window size from the env-overridable C2 lookback so
+    # the explorer's tuning propagates correctly. +buffer ensures detector
+    # always has the C2_LOOKBACK bars it expects plus parent context.
+    h4_window = H4_CRT_C2_LOOKBACK + CRT_H4_WINDOW_BUFFER
+
+    # Walk H4 candles forward, scanning a sliding window at each step.
+    for h4_end in range(h4_window, n4):
+        h4_start = h4_end - h4_window
         c4h_win = {
             "opens":  c4h["opens"][h4_start:h4_end],
             "highs":  c4h["highs"][h4_start:h4_end],
@@ -1306,15 +1340,20 @@ def run_backtest_token_h4_crt(token, c5m, c1h, c4h, config=None):
             "closes": c4h["closes"][h4_start:h4_end],
             "times":  c4h["times"][h4_start:h4_end],
         }
-        # Map H4 window's end time to 5M sub-window — need ~300 5M bars
-        # ending at the H4 window's close + a forward buffer for MSS scan.
-        h4_end_time_ms = c4h["times"][h4_end - 1]
-        # Bisect c5m["times"] to locate the 5M bar near h4_end_time_ms
-        import bisect as _bisect_local
-        c5m_end_idx = _bisect_local.bisect_right(c5m["times"], h4_end_time_ms)
-        c5m_end_idx = min(c5m_end_idx + 60, n5)  # +60 bars (5h) headroom for MSS scan
-        c5m_start_idx = max(0, c5m_end_idx - 300)
+        # C1 fix (audit cycle-7 Option B 2026-05-27): anchor sub-window to
+        # the H4 bar's CLOSE time, not its OPEN time. Binance kline times
+        # store the bar's open; the bar closes 4 hours later. Previously
+        # the +60-bar headroom put the sub-window ~1h past close, letting
+        # score_ict_fvg's mitigation walk and find_ict_swings' confirmation
+        # bars peek into FUTURE 5M data — lookahead bias.
+        h4_open_time_ms  = c4h["times"][h4_end - 1]
+        h4_close_time_ms = h4_open_time_ms + CRT_H4_BAR_DURATION_MS
+        c5m_end_idx = bisect.bisect_right(c5m["times"], h4_close_time_ms)
+        # Tightened headroom: enough for MSS scan + small buffer, no more
+        c5m_end_idx = min(c5m_end_idx + H4_CRT_MSS_HORIZON + CRT_5M_HEADROOM_BUFFER, n5)
+        c5m_start_idx = max(0, c5m_end_idx - CRT_5M_WINDOW_SIZE)
         if c5m_end_idx - c5m_start_idx < 30:
+            rej["crt_sub_window_too_small"] = rej.get("crt_sub_window_too_small", 0) + 1
             continue
         c5m_win = {
             "opens":  c5m["opens"][c5m_start_idx:c5m_end_idx],
@@ -1326,16 +1365,16 @@ def run_backtest_token_h4_crt(token, c5m, c1h, c4h, config=None):
 
         setup = detect_h4_crt(c4h_win, c5m_win, token=token, consumed=consumed)
         if setup is None:
+            rej["crt_no_setup"] = rej.get("crt_no_setup", 0) + 1
             continue
 
         # Mark the C1 range as mitigated so this scan window won't refire
         consumed.add(setup["key"])
 
         # Translate the sub-window MSS bar back into absolute c5m index
-        # so the forward-scan reads the correct outcome window.
         mss_bar_abs = c5m_start_idx + setup["mss_bar_5m"]
         if mss_bar_abs >= n5 - FORWARD_BARS - 1:
-            # Not enough forward bars to evaluate outcome — skip
+            rej["crt_late_mss_no_forward"] = rej.get("crt_late_mss_no_forward", 0) + 1
             continue
         entry_bar = mss_bar_abs + 1  # enter at next 5M bar's open after MSS
         if entry_bar >= n5 - FORWARD_BARS - 1:
@@ -1343,21 +1382,52 @@ def run_backtest_token_h4_crt(token, c5m, c1h, c4h, config=None):
         entry_price = c5m["opens"][entry_bar]
         direction = setup["direction"]
 
-        # SL = below sweep wick (CRT universal); TP1 = C1 opposite extreme
-        sl_price = setup["sl"]
+        # H-CRT2-3 fix: session/killzone filter. Spec § 7 promised reuse
+        # of existing NY AM / London / Asia gates — the 5M-sweep path
+        # applies this at line ~692. Apply same gate to CRT entries.
+        ts = datetime.utcfromtimestamp(c5m["times"][entry_bar] / 1000)
+        if ts.hour not in config.liquid_hours:
+            rej["crt_outside_killzone"] = rej.get("crt_outside_killzone", 0) + 1
+            continue
+
+        # H-CRT2-4 fix: 4H bias gate. Spec § 7 promised reuse of existing
+        # 4H bias as Daily Bias proxy. Compute against the H4 window the
+        # CRT detection saw, NOT the full c4h (so we honor the same data
+        # cutoff as the detector for live/BT parity).
+        bias_4h = get_ict_4h_bias(c4h_win["closes"], c4h_win["highs"], c4h_win["lows"])
+        # Direction must align with bias OR bias is NEUTRAL
+        # (strict gate: reject when bias opposes; loose: accept NEUTRAL too;
+        # none: skip the gate). Use config.bias_4h_gate which the 5M path also reads.
+        gate_mode = getattr(config, "bias_4h_gate", "loose")
+        if gate_mode == "strict":
+            allowed = (bias_4h == ("BULLISH" if direction == "BUY" else "BEARISH"))
+        elif gate_mode == "loose":
+            allowed = (bias_4h in ("NEUTRAL", "BULLISH" if direction == "BUY" else "BEARISH"))
+        else:  # "none"
+            allowed = True
+        if not allowed:
+            rej["crt_bias_gate_blocked"] = rej.get("crt_bias_gate_blocked", 0) + 1
+            continue
+
+        # SL = sweep wick + buffer (H-CRT2-1 fix: matches 5M-sweep behavior
+        # at ict_engine.py:757,784 — 0.3% structural buffer beyond the wick).
+        raw_wick = setup["sl"]
+        if direction == "BUY":
+            sl_price = raw_wick * (1.0 - ICT_SL_BUFFER_PCT)
+        else:
+            sl_price = raw_wick * (1.0 + ICT_SL_BUFFER_PCT)
         tp1_price = setup["tp1"]
-        # Compute TP2/TP3 as 1.5R and 2.0R extensions from entry (matches
-        # 5M sweep's RR cascade discipline). Could swap to liquidity-based
-        # in Session 3 via compute_ict_trade_plan integration.
+        # H-3: TP2/TP3 RR-cascade derived from named module constants
         risk_dist = abs(entry_price - sl_price)
         if risk_dist <= 0:
+            rej["crt_zero_risk_dist"] = rej.get("crt_zero_risk_dist", 0) + 1
             continue
         if direction == "BUY":
-            tp2_price = entry_price + 1.5 * risk_dist
-            tp3_price = entry_price + 2.0 * risk_dist
+            tp2_price = entry_price + CRT_TP2_RR * risk_dist
+            tp3_price = entry_price + CRT_TP3_RR * risk_dist
         else:
-            tp2_price = entry_price - 1.5 * risk_dist
-            tp3_price = entry_price - 2.0 * risk_dist
+            tp2_price = entry_price - CRT_TP2_RR * risk_dist
+            tp3_price = entry_price - CRT_TP3_RR * risk_dist
 
         # Forward outcome scan via shared check_outcome helper
         future = [
@@ -1412,8 +1482,7 @@ def run_backtest_token_h4_crt(token, c5m, c1h, c4h, config=None):
         else:  # EXPIRED
             _real_r = 0.0
 
-        # Timestamp string from entry bar
-        ts = datetime.utcfromtimestamp(c5m["times"][entry_bar] / 1000)
+        # Timestamp string from entry bar (ts already computed above for session check)
         ts_str = ts.strftime("%Y-%m-%d %H:%M:%S")
 
         signals.append({
@@ -1441,7 +1510,8 @@ def run_backtest_token_h4_crt(token, c5m, c1h, c4h, config=None):
             "sweep_type":      setup["type"],  # SSL_CRT or BSL_CRT
             "fvg_pct":         0.0,
             "trend_1h":        "NEUTRAL",
-            "bias_4h":         "NEUTRAL",
+            # H-CRT2-4 fix: surface the actual 4H bias that gated this signal
+            "bias_4h":         bias_4h,
             "ifvg_present":    0,
             "ifvg_direction":  "",
             "ifvg_age_bars":   0,
@@ -1454,7 +1524,7 @@ def run_backtest_token_h4_crt(token, c5m, c1h, c4h, config=None):
             "smt_confirmed":   0,
             "smt_type":        "NONE",
             "tp1_target_type": "C1_OPPOSITE_EXTREME",
-            "tp2_target_type": "RR_1.5",
+            "tp2_target_type": f"RR_{CRT_TP2_RR}",
             "session":         _utc_to_session(ts.hour),
             "day_of_week":     ts.weekday(),
             "hour_utc":        ts.hour,
@@ -1470,7 +1540,10 @@ def run_backtest_token_h4_crt(token, c5m, c1h, c4h, config=None):
             "source":          "H4_CRT",  # ← KEY tag for per-source attribution
         })
 
-    return signals
+    # H-4 fix: return (signals, rejection_counts) tuple so main loop can
+    # aggregate CRT rejections into _GLOBAL_REJECTIONS — matches the
+    # contract of run_backtest_token() at line 1251.
+    return signals, rej
 
 
 # ══════════════════════════════════════════════════════════
@@ -3276,6 +3349,20 @@ def _compute_run_config_hash() -> str:
         "OGD_DSR_GATE":           os.environ.get("OGD_DSR_GATE", "soft").lower(),
         "OGD_FREEZE_MODE":        os.environ.get("OGD_FREEZE_MODE", "shadow").lower(),
         "OGD_WARMUP_FLOOR":       _ogd_warmup_floor_for_hash(),
+        # CRT v1 Session 2 B-CRT-S2-C2 fix (audit cycle-7 2026-05-27): CRT
+        # env knobs MUST be in the config_hash. Otherwise a CRT-enabled run
+        # and a CRT-disabled run on the same ICT params collide on hash →
+        # DSR n_trials undercount, Pareto archive collision, checkpoint
+        # collision. Same failure mode as the cycle-4 M-H ESCALATED fix.
+        "ENABLE_H4_CRT":          os.environ.get("ENABLE_H4_CRT", "0"),
+        "H4_CRT_DISABLED_TOKENS": ",".join(sorted(
+            t.strip().upper() for t in
+            os.environ.get("H4_CRT_DISABLED_TOKENS", "").split(",")
+            if t.strip()
+        )),
+        "H4_CRT_C2_LOOKBACK":     os.environ.get("H4_CRT_C2_LOOKBACK", "10"),
+        "H4_CRT_MSS_HORIZON":     os.environ.get("H4_CRT_MSS_HORIZON", "30"),
+        "H4_CRT_VALIDATION_SCHOOL": os.environ.get("H4_CRT_VALIDATION_SCHOOL", "flexible").lower(),
     })
 
 
@@ -3447,14 +3534,21 @@ def main():
         # No-op when ENABLE_H4_CRT=0 (default — production behavior unchanged).
         # When enabled, emits source='H4_CRT' signals alongside the 5M_SWEEP
         # signals above, enabling per-source attribution in the DB and
-        # downstream honest-metrics layer.
+        # downstream honest-metrics layer. H-1 fix (Option B): scanner no
+        # longer takes c1h (it never used 1H data). H-4 fix: returns
+        # (signals, rejection_counts) tuple — same shape as 5M path.
         if ENABLE_H4_CRT:
             print(f"[{token}] Running H4-CRT scan...", end=" ", flush=True)
-            crt_sigs = run_backtest_token_h4_crt(
-                token, c5m, c1h, c4h, config=ACTIVE_CONFIG,
+            crt_sigs, _crt_rej = run_backtest_token_h4_crt(
+                token, c5m, c4h, config=ACTIVE_CONFIG,
             )
             print(f"{len(crt_sigs)} H4-CRT signals")
             all_signals.extend(crt_sigs)
+            # H-4: aggregate CRT-specific rejections into the D2 diagnostic
+            # pool so print_report can surface structural CRT gate patterns
+            # (e.g., "100% of CRT candidates fail bias_gate_blocked").
+            for _r_k, _r_v in _crt_rej.items():
+                _GLOBAL_REJECTIONS[_r_k] = _GLOBAL_REJECTIONS.get(_r_k, 0) + _r_v
 
         completed_tokens.add(token)
         # Persist progress after every token so a kill mid-run loses at most one token's work.
