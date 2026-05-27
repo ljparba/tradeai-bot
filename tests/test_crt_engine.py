@@ -185,9 +185,6 @@ class TestCrtEngineDetection(unittest.TestCase):
         # We'll plant a clear swing high at idx 30 (value ~101) so MSS fires
         # when 5M closes above ~101 after the sweep.
 
-        c5m_opens  = [100.0] * 40 + [ 96.5,  97.0,  97.5,  99.0, 100.0, 101.0, 101.5, 102.0, 101.8, 101.8] + [101.8] * 20
-        c5m_highs  = [100.3] * 30 + [101.0, 101.5, 101.0, 100.5, 100.5, 100.3, 100.3, 100.3, 100.3, 100.3] + [ 96.5,  97.5,  98.0,  99.5, 101.0, 101.5, 102.0, 102.3, 102.5, 102.0] + [102.0] * 20
-        # Above lines got tangled — rebuild cleanly below.
         c5m_opens = []
         c5m_highs = []
         c5m_lows = []
@@ -276,14 +273,18 @@ class TestCrtEngineDetection(unittest.TestCase):
         os.environ.pop("ENABLE_H4_CRT", None)
 
     def test_t12_mitigation_prevents_duplicate(self):
+        # C-CRT-1 fix verification: mitigation key is now (c1_time, c1_high, c1_low)
+        # — the C1 candle's TIMESTAMP, not its array index. This ensures the
+        # "one-shot per zone" rule survives H4 cache rotation in live operation.
         os.environ["ENABLE_H4_CRT"] = "1"
         os.environ.pop("H4_CRT_DISABLED_TOKENS", None)
         ce = self._reload()
         c4h, c5m = self._make_bullish_fixture()
-        # Pre-populate consumed with the C1 key
+        # Pre-populate consumed with the C1 key — uses TIMESTAMP not index
+        c1_time = c4h["times"][8]
         c1_high = round(c4h["highs"][8], 6)
         c1_low = round(c4h["lows"][8], 6)
-        consumed = {(8, c1_high, c1_low)}
+        consumed = {(c1_time, c1_high, c1_low)}
         signal = ce.detect_h4_crt(c4h, c5m, token="BTC", consumed=consumed)
         self.assertIsNone(signal, "Mitigated C1 range must NOT produce a signal")
         os.environ.pop("ENABLE_H4_CRT", None)

@@ -860,8 +860,12 @@ def compute_ict_trade_plan(price, signal, sweep_wick, sh_1h, sl_1h, extra_liq=No
 # with either a fresh FVG or a fresh OB. Per the Trading Wyckoff article,
 # the OB is the PRIMARY confluence (more significant than FVG alone) so
 # including it materially improves the CRT signal quality stack.
-ICT_OB_MIN_DISPLACEMENT_PCT = 0.005   # 0.5% body magnitude required for "strong" displacement
-ICT_OB_OPPOSITE_LOOKBACK    = 5       # bars before displacement to scan for the last opposite-direction candle
+# H-CRT-2 fix (cycle-7 audit 2026-05-27): raised from 0.5% → 1.5% because
+# 0.5% is well within H4 crypto ATR noise (~1-2%). Made env-overridable for
+# the explorer / Optuna tuning per the project's other env-knob convention
+# (cf. ict_engine.py:25, 27, 40, 44 — all env-overridable).
+ICT_OB_MIN_DISPLACEMENT_PCT = _env_float("ICT_OB_MIN_DISPLACEMENT_PCT", 0.015)
+ICT_OB_OPPOSITE_LOOKBACK    = _env_int("ICT_OB_OPPOSITE_LOOKBACK", 5)
 
 
 def detect_ict_order_block(opens, highs, lows, closes, lookback=20,
@@ -913,7 +917,14 @@ def detect_ict_order_block(opens, highs, lows, closes, lookback=20,
         is_bullish_disp = closes[i] > opens[i]
         is_bearish_disp = closes[i] < opens[i]
 
-        # Walk back to find last opposite-direction candle
+        # Walk back to find last opposite-direction candle.
+        # H-CRT-3 fix (cycle-7 audit 2026-05-27): previously broke out of the
+        # loop on any same-direction candle, which discarded the real OB
+        # whenever a displacement leg spanned more than one bar (e.g.
+        # bullish_disp ← bullish ← bullish ← bearish OB ← ...). Per ICT
+        # methodology, the OB is the LAST opposite candle BEFORE the move
+        # leg began — walking through impulse bars in the same direction is
+        # normal. The cap at `opposite_lookback` already bounds the search.
         opp_start = max(0, i - opposite_lookback)
         for j in range(i - 1, opp_start - 1, -1):
             j_bullish = closes[j] > opens[j]
@@ -941,11 +952,9 @@ def detect_ict_order_block(opens, highs, lows, closes, lookback=20,
                     "mid":              round((highs[j] + lows[j]) / 2, 6),
                     "direction":        "SELL",
                 }
-            # If we hit a same-direction candle while walking back, the
-            # "last opposite" search is broken — stop and look for a
-            # different displacement candle.
-            if (is_bullish_disp and j_bullish) or (is_bearish_disp and j_bearish):
-                break
+            # Continue walking through same-direction candles — they are
+            # part of the displacement leg, not a reason to abort. Doji
+            # candles (close == open) also continue the search.
 
     return None
 

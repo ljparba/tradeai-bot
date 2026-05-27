@@ -36,7 +36,7 @@ import os as _os
 from ict_engine import (
     ICT_MSS_HORIZON,
     find_ict_swings,
-    detect_ict_mss,
+    score_ict_mss,
     score_ict_fvg,
     detect_ict_order_block,
     order_block_overlaps_range,
@@ -79,49 +79,30 @@ def _find_5m_bar_after(c5m_times, target_time) -> int:
     return -1
 
 
-def _approx_mss_bar(sweep_5m_idx: int, c5m_closes, sh_5m, sl_5m,
-                    sweep_type: str, horizon: int) -> int:
-    """Re-derive the bar at which MSS confirmed, since detect_ict_mss returns
-    only bool. Walks the same window and returns the first bar where the
-    structural break is satisfied.
-
-    Returns -1 if not found within `horizon` bars.
-    """
-    n = len(c5m_closes)
-    end = min(n, sweep_5m_idx + horizon + 1)
-    if sweep_type == "SSL":
-        # Bullish — first close above the most-recent swing high prior to sweep
-        target = None
-        for sh_idx, sh_lev in reversed(sh_5m):
-            if sh_idx < sweep_5m_idx:
-                target = sh_lev
-                break
-        if target is None:
-            return -1
-        for k in range(sweep_5m_idx + 1, end):
-            if c5m_closes[k] > target:
-                return k
-    elif sweep_type == "BSL":
-        # Bearish — first close below the most-recent swing low prior to sweep
-        target = None
-        for sl_idx, sl_lev in reversed(sl_5m):
-            if sl_idx < sweep_5m_idx:
-                target = sl_lev
-                break
-        if target is None:
-            return -1
-        for k in range(sweep_5m_idx + 1, end):
-            if c5m_closes[k] < target:
-                return k
-    return -1
-
-
 def _check_confluence(direction: str, c1_high: float, c1_low: float,
-                      mss_bar_5m: int, c4h: dict, c5m: dict):
+                      mss_bar_5m: int, c5m: dict, ob_cached):
     """Return a confluence dict if EITHER an FVG OR an Order Block overlaps
-    the C1 range or the MSS bar's local envelope. Otherwise None.
+    the SWEPT-EXTREME ZONE of C1. Otherwise None.
 
-    direction: "BUY" or "SELL"
+    H-CRT-1 fix (cycle-7 audit 2026-05-27): per the Trading Wyckoff article,
+    the OB/FVG confluence is meant to mark the institutional defense zone
+    NEAR the swept extreme — not anywhere in C1's full range. For bullish
+    CRT (sweep of C1.low), the demand zone is the lower half [c1_low, c1_mid].
+    For bearish CRT (sweep of C1.high), the supply zone is [c1_mid, c1_high].
+
+    H-3 fix (cycle-7 audit 2026-05-27): dropped the mss_bar_5m+1 probe — in
+    real-time live scanning, the bar AFTER the MSS doesn't exist yet, so
+    that probe was reachable only in backtest. Live/backtest parity now
+    enforced by symmetry: probe only [mss_bar - 1, mss_bar].
+
+    M-2 fix (cycle-7 audit 2026-05-27): OB is now precomputed by the caller
+    (detect_h4_crt) once per scan instead of per CRT candidate. ~10× fewer
+    OB scans per cycle when H4_CRT_C2_LOOKBACK = 10.
+
+    direction:    "BUY" or "SELL"
+    ob_cached:    pre-computed OB result from detect_ict_order_block on the
+                  H4 stream (computed once per detect_h4_crt call), or None
+                  if no OB was found within the scan window.
     Returns:
         {"type": "FVG"|"OB", "details": <dict>}  on overlap
         None on no qualifying confluence
@@ -131,30 +112,31 @@ def _check_confluence(direction: str, c1_high: float, c1_low: float,
     o5 = c5m["opens"]
     c5 = c5m["closes"]
 
-    # 1. Check for FVG near the MSS bar (5M displacement creates FVG)
-    if 0 <= mss_bar_5m < len(c5) - 1:
-        for d in (mss_bar_5m - 1, mss_bar_5m, mss_bar_5m + 1):
+    # Compute the swept-extreme zone (half of C1 where the manipulation hit)
+    c1_mid = (c1_high + c1_low) / 2.0
+    if direction == "BUY":
+        zone_high, zone_low = c1_mid, c1_low
+    else:
+        zone_high, zone_low = c1_high, c1_mid
+
+    # 1. Check for FVG near the MSS bar (5M displacement creates FVG).
+    #    Probe [mss-1, mss] only — live/backtest parity (H-3 fix).
+    if 0 <= mss_bar_5m < len(c5):
+        for d in (mss_bar_5m - 1, mss_bar_5m):
             if d < 1 or d + 1 >= len(c5):
                 continue
             fvg = score_ict_fvg(d, h5, l5, o5, c5)
             if fvg is None or fvg["direction"] != direction:
                 continue
-            # FVG must overlap C1 range — confirms institutional zone alignment
-            if not (fvg["bottom"] > c1_high or fvg["top"] < c1_low):
+            # FVG must overlap the swept-extreme zone (H-CRT-1 fix)
+            if not (fvg["bottom"] > zone_high or fvg["top"] < zone_low):
                 return {"type": "FVG", "details": fvg}
 
-    # 2. Fall back to Order Block detection on H4 stream
-    h4_opens = c4h["opens"]
-    h4_highs = c4h["highs"]
-    h4_lows = c4h["lows"]
-    h4_closes = c4h["closes"]
-    ob = detect_ict_order_block(
-        h4_opens, h4_highs, h4_lows, h4_closes,
-        lookback=H4_CRT_OB_SCAN_LOOKBACK,
-    )
-    if ob is not None and ob["direction"] == direction:
-        if order_block_overlaps_range(ob, c1_high, c1_low):
-            return {"type": "OB", "details": ob}
+    # 2. Order Block confluence — use the H4-stream OB cached by the caller.
+    #    Same swept-extreme overlap constraint (H-CRT-1 fix).
+    if ob_cached is not None and ob_cached["direction"] == direction:
+        if order_block_overlaps_range(ob_cached, zone_high, zone_low):
+            return {"type": "OB", "details": ob_cached}
 
     return None
 
@@ -211,6 +193,7 @@ def detect_h4_crt(c4h: dict, c5m: dict, token: str = "",
     if not required_keys.issubset(c4h.keys()) or not required_keys.issubset(c5m.keys()):
         return None
 
+    h4_opens = c4h["opens"]
     h4_highs = c4h["highs"]
     h4_lows = c4h["lows"]
     h4_closes = c4h["closes"]
@@ -221,6 +204,7 @@ def detect_h4_crt(c4h: dict, c5m: dict, token: str = "",
 
     c5m_times = c5m["times"]
     c5m_closes = c5m["closes"]
+    c5m_opens = c5m["opens"]
     h5 = c5m["highs"]
     l5 = c5m["lows"]
     if len(c5m_closes) < 30:
@@ -228,6 +212,14 @@ def detect_h4_crt(c4h: dict, c5m: dict, token: str = "",
 
     # Build 5M swings once per call (cheap to compute, reused per candidate)
     sh_5m, sl_5m = find_ict_swings(h5, l5)
+
+    # M-2 fix (cycle-7 audit 2026-05-27): pre-compute H4 Order Block ONCE per
+    # call instead of per CRT candidate. OB depends only on c4h data — same
+    # result for every candidate in this scan cycle.
+    ob_cached = detect_ict_order_block(
+        h4_opens, h4_highs, h4_lows, h4_closes,
+        lookback=H4_CRT_OB_SCAN_LOOKBACK,
+    )
 
     # Walk most-recent H4 candles first — first valid CRT setup wins
     end = n_h4 - 1
@@ -243,9 +235,15 @@ def detect_h4_crt(c4h: dict, c5m: dict, token: str = "",
         c2_high = h4_highs[c2_idx]
         c2_low = h4_lows[c2_idx]
         c2_time = h4_times[c2_idx]
+        c1_time = h4_times[c1_idx]
 
-        # Mitigation check (one-shot per C1 range)
-        key = (c1_idx, round(c1_high, 6), round(c1_low, 6))
+        # C-CRT-1 fix (cycle-7 audit 2026-05-27): mitigation key uses the C1
+        # candle's TIMESTAMP, not its array index. List indices shift the
+        # moment the H4 cache rotates (rolling window slides forward), which
+        # would silently re-fire signals on the same C1 zone every cycle.
+        # Timestamp is stable across cache rotations and matches the universal
+        # CRT "one-shot per zone" rule.
+        key = (c1_time, round(c1_high, 6), round(c1_low, 6))
         if key in consumed:
             continue
 
@@ -254,24 +252,26 @@ def detect_h4_crt(c4h: dict, c5m: dict, token: str = "",
             sweep_5m_idx = _find_5m_bar_after(c5m_times, c2_time)
             if sweep_5m_idx < 0:
                 continue
-            mss_confirmed = detect_ict_mss(
+            # C-CRT-2 / H-1 fix (cycle-7 audit 2026-05-27): use score_ict_mss
+            # directly (returns confirmed + mss_bar + quality in one call)
+            # instead of the previous detect_ict_mss + hand-rolled
+            # _approx_mss_bar that could pick a different MSS target level.
+            mss = score_ict_mss(
                 sweep_bar=sweep_5m_idx,
                 closes=c5m_closes,
+                opens=c5m_opens,
+                highs=h5,
+                lows=l5,
                 sh=sh_5m,
                 sl=sl_5m,
                 sweep_type="SSL",
                 horizon=H4_CRT_MSS_HORIZON,
             )
-            if not mss_confirmed:
+            if not mss["confirmed"]:
                 continue
-            mss_bar = _approx_mss_bar(
-                sweep_5m_idx, c5m_closes, sh_5m, sl_5m,
-                "SSL", H4_CRT_MSS_HORIZON,
-            )
-            if mss_bar < 0:
-                continue
+            mss_bar = mss["mss_bar"]
             confluence = _check_confluence(
-                "BUY", c1_high, c1_low, mss_bar, c4h, c5m,
+                "BUY", c1_high, c1_low, mss_bar, c5m, ob_cached,
             )
             if confluence is None:
                 continue
@@ -287,6 +287,7 @@ def detect_h4_crt(c4h: dict, c5m: dict, token: str = "",
                 "sweep_wick":    round(c2_low, 6),
                 "sweep_5m_idx":  sweep_5m_idx,
                 "mss_bar_5m":    mss_bar,
+                "mss_quality":   mss["quality"],
                 "confluence":    confluence,
                 "tp1":           round(c1_high, 6),
                 "sl":            round(c2_low, 6),
@@ -298,24 +299,22 @@ def detect_h4_crt(c4h: dict, c5m: dict, token: str = "",
             sweep_5m_idx = _find_5m_bar_after(c5m_times, c2_time)
             if sweep_5m_idx < 0:
                 continue
-            mss_confirmed = detect_ict_mss(
+            mss = score_ict_mss(
                 sweep_bar=sweep_5m_idx,
                 closes=c5m_closes,
+                opens=c5m_opens,
+                highs=h5,
+                lows=l5,
                 sh=sh_5m,
                 sl=sl_5m,
                 sweep_type="BSL",
                 horizon=H4_CRT_MSS_HORIZON,
             )
-            if not mss_confirmed:
+            if not mss["confirmed"]:
                 continue
-            mss_bar = _approx_mss_bar(
-                sweep_5m_idx, c5m_closes, sh_5m, sl_5m,
-                "BSL", H4_CRT_MSS_HORIZON,
-            )
-            if mss_bar < 0:
-                continue
+            mss_bar = mss["mss_bar"]
             confluence = _check_confluence(
-                "SELL", c1_high, c1_low, mss_bar, c4h, c5m,
+                "SELL", c1_high, c1_low, mss_bar, c5m, ob_cached,
             )
             if confluence is None:
                 continue
@@ -331,6 +330,7 @@ def detect_h4_crt(c4h: dict, c5m: dict, token: str = "",
                 "sweep_wick":    round(c2_high, 6),
                 "sweep_5m_idx":  sweep_5m_idx,
                 "mss_bar_5m":    mss_bar,
+                "mss_quality":   mss["quality"],
                 "confluence":    confluence,
                 "tp1":           round(c1_low, 6),
                 "sl":            round(c2_high, 6),

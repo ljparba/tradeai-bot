@@ -302,7 +302,12 @@ def detect_h4_crt(c4h, c5m, c1h, consumed=None):
         c4h: dict with 'opens', 'highs', 'lows', 'closes', 'times' (last ~30 H4 bars)
         c5m: dict same shape (~300 5M bars within the recent H4 window)
         c1h: dict same shape (~50 1H bars — for future use, currently unused)
-        consumed: set of mitigated C1 ranges (tuple of (c1_idx, round(c1.high,6), round(c1.low,6)))
+        consumed: set of mitigated C1 ranges. C-CRT-1 fix (2026-05-27): keyed
+                  on (c1_time, round(c1.high,6), round(c1.low,6)) — the H4
+                  TIMESTAMP, not the array index. List indices shift the
+                  moment the H4 cache rotates (rolling window slides forward),
+                  which would silently re-fire signals on the same C1 zone
+                  every cycle. Timestamp survives cache rotations.
     
     Returns:
         dict with 'type' (BSL_CRT / SSL_CRT), 'c1_high', 'c1_low', 'sweep_wick',
@@ -327,7 +332,9 @@ def detect_h4_crt(c4h, c5m, c1h, consumed=None):
         c2_time  = c4h['times'][c2_idx]
         
         # Mitigation check — has this C1 range been used?
-        key = (c1_idx, round(c1_high, 6), round(c1_low, 6))
+        c1_time = c4h['times'][c1_idx]
+        # C-CRT-1 fix: key on timestamp, not list index (survives cache rotation)
+        key = (c1_time, round(c1_high, 6), round(c1_low, 6))
         if key in consumed:
             continue
         
