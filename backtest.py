@@ -107,6 +107,14 @@ from crypto_alert import (
     TEMPLATE_MIN_SAMPLE, CIRCUIT_BREAKER_LOOKBACK, CIRCUIT_BREAKER_MIN_WR,
     TIER_DAILY_LIVE_CAPS, BLOCK_RANGING_LIVE, BLOCK_RANGING_TEMPLATES,
 )
+
+# CRT v1 Session 2 (cycle-7 audit 2026-05-27): parallel H4-CRT signal source.
+# Disabled by default (ENABLE_H4_CRT=0 in crt_engine.py); when enabled, the
+# main per-token loop runs a SECOND scan via run_backtest_token_h4_crt()
+# and merges H4_CRT signals with the existing 5M_SWEEP signals before they
+# enter the validation pipeline. Source tagging in the DB row enables
+# per-source attribution.
+from crt_engine import detect_h4_crt, ENABLE_H4_CRT, H4_CRT_DISABLED_TOKENS
 from strategy_engine import BACKTEST_CONFIG, LIVE_CONFIG, StrategyConfig, evaluate_setup, meets_quality, QUALITY_RANK
 from strategy_templates import evaluate_confluences_vs_templates
 from adaptive_engine import (
@@ -1223,6 +1231,11 @@ def run_backtest_token(token, c5m, c1h, c4h, btc_c1h=None, btc_c5m=None, config=
             "tb_touch":   _tb["touch"],
             "tb_ret":     _tb["ret"],
             "tb_t1":      _tb["t1"],
+            # CRT v1 Session 2 (cycle-7 audit 2026-05-27): signal source tag.
+            # This is the canonical 5M-sweep path; H4-CRT signals are emitted
+            # by run_backtest_token_h4_crt() with source='H4_CRT' for
+            # independent per-source performance attribution.
+            "source":     "5M_SWEEP",
         })
 
     if rejection_counts:
@@ -1236,6 +1249,228 @@ def run_backtest_token(token, c5m, c1h, c4h, btc_c1h=None, btc_c5m=None, config=
     # above only shows the top-20 per-token rejection reasons; cross-token
     # aggregation in print_report() reveals the structural picture.
     return signals, rejection_counts
+
+
+# ══════════════════════════════════════════════════════════
+# CRT v1 — PARALLEL H4 SCANNER (Session 2)
+# ══════════════════════════════════════════════════════════
+def run_backtest_token_h4_crt(token, c5m, c1h, c4h, config=None):
+    """Simulate H4 CRT signals across the historical timeline (Session 2).
+
+    Parallel to run_backtest_token() — uses the SAME 5M/1H/4H candle cache,
+    SAME outcome simulator (check_outcome), SAME triple-barrier labeling,
+    and writes signals into the SAME pipeline tagged with source='H4_CRT'.
+
+    Per the spec doc §7 (docs/exploration_runs/CRT_RESEARCH_2026_05_27.md):
+      - H4 reference candle, 5M entry timeframe
+      - Wyckoff/flexible validation school via crt_engine.detect_h4_crt
+      - One-shot mitigation per C1 zone (timestamp-keyed)
+      - (FVG OR OB) confluence required (enforced inside detect_h4_crt)
+
+    Default-OFF: returns [] immediately when ENABLE_H4_CRT=0 (the canonical
+    deployment state). Operator enables via ENABLE_H4_CRT=1 in env.
+
+    H6 isolation: backtest uses DEFAULT_WEIGHTS for OGD scoring — same
+    constraint as run_backtest_token. CRT does not break this invariant.
+    """
+    if not ENABLE_H4_CRT:
+        return []
+    if token.upper() in H4_CRT_DISABLED_TOKENS:
+        return []
+    if config is None:
+        config = ACTIVE_CONFIG
+
+    if not c4h or not c5m or not c1h:
+        return []
+    n5 = len(c5m["closes"])
+    n4 = len(c4h["closes"])
+    if n5 < WARMUP_BARS + FORWARD_BARS or n4 < 20:
+        return []
+
+    signals = []
+    # Mitigation set persists across H4 scan window — one-shot per C1 zone
+    # exactly as the spec requires. C-CRT-1 fix: keyed on c1_time (stable
+    # across cache rotation), not list index.
+    consumed: set = set()
+
+    # Walk H4 candles forward, scanning a sliding window at each step. We
+    # need detect_h4_crt to see ~10 H4 bars at a time so it can find C1/C2.
+    # Step by 1 H4 bar; each step also slides the 5M sub-window forward.
+    H4_WINDOW = 12   # bars passed to detector — enough for C2_LOOKBACK + headroom
+    for h4_end in range(H4_WINDOW, n4):
+        h4_start = h4_end - H4_WINDOW
+        c4h_win = {
+            "opens":  c4h["opens"][h4_start:h4_end],
+            "highs":  c4h["highs"][h4_start:h4_end],
+            "lows":   c4h["lows"][h4_start:h4_end],
+            "closes": c4h["closes"][h4_start:h4_end],
+            "times":  c4h["times"][h4_start:h4_end],
+        }
+        # Map H4 window's end time to 5M sub-window — need ~300 5M bars
+        # ending at the H4 window's close + a forward buffer for MSS scan.
+        h4_end_time_ms = c4h["times"][h4_end - 1]
+        # Bisect c5m["times"] to locate the 5M bar near h4_end_time_ms
+        import bisect as _bisect_local
+        c5m_end_idx = _bisect_local.bisect_right(c5m["times"], h4_end_time_ms)
+        c5m_end_idx = min(c5m_end_idx + 60, n5)  # +60 bars (5h) headroom for MSS scan
+        c5m_start_idx = max(0, c5m_end_idx - 300)
+        if c5m_end_idx - c5m_start_idx < 30:
+            continue
+        c5m_win = {
+            "opens":  c5m["opens"][c5m_start_idx:c5m_end_idx],
+            "highs":  c5m["highs"][c5m_start_idx:c5m_end_idx],
+            "lows":   c5m["lows"][c5m_start_idx:c5m_end_idx],
+            "closes": c5m["closes"][c5m_start_idx:c5m_end_idx],
+            "times":  c5m["times"][c5m_start_idx:c5m_end_idx],
+        }
+
+        setup = detect_h4_crt(c4h_win, c5m_win, token=token, consumed=consumed)
+        if setup is None:
+            continue
+
+        # Mark the C1 range as mitigated so this scan window won't refire
+        consumed.add(setup["key"])
+
+        # Translate the sub-window MSS bar back into absolute c5m index
+        # so the forward-scan reads the correct outcome window.
+        mss_bar_abs = c5m_start_idx + setup["mss_bar_5m"]
+        if mss_bar_abs >= n5 - FORWARD_BARS - 1:
+            # Not enough forward bars to evaluate outcome — skip
+            continue
+        entry_bar = mss_bar_abs + 1  # enter at next 5M bar's open after MSS
+        if entry_bar >= n5 - FORWARD_BARS - 1:
+            continue
+        entry_price = c5m["opens"][entry_bar]
+        direction = setup["direction"]
+
+        # SL = below sweep wick (CRT universal); TP1 = C1 opposite extreme
+        sl_price = setup["sl"]
+        tp1_price = setup["tp1"]
+        # Compute TP2/TP3 as 1.5R and 2.0R extensions from entry (matches
+        # 5M sweep's RR cascade discipline). Could swap to liquidity-based
+        # in Session 3 via compute_ict_trade_plan integration.
+        risk_dist = abs(entry_price - sl_price)
+        if risk_dist <= 0:
+            continue
+        if direction == "BUY":
+            tp2_price = entry_price + 1.5 * risk_dist
+            tp3_price = entry_price + 2.0 * risk_dist
+        else:
+            tp2_price = entry_price - 1.5 * risk_dist
+            tp3_price = entry_price - 2.0 * risk_dist
+
+        # Forward outcome scan via shared check_outcome helper
+        future = [
+            {"h": c5m["highs"][j], "l": c5m["lows"][j]}
+            for j in range(entry_bar + 1, min(entry_bar + 1 + FORWARD_BARS, n5))
+        ]
+        if not future:
+            continue
+        outcome, tp_reached = check_outcome(
+            direction, sl_price, tp1_price, tp2_price, tp3_price, future,
+        )
+
+        # Triple-barrier label (de Prado canonical) — same window as check_outcome
+        _tb = triple_barrier_label(
+            direction, entry_price, sl_price, tp1_price,
+            future, t1_bars=FORWARD_BARS,
+        )
+
+        # Excursion metrics
+        _mfe_pct, _mae_pct = compute_excursions(
+            direction, entry_price, sl_price, tp1_price, future,
+        )
+
+        # Net P&L percentages (apply round-trip cost)
+        rt_cost = TOKEN_RT_COST.get(token, ROUND_TRIP_COST_PCT) * 100
+        if direction == "BUY":
+            gross_tp1 = (tp1_price - entry_price) / entry_price * 100
+            gross_tp2 = (tp2_price - entry_price) / entry_price * 100
+            gross_tp3 = (tp3_price - entry_price) / entry_price * 100
+            gross_sl  = (sl_price  - entry_price) / entry_price * 100
+        else:
+            gross_tp1 = (entry_price - tp1_price) / entry_price * 100
+            gross_tp2 = (entry_price - tp2_price) / entry_price * 100
+            gross_tp3 = (entry_price - tp3_price) / entry_price * 100
+            gross_sl  = (entry_price - sl_price)  / entry_price * 100
+        net_tp1 = round(gross_tp1 - rt_cost, 2)
+        net_tp2 = round(gross_tp2 - rt_cost, 2)
+        net_tp3 = round(gross_tp3 - rt_cost, 2)
+        net_sl  = round(gross_sl  - rt_cost, 2)
+        rr1 = round(abs(gross_tp1 / gross_sl), 2) if gross_sl != 0 else 0
+        net_rr1 = round(net_tp1 / abs(net_sl), 2) if net_sl != 0 else 0
+
+        # Realized R-multiple based on actual outcome
+        if outcome == "WIN":
+            _real_r = round(net_tp3 / abs(net_sl), 2) if net_sl != 0 else None
+        elif outcome == "PARTIAL_TP2":
+            _real_r = round(net_tp2 / abs(net_sl), 2) if net_sl != 0 else None
+        elif outcome == "PARTIAL_TP1":
+            _real_r = round(net_tp1 / abs(net_sl), 2) if net_sl != 0 else None
+        elif outcome == "LOSS":
+            _real_r = -1.0
+        else:  # EXPIRED
+            _real_r = 0.0
+
+        # Timestamp string from entry bar
+        ts = datetime.utcfromtimestamp(c5m["times"][entry_bar] / 1000)
+        ts_str = ts.strftime("%Y-%m-%d %H:%M:%S")
+
+        signals.append({
+            "token":           token,
+            "signal":          direction,
+            "price":           round(entry_price, 6),
+            "ts":              ts_str,
+            "regime":          "UNKNOWN",  # H4 CRT operates above regime classifier; tag explicitly
+            "confidence":      10,         # CRT is high-confluence by construction (FVG OR OB required)
+            "wscore":          0.0,
+            "margin":          rr1,
+            "conflict":        "LOW",
+            "tp1_pct":         round(gross_tp1, 2),
+            "sl_pct":          round(gross_sl, 2),
+            "rr1":             rr1,
+            "net_tp1_pct":     net_tp1,
+            "net_tp2_pct":     net_tp2,
+            "net_tp3_pct":     net_tp3,
+            "net_sl_pct":      net_sl,
+            "net_rr1":         net_rr1,
+            "breakeven_wr":    0.0,
+            "tp_reached":      tp_reached,
+            "outcome":         outcome,
+            # CRT-specific provenance fields (map onto existing column schema)
+            "sweep_type":      setup["type"],  # SSL_CRT or BSL_CRT
+            "fvg_pct":         0.0,
+            "trend_1h":        "NEUTRAL",
+            "bias_4h":         "NEUTRAL",
+            "ifvg_present":    0,
+            "ifvg_direction":  "",
+            "ifvg_age_bars":   0,
+            "ifvg_5m_used":    0,
+            "dr4h_location":   "UNKNOWN",
+            "mss_quality":     setup.get("mss_quality", "NONE"),
+            "fvg_quality":     setup["confluence"]["details"].get("quality", "NONE")
+                               if setup["confluence"]["type"] == "FVG" else "NONE",
+            "entry_type":      f"H4_CRT_{setup['confluence']['type']}",
+            "smt_confirmed":   0,
+            "smt_type":        "NONE",
+            "tp1_target_type": "C1_OPPOSITE_EXTREME",
+            "tp2_target_type": "RR_1.5",
+            "session":         _utc_to_session(ts.hour),
+            "day_of_week":     ts.weekday(),
+            "hour_utc":        ts.hour,
+            "matched_template_id":  "NONE",
+            "template_scores_json": None,
+            "mfe_pct":         _mfe_pct,
+            "mae_pct":         _mae_pct,
+            "realized_r":      _real_r,
+            "tb_bin":          _tb["bin"],
+            "tb_touch":        _tb["touch"],
+            "tb_ret":          _tb["ret"],
+            "tb_t1":           _tb["t1"],
+            "source":          "H4_CRT",  # ← KEY tag for per-source attribution
+        })
+
+    return signals
 
 
 # ══════════════════════════════════════════════════════════
@@ -1895,6 +2130,11 @@ def init_backtest_db():
         ("tb_touch",  "TEXT"),
         ("tb_ret",    "REAL"),
         ("tb_t1",     "INTEGER"),
+        # CRT v1 Session 2 (audit cycle-7 2026-05-27): signal source tag for
+        # per-source performance attribution. Existing rows backfill to the
+        # default '5M_SWEEP' (the canonical ICT sweep model). H4_CRT signals
+        # from crt_engine.py carry source='H4_CRT'.
+        ("source",    "TEXT DEFAULT '5M_SWEEP'"),
     ]:
         try:
             conn.execute(f"ALTER TABLE backtest_signals ADD COLUMN {col} {typ}")
@@ -2944,8 +3184,9 @@ def save_to_db(all_signals, days=90, config_hash=None):
                     dr_location,mss_quality,fvg_quality,smt_type,smt_confirmed,entry_type,
                     tp_reached,outcome,matched_template_id,template_scores_json,
                     mfe_pct,mae_pct,realized_r,
-                    tb_bin,tb_touch,tb_ret,tb_t1)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    tb_bin,tb_touch,tb_ret,tb_t1,
+                    source)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (run_id, s["token"], s["signal"], s["price"], s["ts"],
                  s["regime"], s["confidence"], s["wscore"], s["margin"],
                  s["conflict"], s["tp1_pct"], s["sl_pct"], s["rr1"],
@@ -2970,7 +3211,11 @@ def save_to_db(all_signals, days=90, config_hash=None):
                  s.get("tb_bin",   None),
                  s.get("tb_touch", None),
                  s.get("tb_ret",   None),
-                 s.get("tb_t1",    None)))
+                 s.get("tb_t1",    None),
+                 # CRT v1 Session 2 (cycle-7 audit 2026-05-27): source tag for
+                 # per-source attribution. Defaults to '5M_SWEEP' for any signal
+                 # missing the field (back-compat with pre-Session-2 callers).
+                 s.get("source",  "5M_SWEEP")))
         conn.commit(); conn.close()
         print(f"\n[DB] Run #{run_id} saved — {len(all_signals)} signals, {_wr(all_signals)}% WR")
         return run_id
@@ -3197,6 +3442,20 @@ def main():
         # so print_report can surface structural patterns
         for _r_k, _r_v in _tok_rejections.items():
             _GLOBAL_REJECTIONS[_r_k] = _GLOBAL_REJECTIONS.get(_r_k, 0) + _r_v
+
+        # CRT v1 Session 2 (cycle-7 audit 2026-05-27): parallel H4-CRT scan.
+        # No-op when ENABLE_H4_CRT=0 (default — production behavior unchanged).
+        # When enabled, emits source='H4_CRT' signals alongside the 5M_SWEEP
+        # signals above, enabling per-source attribution in the DB and
+        # downstream honest-metrics layer.
+        if ENABLE_H4_CRT:
+            print(f"[{token}] Running H4-CRT scan...", end=" ", flush=True)
+            crt_sigs = run_backtest_token_h4_crt(
+                token, c5m, c1h, c4h, config=ACTIVE_CONFIG,
+            )
+            print(f"{len(crt_sigs)} H4-CRT signals")
+            all_signals.extend(crt_sigs)
+
         completed_tokens.add(token)
         # Persist progress after every token so a kill mid-run loses at most one token's work.
         if save_checkpoint(_run_config_hash, completed_tokens, all_signals, started_at=started_at):
