@@ -87,6 +87,27 @@ from ict_engine import (
     detect_fvg_entry_reaction, get_ict_4h_bias, compute_dealing_range,
     compute_liquidity_targets, detect_smt_divergence, detect_ict_ifvg,
     detect_5m_ifvg_entry, compute_ict_trade_plan,
+    # CRT v1 Session 3 (audit cycle-7 2026-05-27): SL buffer used by CRT
+    # scanner — must match backtest's ICT_SL_BUFFER_PCT exactly.
+    ICT_SL_BUFFER_PCT,
+)
+
+# CRT v1 Session 3 (audit cycle-7 2026-05-27): live H4-CRT signal source.
+# Default OFF (ENABLE_H4_CRT=0 in crt_engine.py). When enabled, the per-token
+# scan loop runs a SECOND detection pass via crt_engine.detect_h4_crt() and
+# emits signals tagged source='H4_CRT' alongside the canonical 5M sweep
+# signals tagged source='5M_SWEEP'.
+#
+# Live/backtest parity by construction: ALL helpers + constants imported
+# from crt_engine, NOT redefined here. Backtest's run_backtest_token_h4_crt
+# uses the same imports — guaranteed byte-identical signal generation for
+# identical OHLCV inputs.
+from crt_engine import (
+    detect_h4_crt, ENABLE_H4_CRT, H4_CRT_DISABLED_TOKENS,
+    H4_CRT_C2_LOOKBACK, H4_CRT_MSS_HORIZON,
+    compute_crt_trade_economics, crt_quality_to_confidence,
+    crt_trade_rejection_reason,
+    CRT_TP2_RR, CRT_TP3_RR,
 )
 
 _ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -152,6 +173,11 @@ def new_state():
         "last_fetched_at":    0.0,   # unix timestamp of last successful candle refresh (any TF)
         "last_5m_fetched_at": 0.0,  # unix timestamp of last successful 5m candle refresh
         "consumed_sweeps":   set(),  # (bar_idx, round(level,6)) pairs already used for signals
+        # CRT v1 Session 3 (LBC-H-2 close): one-shot mitigation set for H4 CRT.
+        # Keyed on (c1_time, round(c1_high, 6), round(c1_low, 6)) — c1_time is
+        # the H4 candle's TIMESTAMP so the entry survives cache rotation and
+        # bot restart (persisted to state_store every cycle below).
+        "consumed_h4_crt":   set(),
         "data_gap_bars":     0,      # H19: worst-case 5M gap bars from last fetch; >=3 skips signal
         "data_gap_bars_1h":  0,      # LOW #5: worst-case 1H gap bars; >=2 skips signal (2h blind spot)
         "data_gap_bars_4h":  0,      # LOW #5: worst-case 4H gap bars; >=1 skips signal (4h blind spot)
@@ -343,7 +369,13 @@ def init_db():
                      # Phase 5A: template safety status
                      ("template_status",       "TEXT"),
                      ("template_live_allowed", "INTEGER"),
-                     ("template_block_reason", "TEXT")]:
+                     ("template_block_reason", "TEXT"),
+                     # CRT v1 Session 3 (audit cycle-7 2026-05-27): source tag
+                     # parity with backtest. Default '5M_SWEEP' so all
+                     # historical signals back-fill correctly. H4-CRT signals
+                     # from crt_engine.detect_h4_crt carry source='H4_CRT'
+                     # for independent per-source attribution. LBC-H-1 close.
+                     ("source",                "TEXT DEFAULT '5M_SWEEP'")]:
 
         if col not in existing:
             try:
@@ -640,8 +672,9 @@ def save_signal(token, price, result, plan, regime):
              smt_type,entry_type,ev_score,ev_sample_n,ev_status,
              day_of_week,hour_utc,dist_daily_open_pct,dist_weekly_open_pct,
              strategy_version,matched_template_id,template_scores_json,
-             template_status,template_live_allowed,template_block_reason)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+             template_status,template_live_allowed,template_block_reason,
+             source)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (token,result["signal"],price,
              plan["sl"],plan["tp1"],plan["tp2"],plan["tp3"],
              plan["sl_pct"],plan["tp1_pct"],plan["tp2_pct"],plan["tp3_pct"],
@@ -681,7 +714,11 @@ def save_signal(token, price, result, plan, regime):
              result.get("template_scores_json", None),
              result.get("template_status", "UNKNOWN_TEMPLATE"),
              result.get("template_live_allowed", 0),
-             result.get("template_block_reason", None)))
+             result.get("template_block_reason", None),
+             # CRT v1 Session 3 (audit cycle-7 2026-05-27): source tag. Default
+             # '5M_SWEEP' for back-compat — pre-Session-3 callers don't set this
+             # key and must still write the canonical signal source.
+             result.get("source", "5M_SWEEP")))
         sig_id   = cur.lastrowid
         exp_h    = EXPIRY_BY_REGIME.get(regime.get("regime","UNKNOWN"), 12)
         conn.execute("INSERT INTO results (signal_id) VALUES (?)", (sig_id,))
@@ -702,6 +739,186 @@ def save_signal(token, price, result, plan, regime):
         return sig_id
     except Exception as e:
         print(f"[DB ERROR] save: {e}"); return -1
+
+
+# ══════════════════════════════════════════════════════════
+# CRT v1 — LIVE H4 SCANNER (Session 3, audit cycle-7 2026-05-27)
+# ══════════════════════════════════════════════════════════
+#
+# Parallel to generate_signal() — uses the SAME c5m/c4h candle cache the
+# main loop already maintains, the SAME shared helpers from crt_engine.py
+# that backtest.py uses, and the SAME signal-write/Telegram pipeline.
+# Live/backtest parity by construction (LBC-H-3 close).
+#
+# Default-OFF: returns None immediately when ENABLE_H4_CRT=0 (the canonical
+# deployment state). Operator enables via ENABLE_H4_CRT=1 in env.
+#
+# H6 isolation: live OGD weights are NOT applied to CRT signals in this v1
+# (CRT signals carry their own confidence via crt_quality_to_confidence).
+# This matches the backtest's H6 isolation discipline.
+
+def scan_h4_crt_for_token(token, c5m, c4h, consumed):
+    """Detect H4 CRT setup + build live signal result dict for the existing
+    save_signal / send_signal_msg pipeline. Mirrors backtest.py's
+    run_backtest_token_h4_crt economics + signal-dict construction.
+
+    Args:
+        token: token symbol (uppercase)
+        c5m, c4h: candle dicts (opens, highs, lows, closes, times in ms)
+        consumed: per-token mitigation set (mutated on signal emit)
+
+    Returns:
+        (result, plan, rej_reason) tuple. `result` and `plan` are non-None
+        on successful CRT setup; `rej_reason` is a string from the gate
+        that fired ("default_off", "blacklisted", "no_setup",
+        "outside_killzone", "bias_gate_blocked", "economics_*"). Caller
+        treats result=None as "skip this scan cycle for CRT."
+    """
+    if not ENABLE_H4_CRT:
+        return None, None, "default_off"
+    if token.upper() in H4_CRT_DISABLED_TOKENS:
+        return None, None, "blacklisted"
+
+    # Detection — uses shared module, identical to backtest path
+    setup = detect_h4_crt(c4h, c5m, token=token, consumed=consumed)
+    if setup is None:
+        return None, None, "no_setup"
+
+    # ── Entry timing ──────────────────────────────────────────────────────
+    # Entry = next 5M bar's open after MSS. In LIVE, that bar may not have
+    # closed yet — use the LATEST close as the entry price (the operator
+    # places the trade at the price the alert is sent at).
+    mss_bar_5m = setup["mss_bar_5m"]
+    n5 = len(c5m["closes"])
+    if mss_bar_5m + 1 >= n5:
+        return None, None, "no_post_mss_bar"  # MSS at very last bar — wait next cycle
+    entry_bar = mss_bar_5m + 1
+    entry_price = c5m["opens"][entry_bar]
+    direction = setup["direction"]
+    ts = datetime.utcfromtimestamp(c5m["times"][entry_bar] / 1000)
+
+    # ── Killzone filter (parity with backtest H-CRT2-3) ───────────────────
+    # config.liquid_hours is the shared set — both live (here) and backtest
+    # path apply the same filter at the same place in the pipeline.
+    from config import LIVE_LIQUID_HOURS as _liquid_hours
+    if _liquid_hours and ts.hour not in _liquid_hours:
+        return None, None, "outside_killzone"
+
+    # ── 4H bias gate (parity with backtest H-CRT2-4) ──────────────────────
+    # Uses _lookup_4h_bias via the existing main-loop infrastructure. For
+    # the live path we compute it inline from the c4h cache. Same min_bars
+    # discipline as the 5M-sweep path elsewhere in this file.
+    if len(c4h.get("closes", [])) >= 200:
+        bias_4h = get_ict_4h_bias(c4h["closes"], c4h["highs"], c4h["lows"])
+    else:
+        bias_4h = "NEUTRAL"
+    # Strict bias_4h gate matches backtest default (config.bias_4h_gate=='loose')
+    from config import LIVE_BIAS_4H_GATE as _bias_gate
+    _want = "BULLISH" if direction == "BUY" else "BEARISH"
+    if _bias_gate == "strict" and bias_4h != _want:
+        consumed.add(setup["key"])  # mark zone consumed — bias gate is structural
+        return None, None, "bias_gate_blocked"
+    if _bias_gate == "loose" and bias_4h not in ("NEUTRAL", _want):
+        consumed.add(setup["key"])
+        return None, None, "bias_gate_blocked"
+
+    # ── Trade plan: SL = sweep wick ± buffer, TP1 = C1 opposite, TP2/3 = RR cascade ──
+    # Parity with backtest H-CRT2-1 (SL buffer) and CRT_TP2_RR/CRT_TP3_RR ladder.
+    raw_wick = setup["sl"]
+    if direction == "BUY":
+        sl_price = raw_wick * (1.0 - ICT_SL_BUFFER_PCT)
+    else:
+        sl_price = raw_wick * (1.0 + ICT_SL_BUFFER_PCT)
+    tp1_price = setup["tp1"]
+    risk_dist = abs(entry_price - sl_price)
+    if risk_dist <= 0:
+        return None, None, "zero_risk_dist"
+    if direction == "BUY":
+        tp2_price = entry_price + CRT_TP2_RR * risk_dist
+        tp3_price = entry_price + CRT_TP3_RR * risk_dist
+    else:
+        tp2_price = entry_price - CRT_TP2_RR * risk_dist
+        tp3_price = entry_price - CRT_TP3_RR * risk_dist
+
+    # ── Economics (shared helper from crt_engine) ─────────────────────────
+    rt_cost = TOKEN_RT_COST.get(token, ROUND_TRIP_COST_PCT) * 100
+    econ = compute_crt_trade_economics(
+        direction, entry_price, sl_price, tp1_price, tp2_price, tp3_price,
+        outcome=None,  # outcome unknown live — realized_r stays None
+        rt_cost_pct=rt_cost,
+    )
+    if econ is None:
+        _reason = crt_trade_rejection_reason(
+            direction, entry_price, sl_price, tp1_price, rt_cost,
+        )
+        consumed.add(setup["key"])  # mark zone consumed — gate is structural
+        return None, None, f"economics_{_reason}"
+
+    # ── Build the live result dict (save_signal contract) ─────────────────
+    # CRT-specific fields use sensible defaults; the 5M-sweep-specific
+    # fields default to NEUTRAL/0/NONE so downstream queries don't break.
+    _mss_q = setup.get("mss_quality", "NONE")
+    _fvg_q = (setup["confluence"]["details"].get("quality", "NONE")
+              if setup["confluence"]["type"] == "FVG" else "NONE")
+    confidence = crt_quality_to_confidence(_mss_q, _fvg_q)
+
+    plan = {
+        "sl":          round(sl_price, 8),
+        "tp1":         round(tp1_price, 8),
+        "tp2":         round(tp2_price, 8),
+        "tp3":         round(tp3_price, 8),
+        "sl_pct":      round(econ["gross_sl"], 2),
+        "tp1_pct":     round(econ["gross_tp1"], 2),
+        "tp2_pct":     round(econ["gross_tp2"], 2),
+        "tp3_pct":     round(econ["gross_tp3"], 2),
+        "rr1":         econ["rr1"],
+        "rr2":         round(CRT_TP2_RR, 1),
+        "rr3":         round(CRT_TP3_RR, 1),
+    }
+    result = {
+        "signal":           direction,
+        # Live integration needs the entry price separately from the plan
+        # for save_signal's `price` positional arg + Telegram alert formatting
+        "entry_price":      round(entry_price, 8),
+        "confidence":       confidence,
+        "mtf_bias":         bias_4h,
+        "mtf_conf":         0,
+        "rsi":              50.0,
+        "trend_4h":         bias_4h,
+        "trend_1h":         "NEUTRAL",
+        "trend_5m":         "NEUTRAL",
+        "confirms":         0,
+        "atr":              0.0,
+        "roc":              0.0,
+        "vol_ratio":        1.0,
+        "reasons":          [f"H4_CRT_{setup['confluence']['type']}",
+                             f"MSS={_mss_q}", f"FVG={_fvg_q}",
+                             f"bias_4h={bias_4h}"],
+        "plan":             plan,
+        # CRT-specific fields surfaced via existing schema
+        "sr_type":          setup["type"],     # SSL_CRT / BSL_CRT
+        "session":          "UNKNOWN",
+        "dr_4h":            {"location": "UNKNOWN"},
+        "mss_result":       {"quality": _mss_q},
+        "ict_fvg":          {"quality": _fvg_q},
+        "smt_result":       {"smt_type": "NONE", "smt_confirmed": False},
+        "entry_type":       f"H4_CRT_{setup['confluence']['type']}",
+        "ev_score":         None,
+        "ev_sample_n":      None,
+        "ev_status":        "OBSERVE",
+        # Template tagging defaults — CRT signals are not template-classified
+        "matched_template_id":  "NONE",
+        "template_status":      "UNKNOWN_TEMPLATE",
+        "template_live_allowed": 0,
+        "template_block_reason": "crt_v1_no_template",
+        "template_matches":     [],
+        # KEY tag for per-source attribution (LBC-H-1 parity)
+        "source":           "H4_CRT",
+    }
+    # Mark mitigated AFTER constructing result so a downstream failure
+    # doesn't leave a half-consumed zone. Caller commits via consumed.add().
+    consumed.add(setup["key"])
+    return result, plan, "ok"
 
 
 # ══════════════════════════════════════════════════════════
@@ -3250,6 +3467,11 @@ def main():
         "last_heartbeat_ts": 0.0,
         "last_cycle_ts_unix": 0.0,
         "restart_count": 0,
+        # CRT v1 Session 3 (LBC-H-2 fix): per-token consumed_h4_crt sets
+        # serialized as {token: [[c1_time, c1_high, c1_low], ...]}. Reloaded
+        # into STATE[token]["consumed_h4_crt"] below so mitigation memory
+        # survives bot restart.
+        "consumed_h4_crt": {},
     })
     _persisted["restart_count"] = int(_persisted.get("restart_count", 0)) + 1
     _state_store.save(_persisted)
@@ -3257,6 +3479,26 @@ def main():
         print(f"[STATE] Resumed from previous run — cycle={_persisted['cycle']} "
               f"consecutive_errors={_persisted['consecutive_errors']} "
               f"restart#{_persisted['restart_count']}")
+
+    # CRT v1 Session 3 (LBC-H-2 fix): rehydrate per-token consumed_h4_crt sets
+    # from the state_store snapshot. Stored as lists of 3-tuples; converted
+    # back to sets of tuples here. Bad/missing entries fail silently to empty
+    # set per token — defensive against state_store corruption.
+    _ch4 = _persisted.get("consumed_h4_crt", {}) or {}
+    for _tok, _entries in _ch4.items():
+        if _tok in STATE and isinstance(_entries, list):
+            try:
+                STATE[_tok]["consumed_h4_crt"] = {
+                    tuple(e) for e in _entries
+                    if isinstance(e, (list, tuple)) and len(e) == 3
+                }
+            except Exception:
+                STATE[_tok]["consumed_h4_crt"] = set()
+    _rehydrated = sum(len(STATE[t].get("consumed_h4_crt", set()))
+                      for t in BINANCE_TOKENS)
+    if _rehydrated > 0:
+        print(f"[STATE] Rehydrated {_rehydrated} mitigated CRT zones across "
+              f"{sum(1 for t in BINANCE_TOKENS if STATE[t].get('consumed_h4_crt'))} tokens")
 
     current_prices={}
     cycle = int(_persisted.get("cycle", 0))
@@ -3356,17 +3598,70 @@ def main():
                               f"reason={result.get('template_block_reason','')} — signal saved, no Telegram")
                     else:
                         send_signal_msg(token,price,ch24,result,plan,sig_id,regime)
+
+                # CRT v1 Session 3 (audit cycle-7 2026-05-27): parallel H4-CRT
+                # scan path. No-op when ENABLE_H4_CRT=0 (default — production
+                # behavior unchanged). When enabled, emits source='H4_CRT'
+                # signals alongside the canonical 5M_SWEEP path above.
+                # Uses STATE[token]["consumed_h4_crt"] (persisted across
+                # restarts via state_store) for one-shot mitigation.
+                if ENABLE_H4_CRT:
+                    _c5m = STATE[token]["candles"]["5m"]
+                    _c4h = STATE[token]["candles"]["4h"]
+                    if _c5m and _c4h and len(_c5m.get("closes", [])) > 30 \
+                            and len(_c4h.get("closes", [])) > H4_CRT_C2_LOOKBACK + 2:
+                        # Inject 'times' if missing (some fetch paths use 'time')
+                        _crt_result, _crt_plan, _crt_reason = scan_h4_crt_for_token(
+                            token, _c5m, _c4h,
+                            consumed=STATE[token]["consumed_h4_crt"],
+                        )
+                        if _crt_result is not None:
+                            _crt_entry = _crt_result["entry_price"]
+                            _crt_sig_id = save_signal(
+                                token, _crt_entry,
+                                _crt_result, _crt_plan,
+                                {"regime": "UNKNOWN", "adx": 0, "efficiency": 0,
+                                 "atr_ratio": 0, "confidence": 0},
+                            )
+                            if _crt_sig_id < 0:
+                                print(f"[ERROR] {token} H4-CRT signal DB save failed — no Telegram sent")
+                            else:
+                                # LIVE mode template-block check applies to CRT too,
+                                # but CRT signals have template_live_allowed=0 by
+                                # design (no template classification). In LIVE
+                                # mode, CRT signals are saved-but-not-Telegrammed
+                                # until v2 introduces CRT-specific template tier.
+                                if EXECUTION_MODE == "LIVE":
+                                    print(f"[CRT-v1] LIVE BLOCK: {token} {_crt_result['signal']} "
+                                          f"— v1 paper-only, signal saved (sig_id={_crt_sig_id}), no Telegram")
+                                else:
+                                    send_signal_msg(token, price, ch24, _crt_result,
+                                                    _crt_plan, _crt_sig_id,
+                                                    {"regime": "UNKNOWN"})
+                                print(f"[CRT-v1] EMIT {token} {_crt_result['signal']} "
+                                      f"({_crt_result['sr_type']}, conf={_crt_result['confidence']}) "
+                                      f"sig_id={_crt_sig_id}")
             elapsed=time.time()-start
             sleep_t=max(0,CHECK_INTERVAL-elapsed)
             save_scalar_state("last_cycle_ts", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
             # Phase A-2: snapshot in-process counters to disk so crash/restart
             # resumes with correct state. Best-effort — never raises into the loop.
+            # CRT v1 Session 3 (LBC-H-2 fix): serialize per-token consumed_h4_crt
+            # sets as lists of 3-element lists (JSON-safe — tuples and sets
+            # don't survive JSON round-trip). Rehydration on startup converts
+            # back to sets of tuples. Empty sets pruned to keep snapshot small.
+            _crt_state = {
+                t: [list(k) for k in STATE[t].get("consumed_h4_crt", set())]
+                for t in BINANCE_TOKENS
+                if STATE[t].get("consumed_h4_crt")
+            }
             _state_store.save({
                 "cycle": cycle,
                 "consecutive_errors": _consecutive_errors,
                 "last_heartbeat_ts": _last_heartbeat,
                 "last_cycle_ts_unix": time.time(),
                 "restart_count": _persisted.get("restart_count", 1),
+                "consumed_h4_crt": _crt_state,
             })
             print(f"[{datetime.now().strftime('%H:%M')}] Done {elapsed:.0f}s — sleep {sleep_t:.0f}s")
             # M-C fix: check shutdown flag between cycles; honor SIGTERM
