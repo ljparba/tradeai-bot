@@ -219,6 +219,101 @@ CRT_H4_BAR_DURATION_MS     = 4 * 3600 * 1000  # 4 hours in ms — for H4 close-t
 CRT_TP2_RR                 = 1.5 # TP2 R-multiple extension from entry
 CRT_TP3_RR                 = 2.0 # TP3 R-multiple extension from entry
 
+# Option E fix M-CRT2-2 (audit cycle-7 2026-05-27): CRT forward-scan window
+# may legitimately need longer than the 5M-sweep's 24h (FORWARD_BARS=288).
+# H4 setups develop over longer timescales; capping at 24h could TIMEOUT
+# winners that would resolve in 36-48h. Env-overridable per spec discipline.
+# Default 2x the 5M-sweep window (576 bars = 48h). Operator can tune via
+# CRT_FORWARD_BARS env knob without touching the 5M-sweep behavior.
+CRT_FORWARD_BARS           = int(os.environ.get("CRT_FORWARD_BARS", "576"))
+
+
+# CRT v1 Session 2 Option E (H-2 partial): shared trade-economics helper for
+# the CRT path. Pure math + cost adjustment + outcome-driven realized R.
+# Used only by the CRT scanner; the 5M-sweep path keeps its existing
+# compute_ict_trade_plan() call (production-validated). Session 3 will
+# extract a more general helper covering all three callers (live + 5M-bt
+# + CRT-bt) when the live caller exists.
+def _compute_crt_trade_economics(direction, entry_price, sl_price,
+                                  tp1_price, tp2_price, tp3_price,
+                                  outcome, rt_cost_pct):
+    """Compute gross/net P&L %, RR multiples, and realized R from outcome.
+
+    Returns a dict with keys matching the CRT signal-dict economics fields:
+      gross_tp1/tp2/tp3, gross_sl, net_tp1/tp2/tp3, net_sl, rr1, net_rr1,
+      realized_r, breakeven_wr.
+    """
+    if direction == "BUY":
+        gross_tp1 = (tp1_price - entry_price) / entry_price * 100
+        gross_tp2 = (tp2_price - entry_price) / entry_price * 100
+        gross_tp3 = (tp3_price - entry_price) / entry_price * 100
+        gross_sl  = (sl_price  - entry_price) / entry_price * 100
+    else:
+        gross_tp1 = (entry_price - tp1_price) / entry_price * 100
+        gross_tp2 = (entry_price - tp2_price) / entry_price * 100
+        gross_tp3 = (entry_price - tp3_price) / entry_price * 100
+        gross_sl  = (entry_price - sl_price)  / entry_price * 100
+    net_tp1 = round(gross_tp1 - rt_cost_pct, 2)
+    net_tp2 = round(gross_tp2 - rt_cost_pct, 2)
+    net_tp3 = round(gross_tp3 - rt_cost_pct, 2)
+    net_sl  = round(gross_sl  - rt_cost_pct, 2)
+    rr1     = round(abs(gross_tp1 / gross_sl), 2) if gross_sl != 0 else 0
+    net_rr1 = round(net_tp1 / abs(net_sl), 2) if net_sl != 0 else 0
+
+    # Realized R-multiple
+    if outcome == "WIN":
+        realized_r = round(net_tp3 / abs(net_sl), 2) if net_sl != 0 else None
+    elif outcome == "PARTIAL_TP2":
+        realized_r = round(net_tp2 / abs(net_sl), 2) if net_sl != 0 else None
+    elif outcome == "PARTIAL_TP1":
+        realized_r = round(net_tp1 / abs(net_sl), 2) if net_sl != 0 else None
+    elif outcome == "LOSS":
+        realized_r = -1.0
+    else:  # EXPIRED
+        realized_r = 0.0
+
+    # Breakeven WR (M-2 bias fix): |SL| / (|SL| + TP1). Formula derived
+    # from EV = wr*tp1 - (1-wr)*|sl| = 0 → wr = |sl| / (|sl| + tp1).
+    # This is the WR at which long-run EV is zero given the R:R.
+    if abs(net_sl) + net_tp1 > 0:
+        breakeven_wr = round(abs(net_sl) / (abs(net_sl) + net_tp1), 4)
+    else:
+        breakeven_wr = 0.0
+
+    return {
+        "gross_tp1":    gross_tp1,
+        "gross_tp2":    gross_tp2,
+        "gross_tp3":    gross_tp3,
+        "gross_sl":     gross_sl,
+        "net_tp1":      net_tp1,
+        "net_tp2":      net_tp2,
+        "net_tp3":      net_tp3,
+        "net_sl":       net_sl,
+        "rr1":          rr1,
+        "net_rr1":      net_rr1,
+        "realized_r":   realized_r,
+        "breakeven_wr": breakeven_wr,
+    }
+
+
+def _crt_quality_to_confidence(mss_quality: str, fvg_quality: str) -> int:
+    """Map CRT MSS + FVG quality grades to a 1-10 confidence integer.
+
+    Option E fix M-4 quality (audit cycle-7 2026-05-27): replaces hardcoded
+    `confidence=10` for all CRT signals. CRT has gradations of quality
+    even with the (FVG OR OB) confluence requirement — MSS quality from
+    score_ict_mss is HIGH (4-5pts) / MEDIUM (2-3pts) / LOW (0-1pt),
+    same for FVG via score_ict_fvg. Map their sum into the 6-10 range
+    so CRT signals stay above the 5M-sweep floor but carry actual
+    quality info for downstream confidence-stratified analysis.
+    """
+    q_score = {"HIGH": 3, "MEDIUM": 2, "LOW": 1, "NONE": 0}
+    pts = q_score.get(mss_quality, 0) + q_score.get(fvg_quality, 0)
+    # pts in [0, 6]. Map → [6, 10] inclusive (CRT floor 6, ceiling 10).
+    # pts=0 → 6 (rare; both quality NONE means OB confluence with no MSS scoring)
+    # pts=6 → 10 (both HIGH = top-tier setup)
+    return max(6, min(10, 6 + (pts * 2) // 3))
+
 # Locked OOS start date — set once before optimization, never moved.
 # All signals with ts >= this date form the out-of-sample set.
 # Derived from the Run 60 quality config 60/40 split on 2026-05-21 (365-day window).
@@ -1315,7 +1410,10 @@ def run_backtest_token_h4_crt(token, c5m, c4h, config=None):
         return [], rej
     n5 = len(c5m["closes"])
     n4 = len(c4h["closes"])
-    if n5 < WARMUP_BARS + FORWARD_BARS or n4 < 20:
+    # Option E M-CRT2-2 fix: use CRT_FORWARD_BARS (default 2x larger than 5M
+    # FORWARD_BARS) for the data-sufficiency check so H4 setups near the
+    # latest data don't fall off the edge prematurely.
+    if n5 < WARMUP_BARS + CRT_FORWARD_BARS or n4 < 20:
         rej["crt_insufficient_data"] = 1
         return [], rej
 
@@ -1373,11 +1471,11 @@ def run_backtest_token_h4_crt(token, c5m, c4h, config=None):
 
         # Translate the sub-window MSS bar back into absolute c5m index
         mss_bar_abs = c5m_start_idx + setup["mss_bar_5m"]
-        if mss_bar_abs >= n5 - FORWARD_BARS - 1:
+        if mss_bar_abs >= n5 - CRT_FORWARD_BARS - 1:
             rej["crt_late_mss_no_forward"] = rej.get("crt_late_mss_no_forward", 0) + 1
             continue
         entry_bar = mss_bar_abs + 1  # enter at next 5M bar's open after MSS
-        if entry_bar >= n5 - FORWARD_BARS - 1:
+        if entry_bar >= n5 - CRT_FORWARD_BARS - 1:
             continue
         entry_price = c5m["opens"][entry_bar]
         direction = setup["direction"]
@@ -1429,10 +1527,13 @@ def run_backtest_token_h4_crt(token, c5m, c4h, config=None):
             tp2_price = entry_price - CRT_TP2_RR * risk_dist
             tp3_price = entry_price - CRT_TP3_RR * risk_dist
 
-        # Forward outcome scan via shared check_outcome helper
+        # Forward outcome scan via shared check_outcome helper.
+        # Option E M-CRT2-2 fix: window length = CRT_FORWARD_BARS (default
+        # 576 bars = 48h, vs 5M-sweep's 288 = 24h). H4 setups develop over
+        # longer timescales; capping at 24h artificially TIMEOUTs winners.
         future = [
             {"h": c5m["highs"][j], "l": c5m["lows"][j]}
-            for j in range(entry_bar + 1, min(entry_bar + 1 + FORWARD_BARS, n5))
+            for j in range(entry_bar + 1, min(entry_bar + 1 + CRT_FORWARD_BARS, n5))
         ]
         if not future:
             continue
@@ -1443,7 +1544,7 @@ def run_backtest_token_h4_crt(token, c5m, c4h, config=None):
         # Triple-barrier label (de Prado canonical) — same window as check_outcome
         _tb = triple_barrier_label(
             direction, entry_price, sl_price, tp1_price,
-            future, t1_bars=FORWARD_BARS,
+            future, t1_bars=CRT_FORWARD_BARS,
         )
 
         # Excursion metrics
@@ -1451,39 +1552,35 @@ def run_backtest_token_h4_crt(token, c5m, c4h, config=None):
             direction, entry_price, sl_price, tp1_price, future,
         )
 
-        # Net P&L percentages (apply round-trip cost)
+        # Option E H-2 partial fix: economics via shared helper. Computes
+        # gross/net %, RR, realized R, AND breakeven_wr (M-2 bias fix).
         rt_cost = TOKEN_RT_COST.get(token, ROUND_TRIP_COST_PCT) * 100
-        if direction == "BUY":
-            gross_tp1 = (tp1_price - entry_price) / entry_price * 100
-            gross_tp2 = (tp2_price - entry_price) / entry_price * 100
-            gross_tp3 = (tp3_price - entry_price) / entry_price * 100
-            gross_sl  = (sl_price  - entry_price) / entry_price * 100
-        else:
-            gross_tp1 = (entry_price - tp1_price) / entry_price * 100
-            gross_tp2 = (entry_price - tp2_price) / entry_price * 100
-            gross_tp3 = (entry_price - tp3_price) / entry_price * 100
-            gross_sl  = (entry_price - sl_price)  / entry_price * 100
-        net_tp1 = round(gross_tp1 - rt_cost, 2)
-        net_tp2 = round(gross_tp2 - rt_cost, 2)
-        net_tp3 = round(gross_tp3 - rt_cost, 2)
-        net_sl  = round(gross_sl  - rt_cost, 2)
-        rr1 = round(abs(gross_tp1 / gross_sl), 2) if gross_sl != 0 else 0
-        net_rr1 = round(net_tp1 / abs(net_sl), 2) if net_sl != 0 else 0
-
-        # Realized R-multiple based on actual outcome
-        if outcome == "WIN":
-            _real_r = round(net_tp3 / abs(net_sl), 2) if net_sl != 0 else None
-        elif outcome == "PARTIAL_TP2":
-            _real_r = round(net_tp2 / abs(net_sl), 2) if net_sl != 0 else None
-        elif outcome == "PARTIAL_TP1":
-            _real_r = round(net_tp1 / abs(net_sl), 2) if net_sl != 0 else None
-        elif outcome == "LOSS":
-            _real_r = -1.0
-        else:  # EXPIRED
-            _real_r = 0.0
+        econ = _compute_crt_trade_economics(
+            direction, entry_price, sl_price,
+            tp1_price, tp2_price, tp3_price,
+            outcome, rt_cost,
+        )
+        gross_tp1 = econ["gross_tp1"]
+        gross_sl  = econ["gross_sl"]
+        net_tp1   = econ["net_tp1"]
+        net_tp2   = econ["net_tp2"]
+        net_tp3   = econ["net_tp3"]
+        net_sl    = econ["net_sl"]
+        rr1       = econ["rr1"]
+        net_rr1   = econ["net_rr1"]
+        _real_r   = econ["realized_r"]
+        _bew      = econ["breakeven_wr"]
 
         # Timestamp string from entry bar (ts already computed above for session check)
         ts_str = ts.strftime("%Y-%m-%d %H:%M:%S")
+
+        # Option E fixes (audit cycle-7 2026-05-27):
+        # - M-4 quality / M-CRT2-4: confidence derived from MSS+FVG quality
+        # - M-2 bias: breakeven_wr computed (was hardcoded 0.0)
+        _mss_q = setup.get("mss_quality", "NONE")
+        _fvg_q = (setup["confluence"]["details"].get("quality", "NONE")
+                  if setup["confluence"]["type"] == "FVG" else "NONE")
+        _crt_conf = _crt_quality_to_confidence(_mss_q, _fvg_q)
 
         signals.append({
             "token":           token,
@@ -1491,7 +1588,7 @@ def run_backtest_token_h4_crt(token, c5m, c4h, config=None):
             "price":           round(entry_price, 6),
             "ts":              ts_str,
             "regime":          "UNKNOWN",  # H4 CRT operates above regime classifier; tag explicitly
-            "confidence":      10,         # CRT is high-confluence by construction (FVG OR OB required)
+            "confidence":      _crt_conf,
             "wscore":          0.0,
             "margin":          rr1,
             "conflict":        "LOW",
@@ -1503,7 +1600,7 @@ def run_backtest_token_h4_crt(token, c5m, c4h, config=None):
             "net_tp3_pct":     net_tp3,
             "net_sl_pct":      net_sl,
             "net_rr1":         net_rr1,
-            "breakeven_wr":    0.0,
+            "breakeven_wr":    _bew,
             "tp_reached":      tp_reached,
             "outcome":         outcome,
             # CRT-specific provenance fields (map onto existing column schema)
@@ -1517,9 +1614,8 @@ def run_backtest_token_h4_crt(token, c5m, c4h, config=None):
             "ifvg_age_bars":   0,
             "ifvg_5m_used":    0,
             "dr4h_location":   "UNKNOWN",
-            "mss_quality":     setup.get("mss_quality", "NONE"),
-            "fvg_quality":     setup["confluence"]["details"].get("quality", "NONE")
-                               if setup["confluence"]["type"] == "FVG" else "NONE",
+            "mss_quality":     _mss_q,
+            "fvg_quality":     _fvg_q,
             "entry_type":      f"H4_CRT_{setup['confluence']['type']}",
             "smt_confirmed":   0,
             "smt_type":        "NONE",
@@ -3105,7 +3201,20 @@ def generate_recommendations(all_signals, _train_sigs=None):
     for sweep_type, sigs in by_sweep.items():
         if len(sigs) < 3: continue
         w = _wr(sigs)
-        label = f"{'BSL (SELL)' if sweep_type == 'BSL' else 'SSL (BUY)'}"
+        # Option E M-3 bias fix (audit cycle-7 2026-05-27): handle CRT
+        # sweep_type variants (SSL_CRT / BSL_CRT) alongside the 5M-sweep
+        # BSL / SSL labels. Without this, recommendation messages mis-
+        # labeled CRT bearish sweeps as "SSL (BUY)".
+        if sweep_type == "BSL":
+            label = "BSL (SELL)"
+        elif sweep_type == "SSL":
+            label = "SSL (BUY)"
+        elif sweep_type == "BSL_CRT":
+            label = "BSL_CRT (SELL, H4-CRT)"
+        elif sweep_type == "SSL_CRT":
+            label = "SSL_CRT (BUY, H4-CRT)"
+        else:
+            label = sweep_type or "?"
         if w < 45:
             recs.append({"type": "WARNING", "area": "Sweep Type",
                 "title":  f"{label} sweep underperforming",
@@ -3171,6 +3280,65 @@ def generate_recommendations(all_signals, _train_sigs=None):
             "action": "Try Design B (drop MSS requirement) or widen FVG min gap filter"})
 
     return recs
+
+
+# Option E M-6 quality fix (audit cycle-7 2026-05-27): canonical column
+# tuple for the backtest_signals INSERT. Adding a new column to
+# backtest_signals schema migration requires adding it HERE too (and a
+# corresponding lookup in _backtest_signal_to_row below). The pair
+# eliminates the hand-counted "?" placeholder string + value-tuple
+# ordering footgun that scaled poorly past the 47→48 column transition.
+_BACKTEST_SIGNALS_COLS = (
+    "run_id", "token", "signal", "price", "ts",
+    "regime", "confidence", "wscore", "margin",
+    "conflict", "tp1_pct", "sl_pct", "rr1",
+    "net_tp1_pct", "net_tp2_pct", "net_tp3_pct", "net_sl_pct", "net_rr1",
+    "breakeven_wr", "sweep_type", "fvg_pct", "trend_1h",
+    "bias_4h", "ifvg_present", "ifvg_direction", "ifvg_age_bars",
+    "ifvg_5m_used", "session", "hour_utc", "day_of_week",
+    "dr_location", "mss_quality", "fvg_quality", "smt_type",
+    "smt_confirmed", "entry_type",
+    "tp_reached", "outcome",
+    "matched_template_id", "template_scores_json",
+    "mfe_pct", "mae_pct", "realized_r",
+    "tb_bin", "tb_touch", "tb_ret", "tb_t1",
+    "source",  # CRT v1 Session 2 — '5M_SWEEP' or 'H4_CRT'
+)
+
+
+def _backtest_signal_to_row(s, run_id):
+    """Map a signal dict to the value tuple matching _BACKTEST_SIGNALS_COLS.
+
+    Tuple length and ordering MUST track _BACKTEST_SIGNALS_COLS exactly.
+    Field-level back-compat handled via dict.get() defaults so pre-
+    Session-2 callers (no 'source' key) keep working.
+    """
+    return (
+        run_id, s["token"], s["signal"], s["price"], s["ts"],
+        s["regime"], s["confidence"], s["wscore"], s["margin"],
+        s["conflict"], s["tp1_pct"], s["sl_pct"], s["rr1"],
+        s["net_tp1_pct"], s.get("net_tp2_pct"), s.get("net_tp3_pct"),
+        s["net_sl_pct"], s["net_rr1"],
+        s["breakeven_wr"],
+        s.get("sweep_type", "?"),
+        s.get("fvg_pct", 0.0), s.get("trend_1h", "NEUTRAL"),
+        s.get("bias_4h", "NEUTRAL"), s.get("ifvg_present", 0),
+        s.get("ifvg_direction", ""), s.get("ifvg_age_bars", 0),
+        s.get("ifvg_5m_used", 0),
+        s.get("session", "OVERNIGHT"), s.get("hour_utc", 0), s.get("day_of_week", 0),
+        s.get("dr4h_location", "UNKNOWN"),   # signal dict key → DB column rename
+        s.get("mss_quality", "NONE"),
+        s.get("fvg_quality", "NONE"), s.get("smt_type", "NONE"),
+        s.get("smt_confirmed", 0),
+        s.get("entry_type", "ZONE_TOUCH"),
+        s["tp_reached"], s["outcome"],
+        s.get("matched_template_id", "NONE"),
+        s.get("template_scores_json", None),
+        s.get("mfe_pct", None), s.get("mae_pct", None), s.get("realized_r", None),
+        s.get("tb_bin", None), s.get("tb_touch", None),
+        s.get("tb_ret", None), s.get("tb_t1", None),
+        s.get("source", "5M_SWEEP"),
+    )
 
 
 def save_to_db(all_signals, days=90, config_hash=None):
@@ -3245,50 +3413,17 @@ def save_to_db(all_signals, days=90, config_hash=None):
              len(all_signals), _wr(all_signals), avg_rr, "DONE",
              json.dumps(summary), json.dumps(recs), config_hash))
         run_id = cur.lastrowid
+        # Option E M-6 quality fix (audit cycle-7 2026-05-27): programmatic
+        # INSERT placeholder + column list to prevent hand-count drift. The
+        # value tuple builder (_backtest_signal_to_row) iterates the same
+        # column-name tuple, so adding a column to BACKTEST_SIGNALS_COLS
+        # automatically updates both the INSERT clause and the placeholder
+        # string. Source tag back-compat preserved via s.get default.
+        _placeholders = ",".join(["?"] * len(_BACKTEST_SIGNALS_COLS))
+        _sql = (f"INSERT INTO backtest_signals "
+                f"({','.join(_BACKTEST_SIGNALS_COLS)}) VALUES ({_placeholders})")
         for s in all_signals:
-            conn.execute(
-                """INSERT INTO backtest_signals
-                   (run_id,token,signal,price,ts,regime,confidence,wscore,margin,
-                    conflict,tp1_pct,sl_pct,rr1,
-                    net_tp1_pct,net_tp2_pct,net_tp3_pct,net_sl_pct,net_rr1,breakeven_wr,
-                    sweep_type,fvg_pct,trend_1h,
-                    bias_4h,ifvg_present,ifvg_direction,ifvg_age_bars,ifvg_5m_used,
-                    session,hour_utc,day_of_week,
-                    dr_location,mss_quality,fvg_quality,smt_type,smt_confirmed,entry_type,
-                    tp_reached,outcome,matched_template_id,template_scores_json,
-                    mfe_pct,mae_pct,realized_r,
-                    tb_bin,tb_touch,tb_ret,tb_t1,
-                    source)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (run_id, s["token"], s["signal"], s["price"], s["ts"],
-                 s["regime"], s["confidence"], s["wscore"], s["margin"],
-                 s["conflict"], s["tp1_pct"], s["sl_pct"], s["rr1"],
-                 s["net_tp1_pct"], s.get("net_tp2_pct"), s.get("net_tp3_pct"),  # Fix #16
-                 s["net_sl_pct"], s["net_rr1"], s["breakeven_wr"],
-                 s.get("sweep_type","?"), s.get("fvg_pct", 0.0), s.get("trend_1h","NEUTRAL"),
-                 s.get("bias_4h","NEUTRAL"), s.get("ifvg_present",0),
-                 s.get("ifvg_direction",""), s.get("ifvg_age_bars", 0),
-                 s.get("ifvg_5m_used", 0),
-                 s.get("session","OVERNIGHT"), s.get("hour_utc",0), s.get("day_of_week",0),
-                 s.get("dr4h_location","UNKNOWN"),  # signal dict key: dr4h_location → DB column: dr_location
-                 s.get("mss_quality","NONE"),
-                 s.get("fvg_quality","NONE"), s.get("smt_type","NONE"),
-                 s.get("smt_confirmed", 0),
-                 s.get("entry_type","ZONE_TOUCH"),
-                 s["tp_reached"], s["outcome"],
-                 s.get("matched_template_id", "NONE"),
-                 s.get("template_scores_json", None),
-                 s.get("mfe_pct",    None),
-                 s.get("mae_pct",    None),
-                 s.get("realized_r", None),
-                 s.get("tb_bin",   None),
-                 s.get("tb_touch", None),
-                 s.get("tb_ret",   None),
-                 s.get("tb_t1",    None),
-                 # CRT v1 Session 2 (cycle-7 audit 2026-05-27): source tag for
-                 # per-source attribution. Defaults to '5M_SWEEP' for any signal
-                 # missing the field (back-compat with pre-Session-2 callers).
-                 s.get("source",  "5M_SWEEP")))
+            conn.execute(_sql, _backtest_signal_to_row(s, run_id))
         conn.commit(); conn.close()
         print(f"\n[DB] Run #{run_id} saved — {len(all_signals)} signals, {_wr(all_signals)}% WR")
         return run_id

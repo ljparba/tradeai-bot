@@ -53,14 +53,25 @@ class TestSourceColumnSchema(unittest.TestCase):
                       "Default value for `source` must be '5M_SWEEP'")
 
     def test_insert_includes_source_column(self):
+        # Option E M-6 quality fix (audit cycle-7 2026-05-27): INSERT is now
+        # built programmatically via _BACKTEST_SIGNALS_COLS + placeholder
+        # interpolation. The "source" column must appear in the canonical
+        # column tuple and in the row-builder function.
         import backtest
-        import inspect
-        src = inspect.getsource(backtest.save_to_db)
-        self.assertIn("source", src,
-                      "save_to_db INSERT must reference the `source` column")
-        # 48-column VALUES list (was 47 pre-Session-2)
-        self.assertIn("?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?", src,
-                      "VALUES placeholder count must be 48 (47 fields + source)")
+        self.assertIn("source", backtest._BACKTEST_SIGNALS_COLS,
+                      "source column must be in canonical column tuple")
+        # _backtest_signal_to_row must produce a tuple of exact length
+        # matching _BACKTEST_SIGNALS_COLS for SQL parameter binding to work
+        synthetic = {
+            "token": "BTC", "signal": "BUY", "price": 1.0, "ts": "t",
+            "regime": "TR", "confidence": 8, "wscore": 0.5, "margin": 1.0,
+            "conflict": "LOW", "tp1_pct": 1.0, "sl_pct": -1.0, "rr1": 1.0,
+            "net_tp1_pct": 0.7, "net_sl_pct": -1.3, "net_rr1": 0.54,
+            "breakeven_wr": 0.5, "tp_reached": 0, "outcome": "EXPIRED",
+        }
+        row = backtest._backtest_signal_to_row(synthetic, run_id=42)
+        self.assertEqual(len(row), len(backtest._BACKTEST_SIGNALS_COLS),
+                         "row tuple length must equal column tuple length")
 
     def test_config_hash_includes_crt_knobs(self):
         """B-CRT-S2-C2 fix: _compute_run_config_hash must include CRT env knobs
@@ -137,21 +148,29 @@ class TestCrtScannerGates(unittest.TestCase):
         self.assertIn("crt_insufficient_data", rej2)
 
     def test_flat_data_produces_no_signals(self):
-        """Flat OHLCV with no swings → no sweep → no CRT → empty signals."""
+        """Flat OHLCV with no swings → no sweep → no CRT → empty signals.
+
+        Fixture sized at 5M >= WARMUP_BARS + CRT_FORWARD_BARS (210 + 576 = 786)
+        so the data-sufficiency gate doesn't short-circuit before the H4
+        sliding-window scan can fire. Without this, the function returns
+        on crt_insufficient_data without exercising the inner scan logic.
+        """
         os.environ["ENABLE_H4_CRT"] = "1"
         for mod in ("crt_engine", "backtest"):
             if mod in sys.modules:
                 del sys.modules[mod]
         import backtest
         c4h = _flat_candles(30, t_step=14_400_000)
-        c5m = _flat_candles(600, t_step=300_000)
+        c5m = _flat_candles(800, t_step=300_000)  # ≥ 786 to pass data gate
         sigs, rej = backtest.run_backtest_token_h4_crt("BTC", c5m, c4h)
         self.assertEqual(sigs, [],
                          "Flat data produces no swings, no sweep, no CRT")
-        # Rejection dict should have non-zero entries (sub-windows scanned)
+        # At least one inner-loop rejection counter must fire — proves the
+        # scanner entered the per-H4-window loop instead of bailing on data.
         self.assertTrue(
-            "crt_no_setup" in rej or "crt_sub_window_too_small" in rej,
-            f"Expected at least one rejection counter; got {rej}",
+            any(k in rej for k in
+                ("crt_no_setup", "crt_sub_window_too_small", "crt_late_mss_no_forward")),
+            f"Expected at least one inner-loop rejection counter; got {rej}",
         )
 
 
