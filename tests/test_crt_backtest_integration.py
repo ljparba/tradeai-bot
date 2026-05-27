@@ -24,10 +24,17 @@ def _clean_crt_env():
     # Option S fix (audit cycle-7 2026-05-27): added CRT_FORWARD_BARS,
     # CRT_TP2_RR, CRT_TP3_RR — the LBC re-audit flagged these as missing
     # from test isolation, latent risk if any future test sets them in env.
+    # Option KK (v2): added WYCKOFF_PHASE_FILTER + tuning knobs so the
+    # Wyckoff-context tests don't leak state across runs.
     for k in ("ENABLE_H4_CRT", "H4_CRT_DISABLED_TOKENS", "H4_CRT_C2_LOOKBACK",
               "H4_CRT_MSS_HORIZON", "H4_CRT_OB_SCAN_LOOKBACK",
               "H4_CRT_VALIDATION_SCHOOL",
-              "CRT_FORWARD_BARS", "CRT_TP2_RR", "CRT_TP3_RR"):
+              "CRT_FORWARD_BARS", "CRT_TP2_RR", "CRT_TP3_RR",
+              "WYCKOFF_PHASE_FILTER",
+              "WYCKOFF_H4_LOOKBACK", "WYCKOFF_H4_MIN_BARS",
+              "WYCKOFF_RECENT_WINDOW", "WYCKOFF_CONSOLIDATION_RATIO",
+              "WYCKOFF_RANGE_POSITION_HI", "WYCKOFF_RANGE_POSITION_LO",
+              "WYCKOFF_TREND_THRESHOLD_PCT"):
         os.environ.pop(k, None)
 
 
@@ -188,7 +195,9 @@ class TestSourceColumnSchema(unittest.TestCase):
                      "H4_CRT_C2_LOOKBACK", "H4_CRT_MSS_HORIZON",
                      "H4_CRT_VALIDATION_SCHOOL",
                      # Added in Option S cleanup
-                     "CRT_FORWARD_BARS", "H4_CRT_OB_SCAN_LOOKBACK"):
+                     "CRT_FORWARD_BARS", "H4_CRT_OB_SCAN_LOOKBACK",
+                     # Added in v2 (Option KK)
+                     "WYCKOFF_PHASE_FILTER"):
             self.assertIn(knob, src,
                           f"config_hash payload must include CRT knob {knob}")
 

@@ -648,3 +648,46 @@ implementation is correctly self-contained.
   - Phased rollout v1 (foundation, 22-25h, 55-62% WR ceiling) → v2
     (research-best, +10-15h, 60-65% WR ceiling) with explicit gates
     between phases
+
+
+## 18. v2 Empirical Finding (Wyckoff phase filter — NEGATIVE RESULT)
+
+**Spec prediction (§ 7 v2 ceiling):** Wyckoff strict phase alignment was
+predicted to add +5–8pp WR by rejecting counter-phase CRT setups.
+
+**Test plan (Option KK + JJ):** 3-way backtest of CRT-only signals over
+the canonical 365-day window:
+
+| Run | Config | n | CPCV mean WR | DSR |
+|-----|--------|---|--------------|-----|
+| #138 baseline | `WYCKOFF_PHASE_FILTER=off`, bias_4h=none, FVG+OB | 534 | 50.94% | 55.4% |
+| #139 Test A | `WYCKOFF_PHASE_FILTER=off`, bias_4h=strict, FVG+OB | 210 | 57.62% | 88.4% |
+| #140 Test B | `WYCKOFF_PHASE_FILTER=strict`, bias_4h=strict, FVG+OB | 104 | 52.40% | 79.4% |
+
+**Result:** Wyckoff strict phase filter REDUCED CRT WR by **−5.22pp**
+(Test B vs Test A) and reduced signal count by half (104 vs 210), so
+the loss is not noise. The article's gold/forex calibration does NOT
+translate to the 10-token crypto baseline. Direction-aligned phases
+in crypto are NOT a reliable trend-following filter at the H4 timeframe
+— crypto regime changes faster than gold/EURUSD, so "MARKUP" phases
+flip to "DISTRIBUTION" before the H4 lookback catches it.
+
+**Decision (Option LL, 2026-05-27):**
+- Ship Test A config as **CRT v1 final**:
+  `ENABLE_H4_CRT=1`, `LIVE_BIAS_4H_GATE=strict`, `BACKTEST_BIAS_4H_GATE=strict`,
+  `WYCKOFF_PHASE_FILTER=off` (default).
+- Wyckoff context (`ACCUMULATION` / `DISTRIBUTION` / `MARKUP` / `MARKDOWN` /
+  `TRANSITION`) is still tagged into `entry_type` for every CRT signal
+  (`H4_CRT_FVG_MARKUP`, `H4_CRT_OB_ACCUMULATION`, etc.). The filter is
+  OFF but the **observation is preserved** so:
+  - OGD can learn per-phase confidence weights once we have ≥30 paper
+    trades in each context bucket.
+  - Future analysis can retroactively answer "did MARKUP-aligned BUYs
+    actually outperform DISTRIBUTION-aligned BUYs?" without re-running.
+  - If the empirical sign flips with more data, the filter can be
+    re-enabled via env knob without code changes.
+
+**Lesson:** Article predictions calibrated on a different market regime
+are HYPOTHESES, not facts. Confirm on TradeAI's own canonical baseline
+before locking a filter on. Backtest first, then ship — never the
+reverse.

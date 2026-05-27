@@ -130,6 +130,8 @@ from crt_engine import (
     # — splits the opaque `crt_economics_gate` counter into 3 specific
     # gate-fired counters (fees_kill / bew_too_high / invalid_inputs).
     crt_trade_rejection_reason,
+    # v2 Wyckoff phase context filter (Option KK, audit cycle-7 2026-05-27)
+    detect_wyckoff_context, is_crt_phase_aligned, WYCKOFF_PHASE_FILTER,
 )
 # H-CRT2-1 fix (Session 2 Option B audit 2026-05-27): import SL buffer
 # directly from ict_engine (crypto_alert.py doesn't re-export it).
@@ -1435,6 +1437,22 @@ def run_backtest_token_h4_crt(token, c5m, c4h, config=None):
             rej["crt_bias_gate_blocked"] = rej.get("crt_bias_gate_blocked", 0) + 1
             continue
 
+        # v2 Wyckoff phase filter (Option KK, audit cycle-7 2026-05-27).
+        # Default mode = "off" → no filter, preserves Test A behavior.
+        # When mode == "strict" or "loose", computes the macro Wyckoff
+        # context from the H4 candle stream and rejects setups whose
+        # direction conflicts with the current phase. Single biggest WR
+        # booster per the article (raw 45-50% → 55-62% band).
+        # Context is ALWAYS computed (regardless of filter mode) so the
+        # entry_type field encodes it for retroactive per-context analysis.
+        wyckoff_context = detect_wyckoff_context(c4h)
+        if WYCKOFF_PHASE_FILTER != "off":
+            if not is_crt_phase_aligned(wyckoff_context, direction):
+                rej[f"crt_wyckoff_{wyckoff_context.lower()}"] = (
+                    rej.get(f"crt_wyckoff_{wyckoff_context.lower()}", 0) + 1
+                )
+                continue
+
         # SL = sweep wick + buffer (H-CRT2-1 fix: matches 5M-sweep behavior
         # at ict_engine.py:757,784 — 0.3% structural buffer beyond the wick).
         raw_wick = setup["sl"]
@@ -1559,7 +1577,10 @@ def run_backtest_token_h4_crt(token, c5m, c4h, config=None):
             "dr4h_location":   "UNKNOWN",
             "mss_quality":     _mss_q,
             "fvg_quality":     _fvg_q,
-            "entry_type":      f"H4_CRT_{setup['confluence']['type']}",
+            # entry_type encodes confluence + Wyckoff context for retroactive
+            # per-context analysis via SQL (no schema migration needed).
+            # Format: H4_CRT_<FVG|OB>_<ACCUMULATION|DISTRIBUTION|MARKUP|MARKDOWN|TRANSITION>
+            "entry_type":      f"H4_CRT_{setup['confluence']['type']}_{wyckoff_context}",
             "smt_confirmed":   0,
             "smt_type":        "NONE",
             "tp1_target_type": "C1_OPPOSITE_EXTREME",
@@ -3449,6 +3470,11 @@ def _compute_run_config_hash() -> str:
         # archive collision. Same failure mode as B-CRT-S2-C2.
         "CRT_FORWARD_BARS":         os.environ.get("CRT_FORWARD_BARS", "576"),
         "H4_CRT_OB_SCAN_LOOKBACK":  os.environ.get("H4_CRT_OB_SCAN_LOOKBACK", "20"),
+        # v2 Wyckoff phase filter (Option KK, audit cycle-7 2026-05-27).
+        # The single biggest WR booster per the article's calibration; the
+        # explorer or operator can flip between off/loose/strict and these
+        # MUST produce distinct config_hashes for honest DSR n_trials.
+        "WYCKOFF_PHASE_FILTER":     os.environ.get("WYCKOFF_PHASE_FILTER", "off").lower(),
     })
 
 

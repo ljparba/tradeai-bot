@@ -26,11 +26,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def _clean_crt_env():
     """Mirror tests/test_crt_engine.py + test_crt_backtest_integration.py
-    isolation pattern so cross-file test order doesn't leak env state."""
+    isolation pattern so cross-file test order doesn't leak env state.
+    Option KK (v2): added Wyckoff phase knobs."""
     for k in ("ENABLE_H4_CRT", "H4_CRT_DISABLED_TOKENS", "H4_CRT_C2_LOOKBACK",
               "H4_CRT_MSS_HORIZON", "H4_CRT_OB_SCAN_LOOKBACK",
               "H4_CRT_VALIDATION_SCHOOL",
-              "CRT_FORWARD_BARS", "CRT_TP2_RR", "CRT_TP3_RR"):
+              "CRT_FORWARD_BARS", "CRT_TP2_RR", "CRT_TP3_RR",
+              "WYCKOFF_PHASE_FILTER",
+              "WYCKOFF_H4_LOOKBACK", "WYCKOFF_H4_MIN_BARS",
+              "WYCKOFF_RECENT_WINDOW", "WYCKOFF_CONSOLIDATION_RATIO",
+              "WYCKOFF_RANGE_POSITION_HI", "WYCKOFF_RANGE_POSITION_LO",
+              "WYCKOFF_TREND_THRESHOLD_PCT"):
         os.environ.pop(k, None)
 
 

@@ -94,6 +94,32 @@ H4_CRT_VALIDATION_SCHOOL = _env_str("H4_CRT_VALIDATION_SCHOOL", "flexible").lowe
 if H4_CRT_VALIDATION_SCHOOL not in ("flexible", "strict"):
     H4_CRT_VALIDATION_SCHOOL = "flexible"  # safe default on typo
 
+# CRT v2 — Wyckoff phase context filter (audit cycle-7 2026-05-27, Option KK).
+# Per the Trading Wyckoff article (CRT_RESEARCH § 7 v2): adding Wyckoff phase
+# context to the CRT signal stack pushes WR from the raw 45-50% band to the
+# 55-62% band — the single biggest WR booster identified by the article.
+#
+# Filter modes:
+#   off    — preserve v1 behavior (default — no Wyckoff filter applied)
+#   loose  — reject only TRANSITION context; allow direction-aligned AND
+#            counter-trend (high-risk reversal) setups
+#   strict — require direction-aligned Wyckoff context:
+#              bullish CRT → ACCUMULATION (Spring) or MARKUP (continuation)
+#              bearish CRT → DISTRIBUTION (Upthrust) or MARKDOWN (continuation)
+#            Rejects TRANSITION and counter-trend setups.
+WYCKOFF_PHASE_FILTER = _env_str("WYCKOFF_PHASE_FILTER", "off").lower()
+if WYCKOFF_PHASE_FILTER not in ("off", "loose", "strict"):
+    WYCKOFF_PHASE_FILTER = "off"  # safe default on typo
+
+# H4 lookback windows for Wyckoff context detection (~20 days at 4h/bar).
+WYCKOFF_H4_LOOKBACK     = _env_int("WYCKOFF_H4_LOOKBACK", 120)
+WYCKOFF_H4_MIN_BARS     = _env_int("WYCKOFF_H4_MIN_BARS", 80)
+WYCKOFF_RECENT_WINDOW   = _env_int("WYCKOFF_RECENT_WINDOW", 40)
+WYCKOFF_CONSOLIDATION_RATIO = _env_float("WYCKOFF_CONSOLIDATION_RATIO", 0.5)
+WYCKOFF_RANGE_POSITION_HI   = _env_float("WYCKOFF_RANGE_POSITION_HI", 0.65)
+WYCKOFF_RANGE_POSITION_LO   = _env_float("WYCKOFF_RANGE_POSITION_LO", 0.35)
+WYCKOFF_TREND_THRESHOLD_PCT = _env_float("WYCKOFF_TREND_THRESHOLD_PCT", 0.02)
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 def _find_5m_bar_after(c5m_times, target_time) -> int:
@@ -586,3 +612,170 @@ def crt_quality_to_confidence(mss_quality: str, fvg_quality: str) -> int:
     q_score = {"HIGH": 3, "MEDIUM": 2, "LOW": 1, "NONE": 0}
     pts = q_score.get(mss_quality, 0) + q_score.get(fvg_quality, 0)
     return max(6, min(10, 6 + (pts * 2) // 3))
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# CRT v2 — Wyckoff phase context detector (Option KK, audit cycle-7 2026-05-27)
+# ────────────────────────────────────────────────────────────────────────────
+#
+# Per the Trading Wyckoff article (research doc § 7 v2), adding Wyckoff phase
+# context to the CRT signal stack is the single biggest WR booster — pushes
+# from the raw 45-50% band to 55-62% (per article's calibration table).
+#
+# Implementation note: Wyckoff phase detection is heuristic, not deterministic
+# (the article gives qualitative guidance, not a precise algorithm). This
+# implementation uses H4 candle structure to classify a SIMPLIFIED 5-state
+# context — sufficient for direction-aligned filtering of CRT setups:
+#
+#   ACCUMULATION — H4 range at relative LOWS after preceding downtrend or
+#                  flat period. Bullish CRT here = textbook Spring setup.
+#   DISTRIBUTION — H4 range at relative HIGHS after preceding uptrend or
+#                  flat. Bearish CRT here = textbook Upthrust setup.
+#   MARKUP       — Clear bullish trend (post-accumulation Phase D/E). Bullish
+#                  CRT here = continuation setup.
+#   MARKDOWN     — Clear bearish trend (post-distribution Phase D/E). Bearish
+#                  CRT here = continuation setup.
+#   TRANSITION   — Ambiguous or chaotic (Phase A or early B). Filter all CRT
+#                  setups here — Wyckoff teaches "don't trade between phases."
+#
+# The detector takes raw H4 OHLCV (no precomputed indicators) so it can be
+# called from BOTH live (crypto_alert.py:scan_h4_crt_for_token) and backtest
+# (backtest.py:run_backtest_token_h4_crt) — same module, same logic, byte-
+# identical output for identical inputs.
+
+def detect_wyckoff_context(c4h: dict,
+                            lookback: int = None,
+                            min_bars: int = None) -> str:
+    """Classify the macro Wyckoff context from H4 candle structure.
+
+    Args:
+        c4h: dict with 'highs', 'lows', 'closes' arrays. ≥ min_bars required.
+        lookback: H4 bars to analyze (default WYCKOFF_H4_LOOKBACK = 120 = ~20 days)
+        min_bars: minimum bars required to compute (default 80 = ~13 days)
+
+    Returns:
+        One of: "ACCUMULATION", "DISTRIBUTION", "MARKUP", "MARKDOWN", "TRANSITION".
+        Returns "TRANSITION" defensively on bad input or insufficient data —
+        caller's strict-mode filter rejects this; loose-mode rejects only this.
+    """
+    if lookback is None:
+        lookback = WYCKOFF_H4_LOOKBACK
+    if min_bars is None:
+        min_bars = WYCKOFF_H4_MIN_BARS
+
+    try:
+        closes = c4h["closes"]
+        highs = c4h["highs"]
+        lows = c4h["lows"]
+    except (KeyError, TypeError):
+        return "TRANSITION"
+
+    n = len(closes)
+    if n < min_bars or len(highs) != n or len(lows) != n:
+        return "TRANSITION"
+
+    # Slice the analysis window (most-recent `lookback` bars)
+    window_n = min(n, lookback)
+    c = closes[-window_n:]
+    h = highs[-window_n:]
+    l = lows[-window_n:]
+
+    # Macro range over the full window
+    range_high = max(h)
+    range_low = min(l)
+    if range_high <= range_low:
+        return "TRANSITION"
+    range_width = range_high - range_low
+    range_mid = (range_high + range_low) / 2.0
+    current = c[-1]
+    if current <= 0:
+        return "TRANSITION"
+
+    # Position within range (0 = at low, 1 = at high)
+    position_ratio = (current - range_low) / range_width
+    if position_ratio > WYCKOFF_RANGE_POSITION_HI:
+        position = "TOP"
+    elif position_ratio < WYCKOFF_RANGE_POSITION_LO:
+        position = "BOTTOM"
+    else:
+        position = "MID"
+
+    # Consolidation vs trending: compare recent sub-window range to full range
+    recent_n = min(WYCKOFF_RECENT_WINDOW, window_n)
+    recent_h = max(h[-recent_n:])
+    recent_l = min(l[-recent_n:])
+    recent_range = recent_h - recent_l
+    consolidation_ratio = recent_range / range_width if range_width > 0 else 1.0
+    is_consolidating = consolidation_ratio < WYCKOFF_CONSOLIDATION_RATIO
+
+    # Trend INTO the range: compare close ~2× recent_n bars ago vs ~recent_n ago.
+    # If we don't have enough history, treat as flat (defensive).
+    pre_range_idx = -(2 * recent_n)
+    range_start_idx = -recent_n
+    if abs(pre_range_idx) <= window_n and abs(range_start_idx) <= window_n:
+        pre_close = c[pre_range_idx]
+        start_close = c[range_start_idx]
+        if pre_close > 0:
+            change = (start_close - pre_close) / pre_close
+            if change > WYCKOFF_TREND_THRESHOLD_PCT:
+                pre_range_trend = "UP"
+            elif change < -WYCKOFF_TREND_THRESHOLD_PCT:
+                pre_range_trend = "DOWN"
+            else:
+                pre_range_trend = "FLAT"
+        else:
+            pre_range_trend = "FLAT"
+    else:
+        pre_range_trend = "FLAT"
+
+    # Classification — consolidating cases
+    if is_consolidating:
+        if position == "BOTTOM" and pre_range_trend in ("DOWN", "FLAT"):
+            # Range at lows after downtrend or flat → Phase B accumulation
+            return "ACCUMULATION"
+        if position == "TOP" and pre_range_trend in ("UP", "FLAT"):
+            # Range at highs after uptrend or flat → Phase B distribution
+            return "DISTRIBUTION"
+        # Consolidating but ambiguous (e.g., range at MID position)
+        return "TRANSITION"
+
+    # Trending cases (range expanded vs recent window)
+    if pre_range_trend == "UP" and current > range_mid:
+        # Uptrend leading INTO current up-position → markup phase
+        return "MARKUP"
+    if pre_range_trend == "DOWN" and current < range_mid:
+        # Downtrend leading INTO current down-position → markdown phase
+        return "MARKDOWN"
+
+    # Default — no clear Wyckoff structure
+    return "TRANSITION"
+
+
+def is_crt_phase_aligned(context: str, direction: str, mode: str = None) -> bool:
+    """Determine whether a CRT setup's direction aligns with the current
+    Wyckoff context, per the configured WYCKOFF_PHASE_FILTER mode.
+
+    Mode semantics:
+      "off"    — always returns True (no filtering applied)
+      "loose"  — rejects only TRANSITION context (ambiguous structure)
+      "strict" — requires direction-aligned context:
+                   BUY  → ACCUMULATION (Spring) or MARKUP (continuation)
+                   SELL → DISTRIBUTION (Upthrust) or MARKDOWN (continuation)
+                 Rejects TRANSITION and counter-trend setups.
+    """
+    if mode is None:
+        mode = WYCKOFF_PHASE_FILTER
+    mode = mode.lower()
+
+    if mode == "off":
+        return True
+    if mode == "loose":
+        return context != "TRANSITION"
+    if mode == "strict":
+        if direction == "BUY":
+            return context in ("ACCUMULATION", "MARKUP")
+        if direction == "SELL":
+            return context in ("DISTRIBUTION", "MARKDOWN")
+        return False
+    # Unknown mode — fail-open (preserves prior behavior)
+    return True

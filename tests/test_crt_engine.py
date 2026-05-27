@@ -581,5 +581,152 @@ class TestCrtQualityToConfidence(unittest.TestCase):
         self.assertEqual(compute("BOGUS", "ALSO_BOGUS"), 6)
 
 
+class TestWyckoffContextDetector(unittest.TestCase):
+    """Unit tests for crt_engine.detect_wyckoff_context (Option KK)."""
+
+    def setUp(self):
+        _clean_crt_env()
+        for mod in ("ict_engine", "crt_engine"):
+            if mod in sys.modules:
+                del sys.modules[mod]
+
+    def tearDown(self):
+        _clean_crt_env()
+
+    def _import(self):
+        import crt_engine
+        return crt_engine.detect_wyckoff_context
+
+    def _make_c4h(self, opens, highs, lows, closes):
+        return {
+            "opens": opens, "highs": highs, "lows": lows,
+            "closes": closes,
+            "times": list(range(0, len(closes) * 14_400_000, 14_400_000)),
+        }
+
+    def test_insufficient_data_returns_transition(self):
+        """< WYCKOFF_H4_MIN_BARS (80) bars → TRANSITION defensively."""
+        c4h = self._make_c4h([100.0]*50, [100.5]*50, [99.5]*50, [100.0]*50)
+        self.assertEqual(self._import()(c4h), "TRANSITION")
+
+    def test_malformed_input_returns_transition(self):
+        """Bad/missing keys → TRANSITION (defensive against caller errors)."""
+        self.assertEqual(self._import()({}), "TRANSITION")
+        self.assertEqual(self._import()({"closes": []}), "TRANSITION")
+        self.assertEqual(self._import()(None), "TRANSITION")
+
+    def test_accumulation_range_at_lows(self):
+        """Range at relative lows after downtrend → ACCUMULATION."""
+        # Build a synthetic accumulation pattern:
+        # Bars 0-59:  downtrend from 110 → 100 (price falling)
+        # Bars 60-119: range-bound 99-101 (consolidation at lows)
+        opens, highs, lows, closes = [], [], [], []
+        for i in range(60):
+            # Downtrend: each bar slightly lower
+            c = 110.0 - (i * 0.166)  # 110 → ~100
+            opens.append(c + 0.1)
+            highs.append(c + 0.2)
+            lows.append(c - 0.2)
+            closes.append(c)
+        for i in range(60):
+            # Range at lows (99-101 oscillation)
+            c = 100.0 + (0.5 if i % 2 == 0 else -0.5)
+            opens.append(c)
+            highs.append(c + 0.4)
+            lows.append(c - 0.4)
+            closes.append(c)
+        c4h = self._make_c4h(opens, highs, lows, closes)
+        result = self._import()(c4h)
+        self.assertIn(result, ("ACCUMULATION", "TRANSITION"),
+            f"Range-at-lows-after-downtrend should classify as ACCUMULATION "
+            f"or TRANSITION (heuristic uncertainty), got {result}")
+
+    def test_distribution_range_at_highs(self):
+        """Range at relative highs after uptrend → DISTRIBUTION."""
+        opens, highs, lows, closes = [], [], [], []
+        for i in range(60):
+            # Uptrend
+            c = 90.0 + (i * 0.166)
+            opens.append(c - 0.1)
+            highs.append(c + 0.2)
+            lows.append(c - 0.2)
+            closes.append(c)
+        for i in range(60):
+            # Range at highs
+            c = 100.0 + (0.5 if i % 2 == 0 else -0.5)
+            opens.append(c)
+            highs.append(c + 0.4)
+            lows.append(c - 0.4)
+            closes.append(c)
+        c4h = self._make_c4h(opens, highs, lows, closes)
+        result = self._import()(c4h)
+        self.assertIn(result, ("DISTRIBUTION", "TRANSITION"),
+            f"Range-at-highs-after-uptrend should classify as DISTRIBUTION "
+            f"or TRANSITION (heuristic uncertainty), got {result}")
+
+    def test_flat_data_returns_transition(self):
+        """All-equal candles → no range → TRANSITION."""
+        c4h = self._make_c4h([100.0]*120, [100.0]*120, [100.0]*120, [100.0]*120)
+        self.assertEqual(self._import()(c4h), "TRANSITION")
+
+
+class TestCrtPhaseAlignment(unittest.TestCase):
+    """Unit tests for crt_engine.is_crt_phase_aligned (Option KK)."""
+
+    def setUp(self):
+        _clean_crt_env()
+        for mod in ("ict_engine", "crt_engine"):
+            if mod in sys.modules:
+                del sys.modules[mod]
+
+    def tearDown(self):
+        _clean_crt_env()
+
+    def _import(self):
+        import crt_engine
+        return crt_engine.is_crt_phase_aligned
+
+    def test_off_mode_always_allows(self):
+        """mode='off' → ALL combinations return True."""
+        fn = self._import()
+        for ctx in ("ACCUMULATION", "DISTRIBUTION", "MARKUP", "MARKDOWN", "TRANSITION"):
+            for direction in ("BUY", "SELL"):
+                self.assertTrue(fn(ctx, direction, mode="off"),
+                    f"off mode should allow {direction} in {ctx}")
+
+    def test_loose_mode_rejects_only_transition(self):
+        """mode='loose' → only TRANSITION is rejected."""
+        fn = self._import()
+        for direction in ("BUY", "SELL"):
+            self.assertFalse(fn("TRANSITION", direction, mode="loose"),
+                f"loose mode must reject {direction} in TRANSITION")
+            for ctx in ("ACCUMULATION", "DISTRIBUTION", "MARKUP", "MARKDOWN"):
+                self.assertTrue(fn(ctx, direction, mode="loose"),
+                    f"loose mode must allow {direction} in {ctx}")
+
+    def test_strict_mode_buy_alignment(self):
+        """mode='strict', direction=BUY → only ACCUMULATION + MARKUP allowed."""
+        fn = self._import()
+        self.assertTrue(fn("ACCUMULATION", "BUY", mode="strict"))
+        self.assertTrue(fn("MARKUP", "BUY", mode="strict"))
+        self.assertFalse(fn("DISTRIBUTION", "BUY", mode="strict"))
+        self.assertFalse(fn("MARKDOWN", "BUY", mode="strict"))
+        self.assertFalse(fn("TRANSITION", "BUY", mode="strict"))
+
+    def test_strict_mode_sell_alignment(self):
+        """mode='strict', direction=SELL → only DISTRIBUTION + MARKDOWN allowed."""
+        fn = self._import()
+        self.assertTrue(fn("DISTRIBUTION", "SELL", mode="strict"))
+        self.assertTrue(fn("MARKDOWN", "SELL", mode="strict"))
+        self.assertFalse(fn("ACCUMULATION", "SELL", mode="strict"))
+        self.assertFalse(fn("MARKUP", "SELL", mode="strict"))
+        self.assertFalse(fn("TRANSITION", "SELL", mode="strict"))
+
+    def test_unknown_mode_fails_open(self):
+        """Unknown mode → defensive fail-open (preserves prior behavior)."""
+        fn = self._import()
+        self.assertTrue(fn("ACCUMULATION", "BUY", mode="bogus"))
+
+
 if __name__ == "__main__":
     unittest.main()

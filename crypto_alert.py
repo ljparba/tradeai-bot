@@ -108,6 +108,8 @@ from crt_engine import (
     compute_crt_trade_economics, crt_quality_to_confidence,
     crt_trade_rejection_reason,
     CRT_TP2_RR, CRT_TP3_RR,
+    # v2 Wyckoff phase context (Option KK, audit cycle-7 2026-05-27)
+    detect_wyckoff_context, is_crt_phase_aligned, WYCKOFF_PHASE_FILTER,
 )
 
 _ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -822,6 +824,16 @@ def scan_h4_crt_for_token(token, c5m, c4h, consumed):
         consumed.add(setup["key"])
         return None, None, "bias_gate_blocked"
 
+    # ── v2 Wyckoff phase filter (Option KK, audit cycle-7 2026-05-27) ─────
+    # Same logic as backtest path — phase context computed unconditionally
+    # (for entry_type tagging), phase-aligned check enforced only when the
+    # WYCKOFF_PHASE_FILTER env knob is "loose" or "strict".
+    wyckoff_context = detect_wyckoff_context(c4h)
+    if WYCKOFF_PHASE_FILTER != "off":
+        if not is_crt_phase_aligned(wyckoff_context, direction):
+            consumed.add(setup["key"])  # mark zone consumed — phase gate is structural
+            return None, None, f"wyckoff_{wyckoff_context.lower()}"
+
     # ── Trade plan: SL = sweep wick ± buffer, TP1 = C1 opposite, TP2/3 = RR cascade ──
     # Parity with backtest H-CRT2-1 (SL buffer) and CRT_TP2_RR/CRT_TP3_RR ladder.
     raw_wick = setup["sl"]
@@ -893,7 +905,8 @@ def scan_h4_crt_for_token(token, c5m, c4h, consumed):
         "vol_ratio":        1.0,
         "reasons":          [f"H4_CRT_{setup['confluence']['type']}",
                              f"MSS={_mss_q}", f"FVG={_fvg_q}",
-                             f"bias_4h={bias_4h}"],
+                             f"bias_4h={bias_4h}",
+                             f"wyckoff={wyckoff_context}"],
         "plan":             plan,
         # CRT-specific fields surfaced via existing schema
         "sr_type":          setup["type"],     # SSL_CRT / BSL_CRT
@@ -902,7 +915,8 @@ def scan_h4_crt_for_token(token, c5m, c4h, consumed):
         "mss_result":       {"quality": _mss_q},
         "ict_fvg":          {"quality": _fvg_q},
         "smt_result":       {"smt_type": "NONE", "smt_confirmed": False},
-        "entry_type":       f"H4_CRT_{setup['confluence']['type']}",
+        # Encode Wyckoff context into entry_type — parity with backtest path
+        "entry_type":       f"H4_CRT_{setup['confluence']['type']}_{wyckoff_context}",
         "ev_score":         None,
         "ev_sample_n":      None,
         "ev_status":        "OBSERVE",
