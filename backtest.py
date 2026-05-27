@@ -1466,7 +1466,18 @@ def run_backtest_token_h4_crt(token, c5m, c4h, c1h=None, config=None):
         # booster per the article (raw 45-50% → 55-62% band).
         # Context is ALWAYS computed (regardless of filter mode) so the
         # entry_type field encodes it for retroactive per-context analysis.
-        wyckoff_context = detect_wyckoff_context(c4h)
+        # C-3 CRITICAL fix (audit 2026-05-27 cycle-8): pass `c4h_win` (the
+        # bounded H4 sub-window) instead of the full 365-day c4h dataset.
+        # Previously, `detect_wyckoff_context` ran on the full dataset and its
+        # internal `closes[-window_n:]` slice always read the FINAL 120 bars —
+        # so a January 2025 signal got a Wyckoff label computed from December
+        # 2025 future candles. That contaminated:
+        #   • Run #140 Test B's -5.22pp WR for WYCKOFF_PHASE_FILTER=strict
+        #   • All Wyckoff phase tags in `entry_type` on `backtest_signals`
+        #   • Any future explorer trial with `WYCKOFF_PHASE_FILTER=loose`
+        # c4h_win is bounded by [h4_start:h4_end] at line 1364-1370 (already
+        # excludes future bars) — passing it eliminates the lookahead.
+        wyckoff_context = detect_wyckoff_context(c4h_win)
         if WYCKOFF_PHASE_FILTER != "off":
             if not is_crt_phase_aligned(wyckoff_context, direction):
                 rej[f"crt_wyckoff_{wyckoff_context.lower()}"] = (

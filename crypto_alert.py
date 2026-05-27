@@ -3777,16 +3777,49 @@ def main():
                     _c1h_live = STATE[token]["candles"].get("1h", {})
                     if _c5m and _c4h and len(_c5m.get("closes", [])) > 30 \
                             and len(_c4h.get("closes", [])) > H4_CRT_C2_LOOKBACK + 2:
-                        # Inject 'times' if missing (some fetch paths use 'time')
-                        # CRT Pro v1.1 (2026-05-27): pass per-token live 1H trend
-                        # so the optional CRT_REQUIRE_1H_TREND gate has the same
-                        # input as the 5M_SWEEP scanner. Defaults to NEUTRAL
-                        # (passes through) when CRT_REQUIRE_1H_TREND=0.
-                        _crt_result, _crt_plan, _crt_reason = scan_h4_crt_for_token(
-                            token, _c5m, _c4h,
-                            consumed=STATE[token]["consumed_h4_crt"],
-                            trend_1h=STATE[token].get("trend_1h", "NEUTRAL"),
-                        )
+                        # CRITICAL P1 fix (audit 2026-05-27 cycle-8):
+                        #   C-1: candle-key shape mismatch (3 agents converged).
+                        #        fetch_binance_candles returns dict keyed "timestamps"
+                        #        (plural). crt_engine.detect_h4_crt requires "times"
+                        #        (singular) and silently returns None on mismatch.
+                        #        Result: 0 CRT signals fired in 28h+ of paper soak.
+                        #   C-2: forming-bar repaint. 5M_SWEEP path applies [:-1] to
+                        #        drop the in-progress bar (crypto_alert.py:2450-2454);
+                        #        CRT path passed the raw STATE candles → the live
+                        #        4H + 5M arrays included a non-closed bar at [-1] →
+                        #        repaint violation + live/BT divergence.
+                        # Build NEW dicts (don't mutate STATE — other code paths may
+                        # rely on it). Strip forming bar from all OHLCV+time arrays.
+                        def _crt_closed_only(src_dict):
+                            """Return a copy keyed for crt_engine ('times' present)
+                            with the trailing forming bar removed from every series."""
+                            if not src_dict:
+                                return {}
+                            # Source candles use 'timestamps'; crt_engine wants 'times'
+                            _ts_src = src_dict.get("times") or src_dict.get("timestamps") or []
+                            return {
+                                "opens":  src_dict.get("opens",  [])[:-1],
+                                "highs":  src_dict.get("highs",  [])[:-1],
+                                "lows":   src_dict.get("lows",   [])[:-1],
+                                "closes": src_dict.get("closes", [])[:-1],
+                                "times":  list(_ts_src)[:-1],
+                            }
+                        _c5m_closed = _crt_closed_only(_c5m)
+                        _c4h_closed = _crt_closed_only(_c4h)
+                        # Initialize defensive defaults so the downstream
+                        # `if _crt_result is not None:` is safe even if the
+                        # post-slice length check below skips the scan call.
+                        _crt_result, _crt_plan, _crt_reason = None, None, "skipped_short_candles"
+                        # Re-verify length AFTER the [:-1] slice so we don't fall
+                        # under the inner detect_h4_crt's >=30 / >H4_CRT_C2_LOOKBACK
+                        # floor with the forming-bar removed.
+                        if (len(_c5m_closed["closes"]) > 30
+                                and len(_c4h_closed["closes"]) > H4_CRT_C2_LOOKBACK + 2):
+                            _crt_result, _crt_plan, _crt_reason = scan_h4_crt_for_token(
+                                token, _c5m_closed, _c4h_closed,
+                                consumed=STATE[token]["consumed_h4_crt"],
+                                trend_1h=STATE[token].get("trend_1h", "NEUTRAL"),
+                            )
                         if _crt_result is not None:
                             _crt_entry = _crt_result["entry_price"]
                             _crt_sig_id = save_signal(
