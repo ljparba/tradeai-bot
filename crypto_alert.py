@@ -697,8 +697,19 @@ def save_signal(token, price, result, plan, regime):
              result.get("btc_trend_4h","NEUTRAL"),result.get("btc_dom_dir","NEUTRAL"),
              result.get("wscore_buy",0.0),result.get("wscore_sell",0.0),
              result.get("conflict_level","LOW"),result.get("candle_pattern","NONE"),
+             # H-2 fix (audit cycle-8 2026-05-27): CRT signals need a 48h
+             # expiry window to match CRT_FORWARD_BARS=576 (48h backtest
+             # outcome window). Previously inherited the 5M_SWEEP-era
+             # EXPIRY_BY_REGIME["UNKNOWN"]=12h default → any CRT setup
+             # reaching TP1 between hour 12-48 logged as EXPIRED (-0.25R)
+             # instead of WIN, corrupting OGD label-learning.
+             # 5M_SWEEP path (regime != UNKNOWN or source != H4_CRT) keeps
+             # its original regime-aware expiry.
              (_now+timedelta(
-                 hours=EXPIRY_BY_REGIME.get(regime.get("regime","UNKNOWN"),12)
+                 hours=(
+                     48 if (result.get("source") == "H4_CRT")
+                     else EXPIRY_BY_REGIME.get(regime.get("regime","UNKNOWN"),12)
+                 )
              )).strftime("%Y-%m-%d %H:%M:%S"),
              result.get("feature_scores_json", None),
              result.get("sr_type",""),
@@ -3815,12 +3826,52 @@ def main():
                         # floor with the forming-bar removed.
                         if (len(_c5m_closed["closes"]) > 30
                                 and len(_c4h_closed["closes"]) > H4_CRT_C2_LOOKBACK + 2):
+                            # H-3 fix (audit cycle-8 2026-05-27): compute
+                            # per-token 1H trend directly from the cached
+                            # 1H candles. Previously read STATE[token]["trend_1h"]
+                            # which is ONLY populated by the 5M_SWEEP path
+                            # (generate_signal) — when ENABLE_5M_SWEEP=0 the
+                            # value defaulted to "NEUTRAL" forever, breaking
+                            # both the CRT_REQUIRE_1H_TREND gate AND OGD's
+                            # trend_strength feature attribution.
+                            _crt_trend_1h = get_trend(_c1h_live.get("closes", [])) if _c1h_live else "NEUTRAL"
+                            # Cache it back to STATE so other code paths
+                            # (e.g. dashboard, Telegram render) see the real
+                            # value too (was None / missing).
+                            STATE[token]["trend_1h"] = _crt_trend_1h
                             _crt_result, _crt_plan, _crt_reason = scan_h4_crt_for_token(
                                 token, _c5m_closed, _c4h_closed,
                                 consumed=STATE[token]["consumed_h4_crt"],
-                                trend_1h=STATE[token].get("trend_1h", "NEUTRAL"),
+                                trend_1h=_crt_trend_1h,
                             )
                         if _crt_result is not None:
+                            # H-1 fix (audit cycle-8 2026-05-27): apply the
+                            # SAME risk gates the 5M_SWEEP path enforces at
+                            # crypto_alert.py:2435 (kill switches) and
+                            # crypto_alert.py:2742 (portfolio risk layer).
+                            # Pre-fix: CRT signals bypassed BOTH gates →
+                            # daily-loss circuit breaker, per-symbol post-loss
+                            # cooldown, MAX_OPEN_POSITIONS, MAX_PORTFOLIO_RISK_PCT,
+                            # and correlation guard all SILENTLY ignored for CRT.
+                            # Silent in PAPER today; DANGEROUS the moment
+                            # template_live_allowed=1 is ever flipped for CRT.
+                            # Note: scan_h4_crt_for_token already added the
+                            # zone's `key` to consumed (crypto_alert.py:1027)
+                            # before returning result — so if these gates
+                            # reject, the zone is ALREADY mitigated and won't
+                            # re-fire on subsequent cycles.
+                            _crt_ks_ok, _crt_ks_reason = check_kill_switches(token)
+                            if not _crt_ks_ok:
+                                print(f"[{datetime.now().strftime('%H:%M')}] {token} CRT KILL SWITCH — {_crt_ks_reason}")
+                                continue
+                            _crt_port_ok, _crt_port_reason, _crt_port_warnings = portfolio_layer.check(
+                                token, _crt_result["signal"], RISK_PER_TRADE_PCT,
+                            )
+                            if not _crt_port_ok:
+                                print(f"[{datetime.now().strftime('%H:%M')}] {token} CRT {_crt_result['signal']} BLOCKED — {_crt_port_reason}")
+                                continue
+                            for _w in _crt_port_warnings:
+                                print(f"[{datetime.now().strftime('%H:%M')}] [PORTFOLIO WARN] {token}: {_w}")
                             _crt_entry = _crt_result["entry_price"]
                             _crt_sig_id = save_signal(
                                 token, _crt_entry,

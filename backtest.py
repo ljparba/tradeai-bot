@@ -1446,12 +1446,22 @@ def run_backtest_token_h4_crt(token, c5m, c4h, c1h=None, config=None):
         # BUY needs BULL/STRONG_BULL/NEUTRAL; SELL needs BEAR/STRONG_BEAR/NEUTRAL.
         # Reuses _lookup_trend helper for live/BT parity. Skipped if c1h not
         # passed (defensive — preserves v1 behavior when caller omits c1h).
-        if CRT_REQUIRE_1H_TREND and c1h is not None:
+        # H-3 fix (audit cycle-8 2026-05-27): compute trend_1h UNCONDITIONALLY
+        # (when c1h is available) so the signal dict + OGD feature scores see
+        # the real trend value, not the hardcoded NEUTRAL stub. The gate-apply
+        # logic below remains conditional on CRT_REQUIRE_1H_TREND.
+        # Previously: trend_1h was only computed when the gate was active →
+        # bootstrap_from_backtest read "NEUTRAL" for every CRT signal → OGD's
+        # trend_strength feature got zero-input signal → broken attribution.
+        if c1h is not None:
             try:
                 _ind1h = precompute_tf(c1h)
                 _trend_1h = _lookup_trend(_ind1h, c5m["times"][entry_bar])
             except Exception:
                 _trend_1h = "NEUTRAL"
+        else:
+            _trend_1h = "NEUTRAL"
+        if CRT_REQUIRE_1H_TREND and c1h is not None:
             _bull_ok = _trend_1h in ("BULL", "STRONG_BULL", "NEUTRAL")
             _bear_ok = _trend_1h in ("BEAR", "STRONG_BEAR", "NEUTRAL")
             if (direction == "BUY" and not _bull_ok) or (direction == "SELL" and not _bear_ok):
@@ -1608,7 +1618,12 @@ def run_backtest_token_h4_crt(token, c5m, c4h, c1h=None, config=None):
             # CRT-specific provenance fields (map onto existing column schema)
             "sweep_type":      setup["type"],  # SSL_CRT or BSL_CRT
             "fvg_pct":         0.0,
-            "trend_1h":        "NEUTRAL",
+            # H-3 fix (audit cycle-8 2026-05-27): use computed _trend_1h
+            # (always computed above when c1h is available) instead of the
+            # hardcoded NEUTRAL stub. bootstrap_from_backtest reads this
+            # column to drive OGD's trend_strength feature; the stub broke
+            # adaptive learning attribution for all CRT signals.
+            "trend_1h":        _trend_1h,
             # H-CRT2-4 fix: surface the actual 4H bias that gated this signal
             "bias_4h":         bias_4h,
             "ifvg_present":    0,
@@ -3534,6 +3549,15 @@ def _compute_run_config_hash() -> str:
         "CRT_FVG_MIN_QUALITY":      os.environ.get("CRT_FVG_MIN_QUALITY", "HIGH").upper(),
         "CRT_MSS_MIN_QUALITY":      os.environ.get("CRT_MSS_MIN_QUALITY", "MEDIUM").upper(),
         "CRT_REQUIRE_1H_TREND":     os.environ.get("CRT_REQUIRE_1H_TREND", "0"),
+        # H-4 fix (audit cycle-8 2026-05-27): CRT_TP2_RR + CRT_TP3_RR are
+        # env-overridable AND in the explorer's CRT search space (TP2 1.2-2.5,
+        # TP3 1.8-3.5). Without them in config_hash, two trials differing
+        # ONLY on the TP cascade hash identically → DSR n_trials undercount
+        # (selection-bias correction under-applied → DSR overstated) AND
+        # Pareto archive silently overwrites entries. Same M-H ESCALATED /
+        # B-CRT-S2-C2 collision pattern.
+        "CRT_TP2_RR":               os.environ.get("CRT_TP2_RR", "1.5"),
+        "CRT_TP3_RR":               os.environ.get("CRT_TP3_RR", "2.0"),
         # Per-scanner kill-switch (2026-05-27): 5M_SWEEP toggle. Must
         # contribute to config_hash so honest DSR pool counts 5M-only,
         # CRT-only, and both-on configs as DISTINCT n_trials.
