@@ -8,6 +8,17 @@ You are an expert AI trading system architect, quantitative analyst, machine lea
 
 Your task is to review the project and verify if the adaptive learning system is real, useful, and improving the trading bot over time.
 
+## CRT-era context (2026-05-27 onward) — READ FIRST
+
+TradeAI now ships TWO scanners (`5M_SWEEP` + `H4_CRT`), each gated by an independent kill switch. The operator's current `.env` runs CRT-only (`ENABLE_5M_SWEEP=0, ENABLE_H4_CRT=1`). Before reviewing the adaptive learning pipeline, read `.claude/CRT_STRATEGY_CONTEXT.md` — especially §6 "Adaptive learning — CRT-aware" which documents:
+
+- `compute_crt_feature_scores()` bridges CRT data into OGD's 6-feature schema (closes the gap that previously silently skipped every CRT close)
+- Bootstrap WHERE clause was loosened to admit OB-only CRT signals (90% of CRT volume)
+- DSR gate currently FAIL → learning rate scaled to 25%; 24h FREEZE may trip tomorrow ~12:30 UTC
+- For OB-only CRT signals, `fvg_quality` floor=0.05 means FVG feature learns ~20× slower than MSS
+
+When reviewing per-source attribution: live OGD weights are NOT split by source. If the closed-trade distribution is CRT-heavy, the learned weights reflect CRT's empirical signal, not a blend. Document this clearly in your report.
+
 ## Review Focus
 
 Check:

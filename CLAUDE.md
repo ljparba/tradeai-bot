@@ -2,8 +2,8 @@
 
 **Project:** TradeAI v13 — ICT (Inner Circle Trader) Crypto Signal Bot
 **Owner:** Operator (Cebu, Philippines)
-**Current state:** PAPER mode running 24/7 on Contabo VPS Singapore
-**Last updated:** 2026-05-24
+**Current state:** PAPER mode running 24/7 on Contabo VPS Singapore — **CRT-only strategy active**
+**Last updated:** 2026-05-27
 
 This file is the canonical project context for any Claude Code session opening this repo. Read it FIRST before making any changes.
 
@@ -11,28 +11,46 @@ This file is the canonical project context for any Claude Code session opening t
 
 ## 1. What this bot does
 
-A directional crypto signal bot using ICT methodology:
-- Detects liquidity sweeps on 5M candles across 10 tokens (BTC, ETH, XRP, HBAR, AVAX, LINK, BNB, ADA, POL, TON)
-- Confirms via MSS (Market Structure Shift) + FVG (Fair Value Gap)
+A directional crypto signal bot using ICT methodology across 10 tokens (BTC, ETH, XRP, HBAR, AVAX, LINK, BNB, ADA, POL, TON). **Two scanners run in parallel by default**, gated by independent kill switches:
+
+- **5M_SWEEP scanner** (`ENABLE_5M_SWEEP`, default ON) — the canonical Run-168 baseline: detects liquidity sweeps on 5M candles, confirms via MSS + FVG. Historic high-quality / low-frequency profile (~2-3 signals/month, 82.8% WR, 1.04 avg R per signal in Run #139).
+- **H4_CRT scanner** (`ENABLE_H4_CRT`, default OFF) — the new Candle Range Theory engine: H4 candle range sweep + 5M MSS confirmation + (FVG OR OB) confluence + Wyckoff phase tagging. Higher-frequency / medium-quality profile (~15-17 signals/month, 55-60% WR, 0.40 avg R per signal in Run #139).
+
+Each signal carries `source='5M_SWEEP'` or `source='H4_CRT'` for per-scanner attribution. CRT signals additionally tag `entry_type='H4_CRT_<FVG|OB>_<ACCUMULATION|DISTRIBUTION|MARKUP|MARKDOWN|TRANSITION>'`.
+
 - Sends Telegram alerts to operator with entry, SL, TPs
 - **Operator manually executes** — bot is signal-only, no auto-trading
-- Has adaptive learning (OGD per-token weights), honest validation (CPCV + DSR), and autonomous R&D explorer (Optuna)
+- Has adaptive learning (OGD per-token weights, source-aware after 2026-05-27), honest validation (CPCV + DSR), and autonomous R&D explorer (Optuna — search space tunes 5M_SWEEP params only, CRT params manual-calibrated)
 
 ---
 
-## 2. Current operational state (as of 2026-05-24)
+## 2. Current operational state (as of 2026-05-27 — CRT-only paper soak)
 
 ### Execution mode
 - `EXECUTION_MODE=PAPER` — signals only, no real trading
 - LIVE switch requires: `EXECUTION_MODE=LIVE` + `LIVE_MODE_CONFIRMED=YES` env vars + `YOUR_CAPITAL` set
 - **LIVE never auto-flips** — always operator-deliberate
 
-### Canonical baseline
-- **Run-168** = current Pareto-optimal baseline
-- Stacked promotions: F-8 (`bias_4h_gate: strict→none`) + P-2b (`ICT_SWEEP_LOOKBACK: 30→20`) + TP-2-b (`TREND_1H_GATE: loose→strict`)
-- Metrics: n=43, WR=79.1%, CPCV mean=79.11%, CPCV std=5.40%, Sharpe=0.933, DSR=100% [n_trials=27]
-- Snapshot: `data/snapshots/signals_baseline_run168_20260524_0826_tp2b_promoted_honest.db`
-- Honest cross-config `sr_trial_std=0.0836` from 24 distinct configs
+### Active strategy mode (operator's `.env`)
+```
+ENABLE_H4_CRT=1                # CRT scanner ON  ← active signal source
+ENABLE_5M_SWEEP=0              # 5M_SWEEP scanner OFF  ← legacy baseline disabled
+CRT_TP1_MODE=min_1r            # TP1 = max(C1 opposite, entry ± 1R) — uncaps profit on tight C1
+LIVE_BIAS_4H_GATE=strict       # 4H bias must align with signal direction
+BACKTEST_BIAS_4H_GATE=strict
+WYCKOFF_PHASE_FILTER=off       # default off — strict mode empirically hurt WR (-5.22pp on 365d)
+```
+
+### Canonical baselines (BOTH preserved, each for its scanner)
+- **Run-168** (5M_SWEEP canonical, currently DISABLED) — historic Pareto-optimal: F-8 (`bias_4h: strict→none`) + P-2b (`ICT_SWEEP_LOOKBACK: 30→20`) + TP-2-b (`TREND_1H_GATE: loose→strict`). Metrics: n=43, WR=79.1%, CPCV mean=79.11%, DSR=100% [n_trials=27]. Snapshot: `data/snapshots/signals_baseline_run168_20260524_0826_tp2b_promoted_honest.db`.
+- **Run #139 / #144 / #145** (CRT shipping, currently ACTIVE) — Test A config (bias_4h=strict, CRT_TP1_MODE=min_1r, Wyckoff=off). Per-source metrics: H4_CRT n=181-416, WR=54-60%, avg_R=0.33-0.40, sum_R per year ~135R. The CRT side does NOT yet have a "promoted baseline" — paper soak in progress.
+
+### Empirical findings (2026-05-27 — locked in code)
+- **TP1=dynamic (C1 opposite extreme) caps profit:** 52.5% of CRT setups had TP1 < 1R distance. `CRT_TP1_MODE=min_1r` (max of C1 opposite and entry±1R) un-rejects ~235 setups via economics gate without quality loss → **+62% total R/year over dynamic mode**.
+- **Wyckoff strict filter HURTS crypto:** Run #140 Test B = -5.22pp WR vs Run #139 Test A. The article's gold/forex calibration doesn't translate to 10-token crypto baseline. Filter locked at `off`; Wyckoff phase is still TAGGED in `entry_type` for OGD per-phase learning.
+- **CRT quality gates HURT:** `CRT_APPLY_QUALITY_GATES=1` cost -21% total R in isolated test. Locked OFF.
+
+### Honest cross-config `sr_trial_std=0.0836` from 24 distinct configs (5M_SWEEP era — pre-CRT). New CRT runs use distinct config_hashes so DSR pool remains uncorrupted; per-scanner-mode std available via `compute_cross_config_sr_std.py --scanner-mode {5m_only|crt_only|both_on}`.
 
 ### Deployment
 - **VPS:** Contabo Cloud VPS 10 Singapore (4 vCPU, 8GB RAM, 75GB NVMe NVMe)
@@ -147,22 +165,29 @@ After every auto-promotion, `compute_cross_config_sr_std.py` runs to refresh the
 
 ---
 
-## 7. Strategy parameter state (canonical Run-168)
+## 7. Strategy parameter state
 
-### Active gates
+### Scanner kill switches (2026-05-27)
 ```python
 # config.py
-LIVE_BIAS_4H_GATE = "none"           # F-8
-LIVE_TREND_1H_GATE = "strict"        # TP-2-b
+ENABLE_5M_SWEEP: bool = _env_bool("ENABLE_5M_SWEEP", True)  # default ON for back-compat
+                                                              # operator's .env: 0 (CRT-only mode)
+# crt_engine.py
+ENABLE_H4_CRT  = _env_int("ENABLE_H4_CRT", 0) == 1   # default OFF
+                                                       # operator's .env: 1 (CRT active)
+```
+
+### 5M_SWEEP scanner params (Run-168 baseline — currently DISABLED)
+```python
+# config.py
+LIVE_BIAS_4H_GATE = "none"           # F-8 promotion
+LIVE_TREND_1H_GATE = "strict"        # TP-2-b promotion
 LIVE_DEALING_RANGE_GATE = True       # DR-1 known structural (LIVE=True / BT=False)
 LIVE_MSS_MIN_QUALITY = "LOW"
 LIVE_FVG_MIN_QUALITY = "HIGH"        # binding gate
 LIVE_SMT_GATE = False
-```
 
-### ICT constants
-```python
-# ict_engine.py (now env-overridable per Phase 1)
+# ict_engine.py (env-overridable)
 ICT_SWING_N = 2                                  # LOCKED — anti-pattern at ≥3
 ICT_SWEEP_LOOKBACK = _env_int("ICT_SWEEP_LOOKBACK", 20)   # P-2b promoted
 ICT_MSS_HORIZON = _env_int("ICT_MSS_HORIZON", 30)
@@ -171,19 +196,52 @@ DEALING_RANGE_LOOKBACK = _env_int("DEALING_RANGE_LOOKBACK", 50)
 ICT_MIN_RR_GATE = 1.5                            # LOCKED — anti-pattern at ≥2.0
 ```
 
+Operator's current `.env` overrides `LIVE_BIAS_4H_GATE=strict` + `BACKTEST_BIAS_4H_GATE=strict` (applies to BOTH scanners).
+
+### H4_CRT scanner params (CRT shipping config — currently ACTIVE)
+```python
+# crt_engine.py — all env-overridable
+H4_CRT_C2_LOOKBACK = _env_int("H4_CRT_C2_LOOKBACK", 6)         # 6 H4 bars = ~24h
+H4_CRT_MSS_HORIZON = _env_int("H4_CRT_MSS_HORIZON", 30)        # 5M bars to detect MSS in C2 window
+H4_CRT_OB_SCAN_LOOKBACK = _env_int("H4_CRT_OB_SCAN_LOOKBACK", 20)
+H4_CRT_VALIDATION_SCHOOL = "flexible"  # only "flexible" implemented; "strict" dormant
+H4_CRT_DISABLED_TOKENS = ""            # blacklist (none currently)
+
+CRT_TP1_MODE = "min_1r"   # operator override; default "dynamic"
+                          #   dynamic  — TP1 = C1 opposite extreme (article's prescription)
+                          #   fixed_1r — TP1 = entry ± 1R (uncap above C1)
+                          #   min_1r   — TP1 = max(C1 opposite, entry ± 1R)  ← SHIPPING
+CRT_TP2_RR = 1.5          # TP2 = 1.5R from entry (fixed)
+CRT_TP3_RR = 2.0          # TP3 = 2.0R from entry (fixed)
+CRT_FORWARD_BARS = 576    # 48h outcome window (vs 5M_SWEEP's 288 = 24h)
+
+CRT_APPLY_QUALITY_GATES = 0   # LOCKED OFF — empirically harmful (-21% R)
+CRT_REQUIRE_1H_TREND = 0      # default off; turns on the 1H trend gate for CRT path
+WYCKOFF_PHASE_FILTER = "off"  # LOCKED off — strict mode empirically hurt WR (-5.22pp)
+                              #   off    — context tagged in entry_type, no gating
+                              #   loose  — reject only TRANSITION phase
+                              #   strict — require direction-aligned phase (BUY → ACCUMULATION/MARKUP, etc.)
+```
+
 ### Confirmed anti-patterns (documented; do not re-test)
+**5M_SWEEP-era (legacy):**
 - `ICT_SWING_N ≥ 3` → −3.9pp WR / −0.07 Sharpe (Cycle 1b P-1, 1c TP-5c′)
 - `ICT_MIN_RR_GATE ≥ 2.0` → catastrophic (n=10, WR=50%) (Cycle 1b)
 - `BACKTEST_FVG_MIN_QUALITY = LOW/MEDIUM` → coin-flip WR (~44%) (TP-1 grid)
-- `BACKTEST_BIAS_4H_GATE = strict` (at 365d) → high variance (n=37, std=15.6%) (D-2 reversal)
+- `BACKTEST_BIAS_4H_GATE = strict` (at 365d, 5M-sweep only) → high variance (n=37, std=15.6%) (D-2 reversal). Note: with CRT also enabled, bias=strict is PREFERRED (Run #139).
 - `BACKTEST_DAYS = 730` → averages 2024 dead-zone (Cycle Z; never use)
 - Adding SOL/DOT/NEAR/SUI/LTC tokens → chronic underperformers (documented)
+
+**CRT-era (2026-05-27):**
+- `WYCKOFF_PHASE_FILTER = strict` → −5.22pp WR (Run #140 Test B). Locked off in code via explorer ANTI_PATTERN_LOCKS + operator's `.env`.
+- `CRT_APPLY_QUALITY_GATES = 1` → −21% total R/year (3-run isolation test). Locked off via same mechanism.
 
 ### Confirmed inert at current config (don't waste cycles testing)
 - `ICT_MSS_HORIZON` (30 vs 15) — FVG=HIGH gate dominates
 - `ICT_FVG_MIN_GAP` (0.001 vs 0.0015) — FVG=HIGH gate dominates
 - `ICT_EQH_TOLERANCE` (not in config_hash; bonus inert)
 - `ICT_FVG_SIZE_BONUS_THRESHOLD` (not in config_hash; bonus inert)
+- `H4_CRT_VALIDATION_SCHOOL` (`strict` not implemented; only `flexible` honored)
 
 ---
 
@@ -333,6 +391,14 @@ python3 scripts/snapshot_baseline.py --restore <snapshot_filename>
 
 | Date | Event |
 |------|-------|
+| 2026-05-27 | **CRT-only operational mode shipped.** ENABLE_5M_SWEEP=0 + ENABLE_H4_CRT=1 + CRT_TP1_MODE=min_1r. Live bot running CRT exclusively in PAPER. |
+| 2026-05-27 | CRT Pro v1.1: TP1 modes (dynamic/fixed_1r/min_1r), CRT_APPLY_QUALITY_GATES, CRT_REQUIRE_1H_TREND. Empirical findings locked. Commit `6c9137e`. |
+| 2026-05-27 | Adaptive learning gap closed: `compute_crt_feature_scores()` bridges CRT data into OGD's 6-feature schema. Bootstrap WHERE clause loosened to admit OB-only CRT rows (was excluding 90% of CRT signals). |
+| 2026-05-27 | Tracker dashboard CRT-aware: by_source panel, source mix tile, config_hash chips, CRT card layout (badge + Confluence + Phase), blend warning banner on Honest Metrics. |
+| 2026-05-27 | Explorer audit fixes: trial subprocesses pin scanner toggles (no longer inherit operator's CRT-only .env); runtime_env captured in Pareto + promotion log; CRT_ANTI_PATTERN_LOCKS for WYCKOFF=strict + QUALITY_GATES=1; crt_engine.py in code-drift CODE_FILES. |
+| 2026-05-27 | CRITICAL bomb defused: `LIVE_LIQUID_HOURS` ImportError at crypto_alert.py:809 would have crash-looped the bot on the FIRST CRT signal. Replaced with `LIVE_CONFIG.liquid_hours`. Caught by config audit before any CRT signal fired. |
+| 2026-05-27 | CRT v2 Wyckoff phase detector shipped — DEFAULT off (Test B showed strict mode hurts crypto WR by -5.22pp). Commit `f0bb99f`. |
+| 2026-05-27 | CRT v1 Session 3 (live integration), Session 2 (backtest), Session 1 (detection engine). 3 commits + 6 audit-fix commits across the day. |
 | 2026-05-24 | VPS deployment (Contabo Singapore), GitHub repo setup, systemd services, watchdog enabled |
 | 2026-05-24 | FAQ modal system: 7 detailed FAQ pages, "Learn more" buttons on every tab |
 | 2026-05-24 | Autonomous Explorer Phases 1-4 shipped + audited + 6 polish fixes + 2 critical bug fixes |
@@ -392,6 +458,9 @@ If you're a new Claude session opening this repo and the operator says "continue
 8. Bypass the honest metrics pipeline (CPCV / DSR cross-config)
 9. Re-introduce within-fold sr_trial_std proxy (use honest cross-config std only)
 10. Delete the `data/snapshots/` folder
+11. **Re-enable CRT anti-patterns** (2026-05-27): `WYCKOFF_PHASE_FILTER=strict` or `CRT_APPLY_QUALITY_GATES=1`. Both empirically harmful, locked off via explorer `CRT_ANTI_PATTERN_LOCKS`.
+12. **Flip ENABLE_5M_SWEEP=1 while in CRT-only paper soak** without operator approval. Operator's current soak attribution requires CRT-only signals. A scanner toggle mid-soak invalidates the per-source paper trade record.
+13. **Set `CRT_TP1_MODE=fixed_1r` on the operator's live `.env`** without re-running the 3-mode comparison. `min_1r` was the empirical winner; `fixed_1r` is untested at this scale. The explorer has no lock here — it's an operator-side discipline.
 
 ### 13a. Autonomous explorer protection (CRITICAL)
 
