@@ -2884,6 +2884,29 @@ async function loadStats(){
   }catch(e){showErr('Failed to load stats: '+e.message)}
 }
 
+// Timezone helper (2026-05-28 operator request): the bot writes UTC timestamps
+// as "YYYY-MM-DD HH:MM:SS" with NO timezone marker. Reading them raw in the
+// dashboard misled the operator into thinking 17:02 UTC was 5pm local time
+// when it's actually 01:02 AM PH (UTC+8). This helper parses the string as
+// explicit UTC (appends 'Z') then formats in browser-local time so every
+// signal/backtest row shows the operator's actual local timezone.
+//
+// Format: "MM-DD HH:MM" (short — matches the existing slice(0,16) length but
+// in 12-char form). Returns '—' on empty/invalid input.
+function _localTime(utcStr){
+  if(!utcStr) return '—';
+  // Append 'Z' so Date() parses as UTC; SQL format is "YYYY-MM-DD HH:MM:SS"
+  // (space separator). Replace ' ' with 'T' for ISO-8601, then append 'Z'.
+  let s = String(utcStr).replace(' ', 'T');
+  if(!s.endsWith('Z') && !s.includes('+') && !s.match(/-\d\d:\d\d$/)) s += 'Z';
+  const d = new Date(s);
+  if(isNaN(d.getTime())) return String(utcStr).slice(0,16); // fallback
+  // Localized short: "May 28, 01:02" style
+  const mo  = d.toLocaleString('en-US', {month:'short', day:'2-digit'});
+  const hm  = d.toLocaleString('en-US', {hour:'2-digit', minute:'2-digit', hour12:false});
+  return mo + ' ' + hm;
+}
+
 function trendClass(t){
   if(!t) return 'neutral';
   const l=t.toLowerCase();
@@ -3125,7 +3148,7 @@ function renderTable(){
     const segs=Array.from({length:5},(_,i)=>
       '<div class="cseg'+(i<Math.round(conf/2)?' on':'')+'"></div>').join('');
     const sigC=r.signal==='BUY'?'var(--green)':'var(--red)';
-    const ts=r.timestamp?r.timestamp.slice(0,16):'—';
+    const ts=_localTime(r.timestamp);  // UTC → browser-local (2026-05-28 fix)
     const t4h=r.trend_4h||'—'; const t1h=r.trend_1h||'—'; const t5m=r.trend_5m||'—';
     return '<tr>'
       +'<td style="color:var(--muted);font-size:.75rem">'+r.id+'</td>'
@@ -3435,7 +3458,7 @@ async function loadBacktest(){
         +'<div class="bt-meta-val" style="font-family:var(--mono);font-size:.78rem;color:var(--muted)" title="config_hash full: '+rr.config_hash+'">'+_ch8+'</div></div>'
       : '';
     document.getElementById('btMetaBar').innerHTML=
-      '<div class="bt-meta-item"><div class="bt-meta-label">Run Date</div><div class="bt-meta-val" style="font-size:.95rem;color:var(--muted)">'+rr.run_date.slice(0,16)+'</div></div>'
+      '<div class="bt-meta-item"><div class="bt-meta-label">Run Date</div><div class="bt-meta-val" style="font-size:.95rem;color:var(--muted)">'+_localTime(rr.run_date)+'</div></div>'
       +'<div class="bt-meta-item"><div class="bt-meta-label">Period</div><div class="bt-meta-val a">'+rr.days+'d</div></div>'
       +tfHtml
       +'<div class="bt-meta-item"><div class="bt-meta-label">Total Signals</div><div class="bt-meta-val a">'+rr.total_signals+'</div></div>'
@@ -3851,7 +3874,7 @@ function _renderBtHistory(){
       ? '<span class="hist-stat" style="color:var(--muted);font-family:var(--mono);font-size:.7rem" title="config_hash: '+r.config_hash+'">'+_ch8+'</span>'
       : '';
     return '<div class="hist-run">'
-    +'<div class="hist-run-date">'+r.run_date.slice(0,16)+'</div>'
+    +'<div class="hist-run-date">'+_localTime(r.run_date)+'</div>'
     +'<div class="hist-run-stats">'
     +'<span class="hist-stat">'+r.total_signals+' signals</span>'
     +'<span class="hist-stat" style="color:var(--green)">WR: '+r.overall_wr+'%</span>'
