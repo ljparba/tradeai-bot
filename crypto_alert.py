@@ -3197,6 +3197,16 @@ def send_signal_msg(token,price,ch24,result,plan,sig_id,regime):
             f"TP3    {plan['tp3']:>12.5f}   {plan['tp3_pct']:+6.2f}%   R:R {plan['rr3']:>4}   close 20%"
             "</pre>\n"
         )
+        # ── Execution discipline (2026-05-28 operator decision: Option 1 — limit orders) ──
+        # The bot's `entry_price` is the 5M candle open from the MSS confirmation
+        # bar — which may be 5-15 min OLD by the time this alert fires. A market
+        # order at the alert moment fills at a worse price (slippage). Discipline:
+        # place a LIMIT order at the bot's entry; if price doesn't retrace within
+        # 30 min, cancel + skip (the move has fully developed and entry is unsafe).
+        msg += (
+            f"\n<b>Execution:</b> LIMIT {result.get('signal','?')} @ "
+            f"${price:.4f}  -  cancel if not filled in 30 min\n"
+        )
 
     # ── At-a-glance summary line ──
     msg += (
