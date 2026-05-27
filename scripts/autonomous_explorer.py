@@ -78,7 +78,12 @@ PROMOTION_LOG   = os.path.join(_ROOT, "data", "promotion_log.json")
 PIN_PATH        = os.path.join(_ROOT, "data", "baseline_pin.json")
 
 # Files whose hash defines the "code state" — if any change mid-session, abort
-CODE_FILES = ["config.py", "backtest.py", "ict_engine.py"]
+# Fix G-2 (explorer audit 2026-05-27): crt_engine.py is now part of the code
+# surface that affects backtest signals. Without this, the operator could edit
+# `crt_engine.py` mid-session (e.g., tune H4_CRT_C2_LOOKBACK or adjust the
+# Wyckoff detector) and the code-drift guard would NOT trip — silently
+# polluting subsequent trials with code that doesn't match earlier trials.
+CODE_FILES = ["config.py", "backtest.py", "ict_engine.py", "crt_engine.py"]
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS trials (
@@ -159,6 +164,21 @@ ANTI_PATTERN_LOCKS = {
     "ICT_MIN_RR_GATE":  1.5,  # >=2.0 catastrophic per Cycle 1b
 }
 
+# Fix G-1 (explorer audit 2026-05-27): CRT-side anti-pattern locks. These are
+# env-overridable knobs (unlike ANTI_PATTERN_LOCKS which assert on source-code
+# constants) — but the operator's empirical findings from 2026-05-27 prove
+# certain values are net-harmful. Locked here so an explorer session cannot
+# accidentally inherit them via the operator's .env. Values are the set of
+# ALLOWED values; anything else → session aborts at startup.
+CRT_ANTI_PATTERN_LOCKS = {
+    # 2026-05-27 Test B: strict Wyckoff filter reduced CRT WR by -5.22pp on
+    # the canonical 365-day window. "off" + "loose" remain searchable.
+    "WYCKOFF_PHASE_FILTER":     ("off", "loose"),
+    # 2026-05-27 CRT Pro empirical: quality gates ON cost -21% total R vs OFF
+    # at the same bias setting. Locked to "0" (OFF) until re-tested.
+    "CRT_APPLY_QUALITY_GATES":  ("0",),
+}
+
 
 def _assert_anti_pattern_locks() -> None:
     """Verify that the anti-patterns documented in ANTI_PATTERN_LOCKS are
@@ -185,6 +205,21 @@ def _assert_anti_pattern_locks() -> None:
                 f"anti-pattern violation: env var {k}={os.environ[k]} is set. "
                 f"This param is anti-pattern-locked and must not be env-overridable. "
                 f"Unset the env var before starting an explorer session."
+            )
+    # Fix G-1 (explorer audit 2026-05-27): also assert CRT-side env knobs are
+    # within the allowed set per today's empirical findings. Operator can
+    # override the lock by explicitly editing CRT_ANTI_PATTERN_LOCKS above
+    # AND re-testing the previously-rejected value on the canonical window.
+    for env_key, allowed in CRT_ANTI_PATTERN_LOCKS.items():
+        val = os.environ.get(env_key)
+        if val is None:
+            continue  # not set → safe (uses module default)
+        if val not in allowed:
+            raise RuntimeError(
+                f"CRT anti-pattern violation: env var {env_key}={val!r} is "
+                f"NOT in the allowed set {allowed}. This value was empirically "
+                f"rejected on 2026-05-27. Unset the env var (or set to an "
+                f"allowed value) before starting the explorer."
             )
 
 # Anti-overfit guard thresholds
@@ -371,6 +406,13 @@ def _precache_warm(cache_minutes_max: int = 30) -> None:
     # Stale-verdict opt-out (audit 2026-05-27): pre-cache backtest must also
     # not overwrite the canonical verdict — see _params_to_env for rationale.
     env["WRITE_CPCV_VERDICT"] = "0"
+    # Fix B-3 (explorer audit 2026-05-27): pin scanner toggles identically
+    # to trial subprocesses (Fix B-1) so the pre-cache warm reflects the
+    # exact env the actual trials will run under — cache hits stay valid
+    # across the session and the warm-run cost reflects the right scanner
+    # mix (not whatever the operator's paper-soak `.env` happens to have).
+    env["ENABLE_5M_SWEEP"] = os.environ.get("EXPLORER_ENABLE_5M_SWEEP", "1")
+    env["ENABLE_H4_CRT"]   = os.environ.get("EXPLORER_ENABLE_H4_CRT",   "0")
     started = time.time()
     # Snapshot before so we only clean OUR precache row (FIX C1)
     max_id_before = 0
@@ -435,6 +477,22 @@ def _params_to_env(params: dict) -> dict:
     # the adaptive engine's OGD learning rate by 4× on the next live signal
     # close. backtest.py honors WRITE_CPCV_VERDICT=0 to skip the verdict write.
     env["WRITE_CPCV_VERDICT"] = "0"
+    # Fix B-1 (explorer audit 2026-05-27): pin the per-scanner kill switches
+    # so trial subprocesses don't silently inherit the operator's paper-soak
+    # mode. Without this, an operator running `.env` with ENABLE_5M_SWEEP=0
+    # for CRT-only paper soak would launch explorer trials where ALL 8
+    # search-space params (ICT_SWEEP_LOOKBACK, BACKTEST_FVG_MIN_QUALITY, etc.)
+    # are no-ops on the disabled 5M_SWEEP scanner, while CRT-only signal
+    # metrics get misattributed to those untouched params → polluted Pareto
+    # archive + wasted compute.
+    #
+    # Defaults: 5M_SWEEP=ON (the search space targets it), H4_CRT=OFF
+    # (current explorer doesn't tune CRT params; running it without
+    # attribution would conflate scanners). Operator can override per
+    # session via EXPLORER_ENABLE_5M_SWEEP / EXPLORER_ENABLE_H4_CRT env vars
+    # (typically set in .env.explorer) when running a CRT-aware experiment.
+    env["ENABLE_5M_SWEEP"] = os.environ.get("EXPLORER_ENABLE_5M_SWEEP", "1")
+    env["ENABLE_H4_CRT"]   = os.environ.get("EXPLORER_ENABLE_H4_CRT",   "0")
     return env
 
 
@@ -660,6 +718,44 @@ def _read_pareto_archive() -> list:
         return []
 
 
+def _runtime_env_snapshot() -> dict:
+    """Snapshot env vars that affect signal output but live OUTSIDE the Optuna
+    search space — fixes finding E-1 (Pareto archive schema-blind to CRT).
+
+    Without this, an archive entry records the 8 tuned Optuna params but NOT
+    the scanner toggles or CRT knobs that actually shaped the run. A future
+    operator inspecting the archive cannot reproduce the entry from `params`
+    alone. With this, every Pareto entry + promotion-log entry self-documents
+    the full strategy fingerprint.
+
+    The set must match `backtest._compute_run_config_hash()` so the
+    `config_hash` field stays the canonical reproducibility key — this dict
+    is the human-readable expansion.
+    """
+    keys = [
+        # Scanner kill switches (2026-05-27)
+        "ENABLE_5M_SWEEP", "ENABLE_H4_CRT",
+        # CRT engine params (Session 2 + v2 + Pro)
+        "H4_CRT_DISABLED_TOKENS", "H4_CRT_C2_LOOKBACK", "H4_CRT_MSS_HORIZON",
+        "H4_CRT_OB_SCAN_LOOKBACK", "H4_CRT_VALIDATION_SCHOOL",
+        "CRT_TP1_MODE", "CRT_TP2_RR", "CRT_TP3_RR", "CRT_FORWARD_BARS",
+        "CRT_APPLY_QUALITY_GATES", "CRT_FVG_MIN_QUALITY", "CRT_MSS_MIN_QUALITY",
+        "CRT_REQUIRE_1H_TREND",
+        # Wyckoff v2
+        "WYCKOFF_PHASE_FILTER",
+    ]
+    # Conservative defaults — match what _compute_run_config_hash reads.
+    defaults = {
+        "ENABLE_5M_SWEEP": "1",
+        "ENABLE_H4_CRT":   "0",
+        "CRT_TP1_MODE":    "dynamic",
+        "CRT_APPLY_QUALITY_GATES": "0",
+        "CRT_REQUIRE_1H_TREND":    "0",
+        "WYCKOFF_PHASE_FILTER":    "off",
+    }
+    return {k: os.environ.get(k, defaults.get(k, "")) for k in keys}
+
+
 def _update_pareto_archive(trial_summary: dict, max_size: int = 10) -> None:
     """Maintain top-K non-dominated configs across (cpcv_mean, -cpcv_std, sharpe, n).
 
@@ -841,6 +937,12 @@ def _auto_promote(study_name: str, trial_no: int, params: dict, m: dict, m2: dic
                              ("cpcv_mean", "cpcv_std", "sharpe", "dsr", "n")},
         "metrics_run2":    {k: m2.get(k) for k in
                              ("cpcv_mean", "cpcv_std", "sharpe", "dsr", "n")},
+        # Fix E-1 (explorer audit 2026-05-27): capture full strategy
+        # fingerprint so a promotion is reproducible without inspecting
+        # the operator's `.env` at promote-time. Includes scanner toggles
+        # + CRT knobs that aren't in `params` but shape the run.
+        "runtime_env":     _runtime_env_snapshot(),
+        "config_hash":     m.get("config_hash"),
     })
 
     # Refresh honest cross-config std so the next trial's DSR pool includes
@@ -962,6 +1064,11 @@ def _objective_factory(study_name: str, guard: _GuardState, sess: dict):
                     "sharpe":      m.get("sharpe"),
                     "dsr":         m.get("dsr"),
                     "captured_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    # Fix E-1 (explorer audit 2026-05-27): record the env vars
+                    # that affect signals but live outside `params` (scanner
+                    # toggles, CRT knobs). Reproducibility key + audit trail.
+                    "runtime_env": _runtime_env_snapshot(),
+                    "config_hash": m.get("config_hash"),
                 })
 
                 promo_result = _try_auto_promote(study_name, trial.number, params, m)

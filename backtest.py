@@ -104,6 +104,8 @@ from crypto_alert import (
     STRATEGY_VERSION,
     # Phase 5A: safety layer constants for backtest simulation
     EXECUTION_MODE,
+    # per-scanner kill switches (2026-05-27)
+    ENABLE_5M_SWEEP,
     TEMPLATE_MIN_SAMPLE, CIRCUIT_BREAKER_LOOKBACK, CIRCUIT_BREAKER_MIN_WR,
     TIER_DAILY_LIVE_CAPS, BLOCK_RANGING_LIVE, BLOCK_RANGING_TEMPLATES,
 )
@@ -132,6 +134,8 @@ from crt_engine import (
     crt_trade_rejection_reason,
     # v2 Wyckoff phase context filter (Option KK, audit cycle-7 2026-05-27)
     detect_wyckoff_context, is_crt_phase_aligned, WYCKOFF_PHASE_FILTER,
+    # CRT Pro v1.1 — TP1 mode + 1H trend gate (2026-05-27)
+    adjust_crt_tp1, CRT_TP1_MODE, CRT_REQUIRE_1H_TREND,
 )
 # H-CRT2-1 fix (Session 2 Option B audit 2026-05-27): import SL buffer
 # directly from ict_engine (crypto_alert.py doesn't re-export it).
@@ -1292,7 +1296,7 @@ def run_backtest_token(token, c5m, c1h, c4h, btc_c1h=None, btc_c5m=None, config=
 # ══════════════════════════════════════════════════════════
 # CRT v1 — PARALLEL H4 SCANNER (Session 2)
 # ══════════════════════════════════════════════════════════
-def run_backtest_token_h4_crt(token, c5m, c4h, config=None):
+def run_backtest_token_h4_crt(token, c5m, c4h, c1h=None, config=None):
     """Simulate H4 CRT signals across the historical timeline (Session 2 + Option B fixes).
 
     Parallel to run_backtest_token() — uses the SAME 5M/4H candle cache,
@@ -1437,6 +1441,23 @@ def run_backtest_token_h4_crt(token, c5m, c4h, config=None):
             rej["crt_bias_gate_blocked"] = rej.get("crt_bias_gate_blocked", 0) + 1
             continue
 
+        # CRT Pro v1.1 — optional 1H trend gate (2026-05-27).
+        # When CRT_REQUIRE_1H_TREND=1, mirror 5M_SWEEP's trend_1h_gate logic:
+        # BUY needs BULL/STRONG_BULL/NEUTRAL; SELL needs BEAR/STRONG_BEAR/NEUTRAL.
+        # Reuses _lookup_trend helper for live/BT parity. Skipped if c1h not
+        # passed (defensive — preserves v1 behavior when caller omits c1h).
+        if CRT_REQUIRE_1H_TREND and c1h is not None:
+            try:
+                _ind1h = precompute_tf(c1h)
+                _trend_1h = _lookup_trend(_ind1h, c5m["times"][entry_bar])
+            except Exception:
+                _trend_1h = "NEUTRAL"
+            _bull_ok = _trend_1h in ("BULL", "STRONG_BULL", "NEUTRAL")
+            _bear_ok = _trend_1h in ("BEAR", "STRONG_BEAR", "NEUTRAL")
+            if (direction == "BUY" and not _bull_ok) or (direction == "SELL" and not _bear_ok):
+                rej["crt_1h_trend_blocked"] = rej.get("crt_1h_trend_blocked", 0) + 1
+                continue
+
         # v2 Wyckoff phase filter (Option KK, audit cycle-7 2026-05-27).
         # Default mode = "off" → no filter, preserves Test A behavior.
         # When mode == "strict" or "loose", computes the macro Wyckoff
@@ -1460,7 +1481,16 @@ def run_backtest_token_h4_crt(token, c5m, c4h, config=None):
             sl_price = raw_wick * (1.0 - ICT_SL_BUFFER_PCT)
         else:
             sl_price = raw_wick * (1.0 + ICT_SL_BUFFER_PCT)
-        tp1_price = setup["tp1"]
+        # CRT Pro TP1 override (2026-05-27): apply CRT_TP1_MODE policy.
+        # mode=dynamic (default) preserves the C1 opposite extreme behavior.
+        # fixed_1r / min_1r empirically test if uncapping TP1 lifts avg_R.
+        tp1_price = adjust_crt_tp1(
+            direction=direction,
+            entry_price=entry_price,
+            sl_price=sl_price,
+            c1_high=setup["c1_high"],
+            c1_low=setup["c1_low"],
+        )
         # H-3: TP2/TP3 RR-cascade derived from named module constants
         risk_dist = abs(entry_price - sl_price)
         if risk_dist <= 0:
@@ -2292,6 +2322,11 @@ def build_summary(all_signals):
     by_sweep   = defaultdict(list)
     by_trend   = defaultdict(list)
     by_session = defaultdict(list)
+    # CRT v1 (2026-05-27): per-source breakdown so the tracker dashboard
+    # can surface the 5M_SWEEP / H4_CRT mix on mixed-source backtest runs.
+    # Without this split, the headline WR silently blends two strategies
+    # (e.g. Run-143 = 29 SWEEP @ 82% + 285 CRT @ 53% = headline 55.7%).
+    by_source  = defaultdict(list)
     for s in all_signals:
         by_token[s["token"]].append(s)
         by_regime[s["regime"]].append(s)
@@ -2300,6 +2335,7 @@ def build_summary(all_signals):
         by_sweep[s.get("sweep_type", "?")].append(s)
         by_trend[s.get("trend_1h", "NEUTRAL")].append(s)
         by_session[s.get("session", "OVERNIGHT")].append(s)
+        by_source[s.get("source", "5M_SWEEP")].append(s)
 
     def tok_entry(sigs):
         total   = len(sigs)
@@ -2328,6 +2364,9 @@ def build_summary(all_signals):
             "wr":      _wr(sigs),
         }
 
+    # by_source uses tok_entry's richer shape (signals, wins, partial, losses,
+    # expired, wr, avg_net_rr, net_expectancy, avg_conf) so the Backtest tab
+    # can render per-source net_expectancy + avg_rr alongside the headline mix.
     return {
         "by_token":   {k: tok_entry(v)         for k, v in by_token.items()},
         "by_regime":  {k: simple_entry(v)       for k, v in by_regime.items()},
@@ -2336,6 +2375,7 @@ def build_summary(all_signals):
         "by_sweep":   {k: simple_entry(v)       for k, v in by_sweep.items()},
         "by_trend":   {k: simple_entry(v)       for k, v in by_trend.items()},
         "by_session": {k: simple_entry(v)       for k, v in by_session.items()},
+        "by_source":  {k: tok_entry(v)         for k, v in by_source.items()},
         "cost_model": {
             "slippage_pct":     round(SLIPPAGE_PCT * 100, 3),
             "fee_per_side_pct": round(FEE_PCT * 100, 2),
@@ -3475,6 +3515,18 @@ def _compute_run_config_hash() -> str:
         # explorer or operator can flip between off/loose/strict and these
         # MUST produce distinct config_hashes for honest DSR n_trials.
         "WYCKOFF_PHASE_FILTER":     os.environ.get("WYCKOFF_PHASE_FILTER", "off").lower(),
+        # CRT Pro v1.1 (2026-05-27): TP1-mode + quality gates + 1H-trend
+        # knobs MUST contribute to config_hash so honest DSR n_trials counts
+        # CRT Pro variants as distinct configs (not aliases of the default).
+        "CRT_TP1_MODE":             os.environ.get("CRT_TP1_MODE", "dynamic").lower(),
+        "CRT_APPLY_QUALITY_GATES":  os.environ.get("CRT_APPLY_QUALITY_GATES", "0"),
+        "CRT_FVG_MIN_QUALITY":      os.environ.get("CRT_FVG_MIN_QUALITY", "HIGH").upper(),
+        "CRT_MSS_MIN_QUALITY":      os.environ.get("CRT_MSS_MIN_QUALITY", "MEDIUM").upper(),
+        "CRT_REQUIRE_1H_TREND":     os.environ.get("CRT_REQUIRE_1H_TREND", "0"),
+        # Per-scanner kill-switch (2026-05-27): 5M_SWEEP toggle. Must
+        # contribute to config_hash so honest DSR pool counts 5M-only,
+        # CRT-only, and both-on configs as DISTINCT n_trials.
+        "ENABLE_5M_SWEEP":          os.environ.get("ENABLE_5M_SWEEP", "1"),
     })
 
 
@@ -3627,32 +3679,40 @@ def main():
             btc_c5m_ref = c5m
             btc_c4h_ref = c4h
 
-        print(f"[{token}] Simulating ICT signals...", end=" ", flush=True)
-        sigs, _tok_rejections = run_backtest_token(
-            token, c5m, c1h, c4h,
-            btc_c1h=None if token == "BTC" else btc_c1h_ref,
-            btc_c5m=None if token == "BTC" else btc_c5m_ref,
-            config=ACTIVE_CONFIG,
-            ogd_weights=_bt_ogd_weights,
-        )
-        print(f"{len(sigs)} signals generated")
-        all_signals.extend(sigs)
-        # D2 diagnostic — accumulate token-level rejections into a global pool
-        # so print_report can surface structural patterns
-        for _r_k, _r_v in _tok_rejections.items():
-            _GLOBAL_REJECTIONS[_r_k] = _GLOBAL_REJECTIONS.get(_r_k, 0) + _r_v
+        # ── 5M_SWEEP scanner (Run-168 canonical baseline) ─────────
+        # Per-scanner kill switch: ENABLE_5M_SWEEP=0 (env) disables the
+        # original 5M-sweep detection path so operator can run CRT-only
+        # backtests for isolated attribution. Default ON for back-compat.
+        if ENABLE_5M_SWEEP:
+            print(f"[{token}] Simulating ICT signals...", end=" ", flush=True)
+            sigs, _tok_rejections = run_backtest_token(
+                token, c5m, c1h, c4h,
+                btc_c1h=None if token == "BTC" else btc_c1h_ref,
+                btc_c5m=None if token == "BTC" else btc_c5m_ref,
+                config=ACTIVE_CONFIG,
+                ogd_weights=_bt_ogd_weights,
+            )
+            print(f"{len(sigs)} signals generated")
+            all_signals.extend(sigs)
+            # D2 diagnostic — accumulate token-level rejections into a global pool
+            # so print_report can surface structural patterns
+            for _r_k, _r_v in _tok_rejections.items():
+                _GLOBAL_REJECTIONS[_r_k] = _GLOBAL_REJECTIONS.get(_r_k, 0) + _r_v
+        else:
+            print(f"[{token}] 5M_SWEEP scanner DISABLED (ENABLE_5M_SWEEP=0)")
 
         # CRT v1 Session 2 (cycle-7 audit 2026-05-27): parallel H4-CRT scan.
         # No-op when ENABLE_H4_CRT=0 (default — production behavior unchanged).
         # When enabled, emits source='H4_CRT' signals alongside the 5M_SWEEP
         # signals above, enabling per-source attribution in the DB and
-        # downstream honest-metrics layer. H-1 fix (Option B): scanner no
-        # longer takes c1h (it never used 1H data). H-4 fix: returns
-        # (signals, rejection_counts) tuple — same shape as 5M path.
+        # downstream honest-metrics layer.
+        # CRT Pro v1.1 (2026-05-27): pass c1h so the optional 1H trend gate
+        # (CRT_REQUIRE_1H_TREND=1) can reuse the same _lookup_trend helper as
+        # the 5M_SWEEP path. c1h is None-safe inside the function.
         if ENABLE_H4_CRT:
             print(f"[{token}] Running H4-CRT scan...", end=" ", flush=True)
             crt_sigs, _crt_rej = run_backtest_token_h4_crt(
-                token, c5m, c4h, config=ACTIVE_CONFIG,
+                token, c5m, c4h, c1h=c1h, config=ACTIVE_CONFIG,
             )
             print(f"{len(crt_sigs)} H4-CRT signals")
             all_signals.extend(crt_sigs)

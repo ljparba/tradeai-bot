@@ -120,6 +120,96 @@ WYCKOFF_RANGE_POSITION_HI   = _env_float("WYCKOFF_RANGE_POSITION_HI", 0.65)
 WYCKOFF_RANGE_POSITION_LO   = _env_float("WYCKOFF_RANGE_POSITION_LO", 0.35)
 WYCKOFF_TREND_THRESHOLD_PCT = _env_float("WYCKOFF_TREND_THRESHOLD_PCT", 0.02)
 
+# ── CRT Pro v1.1 — "merge best of 5M_SWEEP into CRT" experiment ─────────────
+# Discovery from Run #139 analysis (2026-05-27): 52.5% of CRT setups have
+# TP1 (= C1 opposite extreme) < 1R from entry, capping per-trade profit
+# below 5M_SWEEP's elite tier. These knobs let us empirically test whether
+# merging 5M_SWEEP's strict quality + fixed R:R into CRT framework improves
+# overall avg_R without crushing signal frequency.
+#
+# CRT_TP1_MODE — how to compute TP1:
+#   dynamic  — TP1 = C1 opposite extreme (article's prescription, current default)
+#   fixed_1r — TP1 = entry ± 1R (ignore C1 opposite; uncap upside)
+#   min_1r   — TP1 = max(C1 opposite, entry ± 1R) — hybrid (use C1 only when ≥ 1R)
+CRT_TP1_MODE = _env_str("CRT_TP1_MODE", "dynamic").lower()
+if CRT_TP1_MODE not in ("dynamic", "fixed_1r", "min_1r"):
+    CRT_TP1_MODE = "dynamic"  # safe default on typo
+
+# CRT_APPLY_QUALITY_GATES — when 1, require:
+#   MSS quality >= CRT_MSS_MIN_QUALITY (default MEDIUM)
+#   FVG quality >= CRT_FVG_MIN_QUALITY (default HIGH) when confluence is FVG
+#   (OB confluence is binary — exists or doesn't, no quality tier)
+# Mirrors 5M_SWEEP's BACKTEST_FVG_MIN_QUALITY=HIGH + BACKTEST_MSS_MIN_QUALITY
+# binding gates. Default OFF (preserves v1 CRT permissive behavior).
+CRT_APPLY_QUALITY_GATES = _env_int("CRT_APPLY_QUALITY_GATES", 0) == 1
+CRT_FVG_MIN_QUALITY     = _env_str("CRT_FVG_MIN_QUALITY", "HIGH").upper()
+CRT_MSS_MIN_QUALITY     = _env_str("CRT_MSS_MIN_QUALITY", "MEDIUM").upper()
+if CRT_FVG_MIN_QUALITY not in ("LOW", "MEDIUM", "HIGH"):
+    CRT_FVG_MIN_QUALITY = "HIGH"
+if CRT_MSS_MIN_QUALITY not in ("LOW", "MEDIUM", "HIGH"):
+    CRT_MSS_MIN_QUALITY = "MEDIUM"
+
+# CRT_REQUIRE_1H_TREND — when 1, the CRT scanner (in backtest.py /
+# crypto_alert.py) applies the same TREND_1H_GATE check used by 5M_SWEEP.
+# Read here for documentation + config_hash purposes; the actual gate is
+# applied in the caller because crt_engine.py doesn't ingest 1H data.
+CRT_REQUIRE_1H_TREND = _env_int("CRT_REQUIRE_1H_TREND", 0) == 1
+
+
+_QUALITY_RANK = {"NONE": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3}
+
+
+def _quality_meets(actual: str, minimum: str) -> bool:
+    """True if `actual` quality tier ≥ `minimum` tier (HIGH > MEDIUM > LOW > NONE)."""
+    return _QUALITY_RANK.get(actual, 0) >= _QUALITY_RANK.get(minimum, 0)
+
+
+def adjust_crt_tp1(direction: str, entry_price: float, sl_price: float,
+                    c1_high: float, c1_low: float,
+                    mode: Optional[str] = None) -> float:
+    """Compute final TP1 price per CRT_TP1_MODE policy.
+
+    Per the Wyckoff article, the CRT theory's natural target is the C1
+    opposite extreme (where the swept liquidity comes from). But Run #139
+    empirical data shows this caps 52.5% of setups at < 1R reward, dragging
+    avg_R down vs 5M_SWEEP's fixed 1R/1.5R/2R cascade. This function lets
+    the caller pick between article-faithful (dynamic), profit-uncapped
+    (fixed_1r), and hybrid (min_1r) policies via env knob.
+
+    Args:
+        direction:    "BUY" or "SELL"
+        entry_price:  filled entry (from mss_bar_5m close)
+        sl_price:     SL with buffer applied
+        c1_high:      C1 candle high (CRH)
+        c1_low:       C1 candle low (CRL)
+        mode:         override env default (used by tests). None = use env.
+
+    Returns:
+        Final TP1 price (always > entry for BUY, < entry for SELL).
+    """
+    if mode is None:
+        mode = CRT_TP1_MODE
+
+    if direction == "BUY":
+        c1_opposite = c1_high
+        r_distance = entry_price - sl_price  # positive
+        fixed_target = entry_price + r_distance
+    elif direction == "SELL":
+        c1_opposite = c1_low
+        r_distance = sl_price - entry_price  # positive
+        fixed_target = entry_price - r_distance
+    else:
+        return c1_high if direction == "BUY" else c1_low  # safe fallback
+
+    if mode == "fixed_1r":
+        return fixed_target
+    if mode == "min_1r":
+        if direction == "BUY":
+            return max(c1_opposite, fixed_target)
+        return min(c1_opposite, fixed_target)
+    # mode == "dynamic" (default)
+    return c1_opposite
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 def _find_5m_bar_after(c5m_times, target_time) -> int:
@@ -363,12 +453,21 @@ def detect_h4_crt(c4h: dict, c5m: dict, token: str = "",
             )
             if not mss["confirmed"]:
                 continue
+            # CRT Pro quality gate (2026-05-27): mirror 5M_SWEEP's MSS quality bar.
+            if CRT_APPLY_QUALITY_GATES and not _quality_meets(mss["quality"], CRT_MSS_MIN_QUALITY):
+                continue
             mss_bar = mss["mss_bar"]
             confluence = _check_confluence(
                 "BUY", c1_high, c1_low, mss_bar, c5m, ob_cached,
             )
             if confluence is None:
                 continue
+            # CRT Pro quality gate: FVG-confluence path must pass quality bar.
+            # OB confluence is binary (no quality tier), so it always passes.
+            if CRT_APPLY_QUALITY_GATES and confluence["type"] == "FVG":
+                fvg_q = confluence["details"].get("quality", "NONE")
+                if not _quality_meets(fvg_q, CRT_FVG_MIN_QUALITY):
+                    continue
             return {
                 "source":        "H4_CRT",
                 "type":          "SSL_CRT",
@@ -406,12 +505,20 @@ def detect_h4_crt(c4h: dict, c5m: dict, token: str = "",
             )
             if not mss["confirmed"]:
                 continue
+            # CRT Pro quality gate (2026-05-27): mirror 5M_SWEEP's MSS quality bar.
+            if CRT_APPLY_QUALITY_GATES and not _quality_meets(mss["quality"], CRT_MSS_MIN_QUALITY):
+                continue
             mss_bar = mss["mss_bar"]
             confluence = _check_confluence(
                 "SELL", c1_high, c1_low, mss_bar, c5m, ob_cached,
             )
             if confluence is None:
                 continue
+            # CRT Pro quality gate: FVG-confluence path must pass quality bar.
+            if CRT_APPLY_QUALITY_GATES and confluence["type"] == "FVG":
+                fvg_q = confluence["details"].get("quality", "NONE")
+                if not _quality_meets(fvg_q, CRT_FVG_MIN_QUALITY):
+                    continue
             return {
                 "source":        "H4_CRT",
                 "type":          "BSL_CRT",
@@ -612,6 +719,82 @@ def crt_quality_to_confidence(mss_quality: str, fvg_quality: str) -> int:
     q_score = {"HIGH": 3, "MEDIUM": 2, "LOW": 1, "NONE": 0}
     pts = q_score.get(mss_quality, 0) + q_score.get(fvg_quality, 0)
     return max(6, min(10, 6 + (pts * 2) // 3))
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# CRT OGD feature scoring (2026-05-27 — closes the adaptive-learning gap)
+# ────────────────────────────────────────────────────────────────────────────
+#
+# BEFORE this helper existed, CRT signals were saved with `feature_scores_json
+# = NULL`, which caused `_trigger_weight_update` (in crypto_alert.py) to bail
+# out at: `if not fs_json: skip OGD update`. Result: every CRT trade close
+# silently failed to update per-token OGD weights — adaptive learning was
+# effectively OFF in CRT-only mode (ENABLE_5M_SWEEP=0).
+#
+# This helper closes that gap by computing the same 6-feature score vector
+# the OGD engine expects, derived from data CRT signals already carry. The
+# returned dict is JSON-serialisable and gets persisted to
+# `signals.feature_scores_json` (live) / `backtest_signals` template_scores
+# isn't used here — backtest_signals doesn't have a feature_scores_json
+# column at the time of writing, but the live path is the one that drives
+# OGD learning; backtests don't update live token_weights.
+#
+# Design choices:
+#   - Reuses adaptive_engine.extract_ict_feature_scores() so the score
+#     contract stays in one place (no risk of silent drift between sources).
+#   - For CRT, dr_location = "UNKNOWN" (CRT doesn't compute dealing range).
+#     This makes the `dr_location` feature contribute its FLOOR weight only —
+#     non-zero so renormalisation doesn't inflate other features, but the
+#     OGD engine won't learn meaningful dr signal from CRT trades.
+#   - FVG quality is "NONE" when the CRT confluence is OB (no FVG present).
+#     Same floor-contribution behavior — adaptive engine handles this.
+#
+# Import is local to the function to avoid a top-of-file circular import
+# (adaptive_engine imports from crt_engine indirectly via crypto_alert).
+def compute_crt_feature_scores(direction: str,
+                                mss_quality: str,
+                                fvg_quality: str,
+                                confidence: int,
+                                session: str,
+                                trend_1h: str = "NEUTRAL",
+                                dr_location: str = "UNKNOWN") -> dict:
+    """Build the 6-feature OGD score vector for a CRT signal.
+
+    Returns the SAME schema as adaptive_engine.extract_ict_feature_scores()
+    so the OGD update path doesn't need to branch on signal source.
+
+    Args:
+        direction:   "BUY" or "SELL"  (drives sign of trend_strength/dr_location)
+        mss_quality: "HIGH"/"MEDIUM"/"LOW"/"NONE"  (from setup["mss_quality"])
+        fvg_quality: "HIGH"/"MEDIUM"/"LOW"/"NONE"  (from FVG confluence) or "NONE" for OB
+        confidence:  6-10  (from crt_quality_to_confidence())
+        session:     "NY_AM_KZ"/"LONDON_KZ"/"ASIA_KZ"/"OVERNIGHT"
+        trend_1h:    "STRONG_BULL"/"BULL"/"NEUTRAL"/"BEAR"/"STRONG_BEAR"
+                     Default NEUTRAL — only meaningful when caller has 1H data
+                     (live path passes the per-token trend; backtest computes
+                     via _lookup_trend when CRT_REQUIRE_1H_TREND=1; otherwise
+                     NEUTRAL is the honest "we don't know" answer).
+        dr_location: "PREMIUM"/"DISCOUNT"/"EQUILIBRIUM"/"UNKNOWN"
+                     Default UNKNOWN — CRT scanner doesn't compute dealing range.
+
+    Returns:
+        {"fvg_quality": 0.xxx, "mss_quality": 0.xxx, "session": 0.xxx,
+         "confidence": 0.xxx, "trend_strength": 0.xxx, "dr_location": 0.xxx}
+        Sum equals 1.0 (normalised contributions).
+    """
+    # Local import — adaptive_engine -> crypto_alert -> crt_engine import chain
+    # would create a cycle at module top. The function-scoped import lazily
+    # resolves the dependency at first call.
+    from adaptive_engine import extract_ict_feature_scores
+    return extract_ict_feature_scores(
+        signal=direction,
+        fvg_quality=fvg_quality,
+        mss_quality=mss_quality,
+        session=session,
+        confidence=confidence,
+        trend_1h=trend_1h,
+        dr_location=dr_location,
+    )
 
 
 # ────────────────────────────────────────────────────────────────────────────

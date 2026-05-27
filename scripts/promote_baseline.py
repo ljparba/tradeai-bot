@@ -31,11 +31,22 @@ PIN_PATH  = os.path.join(_ROOT, "data", "baseline_pin.json")
 
 
 def _current_settings() -> dict:
-    """Snapshot the live param values from config + ict_engine at promote time."""
+    """Snapshot the live param values from config + ict_engine at promote time.
+
+    Fix E-3 (explorer audit 2026-05-27): now also captures scanner toggles
+    and CRT engine knobs so `baseline_pin.json` records the FULL strategy
+    fingerprint. Pre-CRT pins only carried ICT/BACKTEST gates; a CRT-era
+    promotion would silently lose the CRT context, breaking rollback audit.
+
+    Reads CRT knobs via os.environ to match `backtest._compute_run_config_hash`
+    (so the pin's `key_settings` and the run's `config_hash` agree on which
+    knobs were active at promote time).
+    """
     sys.path.insert(0, _ROOT)
     import config as cfg
     import ict_engine as ict
     return {
+        # Original ICT gate fingerprint
         "bias_4h_gate":              cfg.LIVE_BIAS_4H_GATE,
         "trend_1h_gate":             cfg.LIVE_TREND_1H_GATE,
         "dealing_range_gate_live":   cfg.LIVE_DEALING_RANGE_GATE,
@@ -47,6 +58,24 @@ def _current_settings() -> dict:
         "ict_mss_horizon":           ict.ICT_MSS_HORIZON,
         "ict_fvg_min_gap":           ict.ICT_FVG_MIN_GAP,
         "ict_eqh_tolerance":         ict.ICT_EQH_TOLERANCE,
+        # Scanner kill switches (Fix E-3, 2026-05-27)
+        "enable_5m_sweep":           os.environ.get("ENABLE_5M_SWEEP", "1"),
+        "enable_h4_crt":             os.environ.get("ENABLE_H4_CRT",   "0"),
+        # CRT engine fingerprint (Fix E-3, 2026-05-27)
+        "crt_tp1_mode":              os.environ.get("CRT_TP1_MODE",    "dynamic"),
+        "crt_apply_quality_gates":   os.environ.get("CRT_APPLY_QUALITY_GATES", "0"),
+        "crt_fvg_min_quality":       os.environ.get("CRT_FVG_MIN_QUALITY", "HIGH"),
+        "crt_mss_min_quality":       os.environ.get("CRT_MSS_MIN_QUALITY", "MEDIUM"),
+        "crt_require_1h_trend":      os.environ.get("CRT_REQUIRE_1H_TREND", "0"),
+        "h4_crt_c2_lookback":        os.environ.get("H4_CRT_C2_LOOKBACK", "6"),
+        "h4_crt_mss_horizon":        os.environ.get("H4_CRT_MSS_HORIZON", "30"),
+        "h4_crt_ob_scan_lookback":   os.environ.get("H4_CRT_OB_SCAN_LOOKBACK", "20"),
+        "h4_crt_validation_school":  os.environ.get("H4_CRT_VALIDATION_SCHOOL", "flexible"),
+        "crt_tp2_rr":                os.environ.get("CRT_TP2_RR", "1.5"),
+        "crt_tp3_rr":                os.environ.get("CRT_TP3_RR", "2.0"),
+        "crt_forward_bars":          os.environ.get("CRT_FORWARD_BARS", "576"),
+        # Wyckoff v2 (Fix E-3, 2026-05-27)
+        "wyckoff_phase_filter":      os.environ.get("WYCKOFF_PHASE_FILTER", "off"),
     }
 
 

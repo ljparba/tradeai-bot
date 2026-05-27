@@ -112,6 +112,22 @@ def _env_choice(name: str, default: str, choices: tuple) -> str:
 EXECUTION_MODE: str = _env_choice("EXECUTION_MODE", "PAPER", ("PAPER", "LIVE"))
 
 
+# ── SIGNAL SOURCE TOGGLES ─────────────────────────────────────────────────────
+# Per-scanner kill-switch env knobs. The bot runs TWO independent scanners in
+# parallel by default — 5M_SWEEP (the canonical Run-168 baseline) and H4_CRT
+# (Candle Range Theory, gated by ENABLE_H4_CRT in crt_engine.py). These flags
+# let the operator A/B-test scanners in isolation without code changes.
+#
+# Default = ON (1) for back-compat — the canonical PAPER ship runs both.
+# Set ENABLE_5M_SWEEP=0 in .env to disable the original scanner and run
+# CRT-only paper trades (useful when measuring CRT-only attribution).
+#
+# Safety note: if BOTH ENABLE_5M_SWEEP=0 AND ENABLE_H4_CRT=0, the bot will
+# never emit signals — operator must enable at least one or restart will be
+# pointless. No assertion here; the silence is its own diagnostic.
+ENABLE_5M_SWEEP: bool = _env_bool("ENABLE_5M_SWEEP", True)
+
+
 # ── BINANCE / DATA SOURCE INFRASTRUCTURE ──────────────────────────────────────
 BINANCE_BASE: str    = "https://api.binance.com/api/v3"
 COINGECKO_GLOBAL: str = "https://api.coingecko.com/api/v3/global"

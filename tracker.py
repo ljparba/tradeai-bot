@@ -946,10 +946,18 @@ def get_backtest_results(run_id=None):
         return {"ok":False, "error":str(e)}
 
 def get_backtest_history():
+    """Return last 20 backtest runs for the history dropdown.
+
+    2026-05-27: Added `config_hash` so the Backtest tab can disambiguate
+    runs differing only on CRT-Pro / Wyckoff / ENABLE_5M_SWEEP env knobs.
+    Runs sharing a hash share an identical knob configuration; runs with
+    different hashes are honest-DSR distinct.
+    """
     try:
         conn = _connect(); conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT id,run_date,days,total_signals,overall_wr,avg_rr,status FROM backtest_runs ORDER BY id DESC LIMIT 20"
+            "SELECT id,run_date,days,total_signals,overall_wr,avg_rr,status,config_hash "
+            "FROM backtest_runs ORDER BY id DESC LIMIT 20"
         ).fetchall()
         conn.close(); return {"ok":True,"runs":[dict(r) for r in rows]}
     except Exception as e:
@@ -2379,8 +2387,15 @@ def _paper_progress() -> dict:
 
 
 def _ogd_health_snapshot() -> dict:
-    """Call monitoring.generate_report() in-process. Read-only on signals.db."""
-    out = {"global_alert": "UNKNOWN", "tokens": 0, "degenerate": 0,
+    """Call monitoring.generate_report() in-process. Read-only on signals.db.
+
+    2026-05-27: also surfaces `tokens_alt_pool` (the bootstrap pool count)
+    so the Honest Metrics tab can show "live=1 / bootstrap=10" — making it
+    clear that a sparse live pool is the expected pre-paper state, not a
+    real health alert.
+    """
+    out = {"global_alert": "UNKNOWN", "tokens": 0, "tokens_alt_pool": 0,
+           "alt_pool_table": None, "degenerate": 0,
            "low_entropy": 0, "pinned": 0, "stale": 0,
            "cross_token_l1": None, "homogeneity_alert": None, "error": None}
     try:
@@ -2390,6 +2405,8 @@ def _ogd_health_snapshot() -> dict:
         ct = report.get("cross_token", {})
         out["global_alert"]      = s.get("global_alert_level", "UNKNOWN")
         out["tokens"]            = s.get("tokens_monitored", 0)
+        out["tokens_alt_pool"]   = s.get("tokens_alt_pool", 0)
+        out["alt_pool_table"]    = s.get("alt_pool_table")
         out["degenerate"]        = s.get("tokens_degenerate", 0)
         out["low_entropy"]       = s.get("tokens_low_entropy", 0)
         out["pinned"]            = s.get("tokens_pinned", 0)
@@ -2436,19 +2453,37 @@ def get_honest_metrics() -> dict:
       - Paper trading progress toward N≥30 LIVE-clearance gate
     """
     # 1. Latest backtest summary fields + parse the report file for HONEST METRICS
-    latest_run = {"id": None, "date": None, "n": None, "wr": None, "report": None}
+    # CRT v1 (2026-05-27): also fetch per-source signal counts so the frontend
+    # can show a "blend warning" banner — CPCV/DSR currently average across
+    # 5M_SWEEP + H4_CRT signals invisibly, which misleads the LIVE-clearance
+    # judgement when one scanner is silently dragging the other down.
+    latest_run = {"id": None, "date": None, "n": None, "wr": None, "report": None,
+                  "n_5m_sweep": 0, "n_h4_crt": 0, "blended": False}
     try:
         conn = _connect()
         row = conn.execute(
             "SELECT id, run_date, total_signals, overall_wr "
             "FROM backtest_runs ORDER BY id DESC LIMIT 1"
         ).fetchone()
-        conn.close()
         if row:
             latest_run["id"]   = row[0]
             latest_run["date"] = row[1]
             latest_run["n"]    = row[2]
             latest_run["wr"]   = row[3]
+            # Per-source split from backtest_signals
+            try:
+                src_rows = conn.execute(
+                    "SELECT source, COUNT(*) FROM backtest_signals "
+                    "WHERE run_id = ? GROUP BY source", (row[0],)
+                ).fetchall()
+                _counts = {r[0] or "5M_SWEEP": r[1] for r in src_rows}
+                latest_run["n_5m_sweep"] = _counts.get("5M_SWEEP", 0)
+                latest_run["n_h4_crt"]   = _counts.get("H4_CRT", 0)
+                latest_run["blended"]    = (latest_run["n_5m_sweep"] > 0
+                                            and latest_run["n_h4_crt"] > 0)
+            except Exception:
+                pass
+        conn.close()
     except Exception:
         pass
 

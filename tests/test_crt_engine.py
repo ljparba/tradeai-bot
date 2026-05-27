@@ -581,6 +581,90 @@ class TestCrtQualityToConfidence(unittest.TestCase):
         self.assertEqual(compute("BOGUS", "ALSO_BOGUS"), 6)
 
 
+class TestCrtFeatureScoring(unittest.TestCase):
+    """Unit tests for crt_engine.compute_crt_feature_scores — the OGD bridge
+    that closes the adaptive-learning gap on CRT signals (2026-05-27).
+    """
+
+    def setUp(self):
+        _clean_crt_env()
+
+    def _import(self):
+        import importlib, crt_engine
+        importlib.reload(crt_engine)
+        return crt_engine.compute_crt_feature_scores
+
+    def test_returns_6_feature_dict_summing_to_1(self):
+        """OGD contract: dict has FVG/MSS/session/confidence/trend/dr keys
+        with floats summing to ~1.0 (normalised contributions)."""
+        scores = self._import()(
+            direction="BUY", mss_quality="HIGH", fvg_quality="HIGH",
+            confidence=10, session="NY_AM_KZ",
+            trend_1h="STRONG_BULL", dr_location="DISCOUNT",
+        )
+        expected_keys = {"fvg_quality", "mss_quality", "session",
+                         "confidence", "trend_strength", "dr_location"}
+        self.assertEqual(set(scores.keys()), expected_keys,
+                         "feature score dict must have OGD's 6-feature schema")
+        self.assertAlmostEqual(sum(scores.values()), 1.0, places=3,
+                               msg="scores must sum to 1.0 (normalised)")
+
+    def test_ob_confluence_fvg_none_yields_floor_contribution(self):
+        """OB-only CRT setups have fvg_quality='NONE' — the FVG feature
+        should still get its FLOOR contribution (0.05/total), not zero,
+        so renormalisation doesn't unfairly inflate other features.
+        Verifies the same floor-clamp the adaptive engine applies."""
+        scores = self._import()(
+            direction="BUY", mss_quality="HIGH", fvg_quality="NONE",
+            confidence=8, session="LONDON_KZ",
+        )
+        # All keys present; FVG component non-zero (floored)
+        self.assertGreater(scores["fvg_quality"], 0.0,
+            "FVG=NONE must still get floor contribution — never zero")
+        # MSS should dominate (HIGH vs NONE for FVG)
+        self.assertGreater(scores["mss_quality"], scores["fvg_quality"],
+            "HIGH MSS must contribute more than floored NONE FVG")
+
+    def test_buy_at_discount_dr_premium_signal(self):
+        """BUY at DISCOUNT is a textbook setup — dr_location feature
+        should contribute strongly (alignment bonus)."""
+        scores = self._import()(
+            direction="BUY", mss_quality="HIGH", fvg_quality="HIGH",
+            confidence=10, session="NY_AM_KZ",
+            trend_1h="STRONG_BULL", dr_location="DISCOUNT",
+        )
+        # SELL at DISCOUNT (anti-aligned) should score lower
+        scores_sell = self._import()(
+            direction="SELL", mss_quality="HIGH", fvg_quality="HIGH",
+            confidence=10, session="NY_AM_KZ",
+            trend_1h="STRONG_BEAR", dr_location="DISCOUNT",
+        )
+        self.assertGreater(scores["dr_location"], scores_sell["dr_location"],
+            "BUY@DISCOUNT must outscore SELL@DISCOUNT on dr_location feature")
+
+    def test_unknown_dr_location_defaults_safely(self):
+        """CRT scanner passes dr_location='UNKNOWN' (no dealing range
+        computed). The OGD scorer should not crash + still return a valid
+        normalised dict — UNKNOWN should produce mid-weight contribution."""
+        scores = self._import()(
+            direction="BUY", mss_quality="MEDIUM", fvg_quality="LOW",
+            confidence=7, session="OVERNIGHT",
+            trend_1h="NEUTRAL", dr_location="UNKNOWN",
+        )
+        self.assertAlmostEqual(sum(scores.values()), 1.0, places=3)
+        self.assertGreater(scores["dr_location"], 0.0,
+            "dr_location=UNKNOWN must still get floor contribution")
+
+    def test_default_args_safe(self):
+        """trend_1h and dr_location have defaults — minimal call signature
+        works (live path passes everything, but defensiveness matters)."""
+        scores = self._import()(
+            direction="BUY", mss_quality="HIGH", fvg_quality="HIGH",
+            confidence=10, session="NY_AM_KZ",
+        )
+        self.assertAlmostEqual(sum(scores.values()), 1.0, places=3)
+
+
 class TestWyckoffContextDetector(unittest.TestCase):
     """Unit tests for crt_engine.detect_wyckoff_context (Option KK)."""
 

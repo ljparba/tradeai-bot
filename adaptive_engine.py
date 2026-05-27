@@ -933,12 +933,25 @@ class AdaptiveWeightEngine:
         """
         try:
             conn  = _connect()
+            # 2026-05-27 CRT fix: original WHERE clause required fvg_quality
+            # NOT IN ('', 'NONE') — a 5M_SWEEP-era assumption (5M sweep REQUIRES
+            # FVG confluence). For CRT signals using OB-only confluence,
+            # fvg_quality is legitimately 'NONE' but mss_quality is fully
+            # populated. The old gate excluded 90% of CRT signals from
+            # bootstrap learning. Now we admit a row when AT LEAST ONE of
+            # fvg_quality OR mss_quality is meaningful (not NULL/NONE/'').
+            # This keeps the original 5M_SWEEP behavior identical (since all
+            # 5M_SWEEP rows have both populated) and adds the OB-only CRT
+            # rows that carry valid MSS+session+trend+confidence signal.
             query = """
                 SELECT token, signal, outcome, fvg_quality, mss_quality,
                        session, confidence, trend_1h, dr_location
                 FROM backtest_signals
                 WHERE outcome IS NOT NULL AND outcome != ''
-                  AND fvg_quality IS NOT NULL AND fvg_quality NOT IN ('', 'NONE')
+                  AND (
+                       (fvg_quality IS NOT NULL AND fvg_quality NOT IN ('', 'NONE'))
+                    OR (mss_quality IS NOT NULL AND mss_quality NOT IN ('', 'NONE'))
+                  )
             """
             params: tuple = ()
             if run_id is not None:

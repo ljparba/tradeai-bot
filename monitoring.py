@@ -417,6 +417,17 @@ def generate_report(db_path: str = _DEFAULT_DB_PATH,
     n_map    = _fetch_n_updates(db_path, table=table)
     last_map = _fetch_last_updated(db_path, table=table)
 
+    # OGD-MON-BOOTSTRAP-COUNT (2026-05-27): also peek at the alternate pool
+    # so the dashboard can show "live=1 / bootstrap=10" and the operator
+    # understands that homogeneity_alert=false while live pool is sparse
+    # is the expected pre-paper state, not a real signal. Read is silent
+    # on failure so a missing bootstrap table never breaks the live report.
+    _alt_table = _TABLE_BOOTSTRAP if table == _TABLE_LIVE else _TABLE_LIVE
+    try:
+        _alt_snapshot = _fetch_current_weights(db_path, table=_alt_table)
+    except Exception:
+        _alt_snapshot = {}
+
     per_token: Dict[str, Dict[str, Any]] = {}
     for token, weights in snapshot.items():
         history = _fetch_recent_history(db_path, token, ENTROPY_DRIFT_LOOKBACK)
@@ -426,7 +437,12 @@ def generate_report(db_path: str = _DEFAULT_DB_PATH,
         )
 
     avg_l1, min_l1, n_pairs = cross_token_diversity(snapshot)
-    homogeneous = bool(snapshot) and avg_l1 < HOMOGENEITY_THRESHOLD
+    # OGD-MON-HOMOG fix (2026-05-27): require at least one pair to compute
+    # homogeneity. With < 2 live tokens, `cross_token_diversity` returns
+    # n_pairs=0, avg_l1=0.0 — and `0.0 < HOMOGENEITY_THRESHOLD (0.05)` would
+    # otherwise fire a structurally guaranteed false alarm during the
+    # pre-paper phase (TON-only live pool while other tokens still bootstrap).
+    homogeneous = bool(snapshot) and n_pairs >= 1 and avg_l1 < HOMOGENEITY_THRESHOLD
 
     # Aggregate counts
     degen = sum(1 for t in per_token.values() if t["is_degenerate"])
@@ -439,8 +455,17 @@ def generate_report(db_path: str = _DEFAULT_DB_PATH,
 
     # Global alert level: CRIT if any degenerate; WARN if any warn-level
     # condition or cross-token homogeneity; OK otherwise.
+    # OGD-MON-PREPAPER (2026-05-27): downgrade WARN to OK when the live
+    # pool is sparse (< 3 tokens) AND the alt/bootstrap pool has 5+ tokens.
+    # In this pre-paper state, "pinned features" on the single TON entry are
+    # structural (floor weights from sparse OGD updates), not a real signal.
+    # Operator already sees pre-paper context via the alt_pool_table count.
+    # CRIT still fires (degenerate is a real bug regardless of pool size).
+    _live_sparse = len(per_token) < 3 and len(_alt_snapshot) >= 5
     if degen > 0:
         global_level = "CRIT"
+    elif _live_sparse:
+        global_level = "OK"  # pre-paper bootstrap-only state — no real alert
     elif (low_e + pinned_n + stale_n) > 0 or homogeneous:
         global_level = "WARN"
     else:
@@ -457,6 +482,12 @@ def generate_report(db_path: str = _DEFAULT_DB_PATH,
             "tokens_pinned":      pinned_n,
             "tokens_stale":       stale_n,
             "global_alert_level": global_level,
+            # OGD-MON-BOOTSTRAP-COUNT (2026-05-27): pre-paper context so the
+            # dashboard can show the FULL OGD universe (live + bootstrap).
+            # Without this, operator sees `tokens=1` and assumes the engine
+            # is broken when it's actually just pre-paper bootstrap state.
+            "tokens_alt_pool":    len(_alt_snapshot),
+            "alt_pool_table":     _alt_table,
         },
         "thresholds": {
             "degenerate":         DEGENERATE_THRESHOLD,

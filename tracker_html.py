@@ -1026,6 +1026,17 @@ tr:hover td{background:rgba(37,37,56,.45)}
         <div class="conf-breakdown" id="btRegimeList"></div>
       </div>
 
+      <!-- By Signal Source (CRT v1, 2026-05-27) — 5M_SWEEP vs H4_CRT mix -->
+      <div class="intel-sec">
+        <div class="intel-sec-title">
+          Win Rate by Signal Source
+          <span class="badge" style="font-size:.65rem;text-transform:none;letter-spacing:0;font-weight:400;color:var(--muted)">
+            5M_SWEEP = Run-168 baseline scanner · H4_CRT = Candle Range Theory scanner
+          </span>
+        </div>
+        <div class="conf-breakdown" id="btSourceList"></div>
+      </div>
+
       <!-- By Confidence -->
       <div class="intel-sec">
         <div class="intel-sec-title">Win Rate by Confidence Level</div>
@@ -1373,6 +1384,17 @@ tr:hover td{background:rgba(37,37,56,.45)}
       <div class="honest-section">
         <div class="honest-section-title">&#129504; Latest Backtest &mdash; Honest Metrics</div>
         <div class="honest-section-intro">How the strategy performed on historical data. The <b>Headline WR</b> is the single-split number (easy to overfit). The <b>CPCV</b> and <b>DSR</b> numbers are the honest ones &mdash; they correct for the temptation to test 100 configs and pick the lucky winner. Gold-bordered cells are the metrics that decide LIVE-readiness.</div>
+        <!-- CRT v1 (2026-05-27): blend warning banner. Shown only when the latest
+             backtest mixes 5M_SWEEP + H4_CRT signals — current CPCV/DSR pipeline
+             averages both invisibly. Hidden by default; populated by loadHonestMetrics(). -->
+        <div id="hmBlendBanner" style="display:none;margin:0.4rem 0 0.8rem 0;padding:0.6rem 0.8rem;
+             background:rgba(245,166,35,0.08);border:1px solid var(--yellow);border-radius:6px;
+             color:var(--yellow);font-size:0.82rem;line-height:1.45">
+          <strong>&#9888; Mixed-source backtest</strong> &mdash; <span id="hmBlendDetail"></span>
+          The CPCV/DSR/Sharpe metrics below average across both scanners. If live mode is currently CRT-only
+          (ENABLE_5M_SWEEP=0), interpret the verdict with care: the headline could pass on a strong 5M_SWEEP
+          subset while the live H4_CRT path is actually weaker (or vice versa).
+        </div>
         <div class="honest-grid">
           <div class="honest-cell">
             <div class="honest-cell-label">Latest Run</div>
@@ -2906,12 +2928,46 @@ function _openCardHtml(r){
     +' &rarr; 1H: <strong style="color:var(--text)">'+(r.trend_1h||'—')+'</strong>'
     +' &rarr; 5M: <strong style="color:var(--text)">'+(r.trend_5m||'—')+'</strong>'
     +' &nbsp;|&nbsp; '+_expiryLabel(r.expires_at)+'</div>'
-    +'<div class="card-sub" style="font-size:.76rem">'
-    +'Sweep: <strong style="color:var(--text)">'+(r.sweep_type||'—')+'</strong>'
-    +' &nbsp;|&nbsp; MSS: <strong style="color:var(--text)">'+(r.mss_quality||'—')+'</strong>'
-    +' &nbsp;|&nbsp; FVG: <strong style="color:var(--text)">'+(r.fvg_quality||'—')+'</strong>'
-    +' &nbsp;|&nbsp; DR: <strong style="color:var(--text)">'+(r.dr_location||'—')+'</strong>'
-    +' &nbsp;|&nbsp; EV: <strong style="color:var(--text)">'+(r.ev_status||'—')+'</strong>'+(r.ev_score!=null?' ('+Number(r.ev_score).toFixed(1)+'%)':'')+'</div>'
+    + (function(){
+        // CRT v1 (2026-05-27): source-branched bottom row. The 5M_SWEEP layout
+        // (Sweep / MSS / FVG / DR / EV) is meaningless for H4_CRT signals
+        // because the CRT scanner doesn't populate sweep_type / dr_location
+        // (would render as a wall of em-dashes). For CRT we surface the
+        // attributes that ARE populated: source tag, entry_type with Wyckoff
+        // phase, MSS+FVG quality grades. EV scoring is shared, kept on both.
+        const _src=(r.source||'5M_SWEEP').toUpperCase();
+        const _et=String(r.entry_type||'');
+        if (_src==='H4_CRT' || _et.indexOf('H4_CRT')===0) {
+          // Parse "H4_CRT_<FVG|OB>_<PHASE>" — fall back to raw entry_type otherwise.
+          const _parts=_et.split('_');
+          const _conf=_parts[2] || '—';   // FVG or OB
+          const _phase=_parts.slice(3).join('_') || '—'; // ACCUMULATION, MARKUP, etc.
+          const _phaseColor={
+            'ACCUMULATION':'var(--green)','MARKUP':'var(--green)',
+            'DISTRIBUTION':'var(--red)','MARKDOWN':'var(--red)',
+            'TRANSITION':'var(--muted)'
+          }[_phase]||'var(--text)';
+          return '<div class="card-sub" style="font-size:.76rem">'
+            +'<span style="background:var(--accent2);color:#0a0e14;padding:1px 6px;border-radius:3px;font-weight:600;font-size:.7rem;font-family:JetBrains Mono,monospace">H4_CRT</span>'
+            +' &nbsp;|&nbsp; Confluence: <strong style="color:var(--text)">'+_conf+'</strong>'
+            +' &nbsp;|&nbsp; Phase: <strong style="color:'+_phaseColor+'">'+_phase+'</strong>'
+            +' &nbsp;|&nbsp; MSS: <strong style="color:var(--text)">'+(r.mss_quality||'—')+'</strong>'
+            +' &nbsp;|&nbsp; FVG: <strong style="color:var(--text)">'+(r.fvg_quality||'—')+'</strong>'
+            +' &nbsp;|&nbsp; EV: <strong style="color:var(--text)">'+(r.ev_status||'—')+'</strong>'+(r.ev_score!=null?' ('+Number(r.ev_score).toFixed(1)+'%)':'')+'</div>';
+        }
+        // 5M_SWEEP (default) — original layout, with source tag prefix
+        // when explicitly set (legacy NULL rows preserve old appearance).
+        const srcTag = _src==='5M_SWEEP'
+          ? '<span style="background:var(--blue);color:#0a0e14;padding:1px 6px;border-radius:3px;font-weight:600;font-size:.7rem;font-family:JetBrains Mono,monospace">5M_SWEEP</span> &nbsp;|&nbsp; '
+          : '';
+        return '<div class="card-sub" style="font-size:.76rem">'
+          +srcTag
+          +'Sweep: <strong style="color:var(--text)">'+(r.sweep_type||'—')+'</strong>'
+          +' &nbsp;|&nbsp; MSS: <strong style="color:var(--text)">'+(r.mss_quality||'—')+'</strong>'
+          +' &nbsp;|&nbsp; FVG: <strong style="color:var(--text)">'+(r.fvg_quality||'—')+'</strong>'
+          +' &nbsp;|&nbsp; DR: <strong style="color:var(--text)">'+(r.dr_location||'—')+'</strong>'
+          +' &nbsp;|&nbsp; EV: <strong style="color:var(--text)">'+(r.ev_status||'—')+'</strong>'+(r.ev_score!=null?' ('+Number(r.ev_score).toFixed(1)+'%)':'')+'</div>';
+      })()
     +'<div class="dots">'
     +'<div class="dot-tp'+(r.tp1_hit?' hit':'')+'" title="TP1"></div>'
     +'<div class="dot-tp'+(r.tp2_hit?' hit':'')+'" title="TP2"></div>'
@@ -3354,13 +3410,39 @@ async function loadBacktest(){
       ?'<div class="bt-meta-item"><div class="bt-meta-label">Resolution</div>'
         +'<div class="bt-meta-val a" style="font-size:.95rem">'+cm.timeframe.toUpperCase()+'</div></div>'
       :'';
+    // Source mix tile (CRT v1, 2026-05-27) — surfaces 5M_SWEEP vs H4_CRT
+    // counts so the headline WR isn't a silent blend. e.g. "29 SWEEP / 285 CRT"
+    // Falls back to a single-source label when only one scanner produced signals.
+    const _bs=(rr.summary||{}).by_source||{};
+    const _sw=(_bs['5M_SWEEP']||{}).signals||0;
+    const _ch=(_bs['H4_CRT']||{}).signals||0;
+    let srcMixHtml='';
+    if (_sw + _ch > 0) {
+      const _swWr=(_bs['5M_SWEEP']||{}).wr;
+      const _chWr=(_bs['H4_CRT']||{}).wr;
+      const _swPart=_sw>0 ? '<span style="color:var(--blue)">'+_sw+' SWEEP@'+(_swWr!=null?_swWr+'%':'—')+'</span>' : '';
+      const _chPart=_ch>0 ? '<span style="color:var(--accent2)">'+_ch+' CRT@'+(_chWr!=null?_chWr+'%':'—')+'</span>' : '';
+      const _sep=(_sw>0 && _ch>0) ? '<span style="color:var(--muted)"> · </span>' : '';
+      srcMixHtml='<div class="bt-meta-item"><div class="bt-meta-label">Source Mix</div>'
+        +'<div class="bt-meta-val" style="font-size:.78rem;line-height:1.5">'+_swPart+_sep+_chPart+'</div></div>';
+    }
+    // config_hash chip — short 8-char prefix lets operator distinguish CRT-Pro
+    // variants (CRT_TP1_MODE, ENABLE_5M_SWEEP, quality gates) that share otherwise
+    // identical run-date / period / signal-count rows.
+    const _ch8=(rr.config_hash||'').slice(0,8);
+    const cfgHashHtml=_ch8
+      ? '<div class="bt-meta-item"><div class="bt-meta-label">Config Hash</div>'
+        +'<div class="bt-meta-val" style="font-family:var(--mono);font-size:.78rem;color:var(--muted)" title="config_hash full: '+rr.config_hash+'">'+_ch8+'</div></div>'
+      : '';
     document.getElementById('btMetaBar').innerHTML=
       '<div class="bt-meta-item"><div class="bt-meta-label">Run Date</div><div class="bt-meta-val" style="font-size:.95rem;color:var(--muted)">'+rr.run_date.slice(0,16)+'</div></div>'
       +'<div class="bt-meta-item"><div class="bt-meta-label">Period</div><div class="bt-meta-val a">'+rr.days+'d</div></div>'
       +tfHtml
       +'<div class="bt-meta-item"><div class="bt-meta-label">Total Signals</div><div class="bt-meta-val a">'+rr.total_signals+'</div></div>'
+      +srcMixHtml
       +'<div class="bt-meta-item"><div class="bt-meta-label">Win Rate</div><div class="bt-meta-val '+wrC+'">'+wr+'%</div></div>'
       +'<div class="bt-meta-item"><div class="bt-meta-label">Avg R:R</div><div class="bt-meta-val g">1:'+rr.avg_rr+'</div></div>'
+      +cfgHashHtml
       +cmHtml;
 
     const sum=rr.summary||{};
@@ -3390,6 +3472,19 @@ async function loadBacktest(){
         +'<div class="cl-stats">'+d.wr+'% WR</div>'
         +'<div class="cl-count">'+d.signals+' sigs</div></div>';
     }).join(''):'<div class="empty">No data</div>';
+
+    // By Signal Source — 5M_SWEEP vs H4_CRT mix (CRT v1, 2026-05-27)
+    // tok_entry shape is used, so we have avg_net_rr + avg_conf available
+    const sources=Object.entries(sum.by_source||{}).sort((a,b)=>b[1].signals-a[1].signals);
+    const srcLabel={'5M_SWEEP':'5M_SWEEP (Run-168 baseline)','H4_CRT':'H4_CRT (Candle Range Theory)'};
+    document.getElementById('btSourceList').innerHTML=sources.length?sources.map(([src,d])=>{
+      const c=d.wr>=65?'var(--green)':d.wr>=50?'var(--yellow)':'var(--red)';
+      const lbl=srcLabel[src]||src;
+      return '<div class="clrow"><div class="cl-label" style="width:220px;font-size:.72rem">'+lbl+'</div>'
+        +'<div class="cl-bar-wrap"><div class="cl-bar-fill" style="width:'+d.wr+'%;background:'+c+'"></div></div>'
+        +'<div class="cl-stats">'+d.wr+'% WR</div>'
+        +'<div class="cl-count">'+d.signals+' sigs · R:R 1:'+(d.avg_net_rr!=null?d.avg_net_rr:'—')+'</div></div>';
+    }).join(''):'<div class="empty">No per-source data — run a backtest with both scanners enabled to populate</div>';
 
     // Confidence bars
     const confs=Object.entries(sum.by_conf||{}).sort((a,b)=>+a[0]-+b[0]);
@@ -3748,15 +3843,23 @@ function _renderBtHistory(){
   if(btHistPage > pages) btHistPage = pages;
   const start = (btHistPage - 1) * BT_HIST_PAGE_SIZE;
   const page  = _btHistData.slice(start, start + BT_HIST_PAGE_SIZE);
-  list.innerHTML = page.map(r =>
-    '<div class="hist-run">'
+  list.innerHTML = page.map(r => {
+    // CRT v1 (2026-05-27): config_hash short prefix lets operator distinguish
+    // CRT-Pro variant runs that share otherwise-identical date / signal-count.
+    const _ch8 = (r.config_hash || '').slice(0,8);
+    const cfgChip = _ch8
+      ? '<span class="hist-stat" style="color:var(--muted);font-family:var(--mono);font-size:.7rem" title="config_hash: '+r.config_hash+'">'+_ch8+'</span>'
+      : '';
+    return '<div class="hist-run">'
     +'<div class="hist-run-date">'+r.run_date.slice(0,16)+'</div>'
     +'<div class="hist-run-stats">'
     +'<span class="hist-stat">'+r.total_signals+' signals</span>'
     +'<span class="hist-stat" style="color:var(--green)">WR: '+r.overall_wr+'%</span>'
     +'<span class="hist-stat" style="color:var(--accent2)">R:R: 1:'+r.avg_rr+'</span>'
     +'<span class="hist-stat" style="color:var(--muted)">'+r.days+'d</span>'
+    +cfgChip
     +'</div></div>'
+;}
   ).join('');
   if(pgBar){
     pgBar.style.display = pages > 1 ? 'flex' : 'none';
@@ -3907,6 +4010,18 @@ async function loadHonestMetrics(){
       lr.id !== null ? 'Run-' + lr.id : '—';
     document.getElementById('hmRunDate').textContent = lr.date || '—';
     document.getElementById('hmRunN').textContent = lr.n !== null ? lr.n : '—';
+    // CRT v1 (2026-05-27): show/hide blend warning banner based on latest_run.blended
+    const banner = document.getElementById('hmBlendBanner');
+    if (banner) {
+      if (lr.blended) {
+        const _sw = lr.n_5m_sweep || 0, _ch = lr.n_h4_crt || 0;
+        document.getElementById('hmBlendDetail').innerHTML =
+          'Run-' + lr.id + ' contains <b>' + _sw + ' 5M_SWEEP</b> + <b>' + _ch + ' H4_CRT</b> signals. ';
+        banner.style.display = 'block';
+      } else {
+        banner.style.display = 'none';
+      }
+    }
     document.getElementById('hmRunWr').textContent =
       lr.wr !== null ? lr.wr.toFixed(1) + '%' : '—';
     document.getElementById('hmCpcvWr').textContent =

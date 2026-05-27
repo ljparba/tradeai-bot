@@ -122,10 +122,29 @@ def _load_signals_for_run(conn: sqlite3.Connection, run_id: int) -> list[dict]:
     return out
 
 
-def _list_distinct_configs(conn: sqlite3.Connection, min_signals: int) -> list[tuple[str, int, int]]:
+def _list_distinct_configs(conn: sqlite3.Connection, min_signals: int,
+                           scanner_mode: str = "any") -> list[tuple[str, int, int]]:
     """Return [(config_hash, latest_run_id, n_signals), ...] sorted by run_id DESC.
 
     Uses LATEST run per hash (MAX(id)) to get the freshest snapshot of that config.
+
+    Fix D-2 (explorer audit 2026-05-27): added `scanner_mode` filter to scope
+    the cross-config std to comparable strategies. Without scoping, CRT-only
+    runs (1H, OB-heavy, different signal-shape) get folded into the same std
+    as 5M_SWEEP-only runs (5M, FVG-strict, very different shape). The
+    resulting std measures strategy heterogeneity, not parameter heterogeneity
+    — which falsely trips the explorer's `sr_trial_std_jump` guard.
+
+    scanner_mode:
+      "any"      — original behavior, all configs (back-compat default)
+      "5m_only"  — runs with ENABLE_5M_SWEEP=1 AND ENABLE_H4_CRT=0 signature
+      "crt_only" — runs with ENABLE_5M_SWEEP=0 AND ENABLE_H4_CRT=1 signature
+      "both_on"  — both scanners enabled
+
+    Detection: scans signals in each candidate run for source distribution.
+    A run is "5m_only" if all signals are source='5M_SWEEP' (or NULL=back-
+    compat); "crt_only" if all are 'H4_CRT'; "both_on" if mixed; "empty" if
+    no signals.
     """
     rows = conn.execute(
         """
@@ -142,32 +161,57 @@ def _list_distinct_configs(conn: sqlite3.Connection, min_signals: int) -> list[t
             "SELECT COUNT(*) FROM backtest_signals WHERE run_id = ?",
             (latest_id,),
         ).fetchone()[0]
-        if n >= min_signals:
-            result.append((cfg_hash, latest_id, n))
+        if n < min_signals:
+            continue
+        if scanner_mode != "any":
+            # Determine the run's scanner mode from its signal source distribution
+            src_counts = dict(conn.execute(
+                "SELECT COALESCE(source, '5M_SWEEP'), COUNT(*) "
+                "FROM backtest_signals WHERE run_id = ? GROUP BY source",
+                (latest_id,),
+            ).fetchall())
+            has_5m  = src_counts.get("5M_SWEEP", 0) > 0
+            has_crt = src_counts.get("H4_CRT", 0)  > 0
+            if scanner_mode == "5m_only" and not (has_5m and not has_crt):
+                continue
+            if scanner_mode == "crt_only" and not (has_crt and not has_5m):
+                continue
+            if scanner_mode == "both_on" and not (has_5m and has_crt):
+                continue
+        result.append((cfg_hash, latest_id, n))
     # Sort latest first
     result.sort(key=lambda r: r[1], reverse=True)
     return result
 
 
-def compute_and_persist(min_signals: int = 30, dry_run: bool = False) -> dict:
+def compute_and_persist(min_signals: int = 30, dry_run: bool = False,
+                        scanner_mode: str = "any") -> dict:
     """Compute cross-config sr_trial_std and (optionally) persist to bot_state.
 
     Returns the result blob (whether or not it was persisted).
+
+    Fix D-2 (explorer audit 2026-05-27): added `scanner_mode` to optionally
+    scope the cross-config std to comparable strategies. Default "any"
+    preserves back-compat behavior; "5m_only" / "crt_only" / "both_on"
+    restrict the pool when the operator wants honest std within a single
+    strategy family.
     """
     if not _DB_PATH.exists():
         print(f"[ERROR] DB not found at {_DB_PATH}")
         sys.exit(2)
 
     conn = sqlite3.connect(str(_DB_PATH))
-    configs = _list_distinct_configs(conn, min_signals=min_signals)
+    configs = _list_distinct_configs(conn, min_signals=min_signals,
+                                      scanner_mode=scanner_mode)
 
     if len(configs) < 2:
-        print(f"[ERROR] Need >= 2 distinct configs with >= {min_signals} signals; found {len(configs)}")
+        print(f"[ERROR] Need >= 2 distinct configs with >= {min_signals} signals "
+              f"(scanner_mode={scanner_mode}); found {len(configs)}")
         conn.close()
         sys.exit(3)
 
     print(f"Computing CPCV mean Sharpe across {len(configs)} distinct configs "
-          f"(min_signals={min_signals})...\n")
+          f"(min_signals={min_signals}, scanner_mode={scanner_mode})...\n")
 
     sharpes: list[float] = []
     per_config_rows: list[dict] = []
@@ -274,13 +318,20 @@ def main() -> int:
                    help="Compute and print, but don't persist to bot_state")
     p.add_argument("--show", action="store_true",
                    help="Print the currently persisted value and exit")
+    p.add_argument("--scanner-mode", choices=("any", "5m_only", "crt_only", "both_on"),
+                   default="any",
+                   help="Scope std to a scanner family (Fix D-2, 2026-05-27). "
+                        "'any' (default, back-compat) folds all configs into one "
+                        "pool. Use '5m_only' / 'crt_only' / 'both_on' to compute "
+                        "an apples-to-apples std within one strategy family.")
     args = p.parse_args()
 
     if args.show:
         show_current()
         return 0
 
-    compute_and_persist(min_signals=args.min_signals, dry_run=args.dry_run)
+    compute_and_persist(min_signals=args.min_signals, dry_run=args.dry_run,
+                         scanner_mode=args.scanner_mode)
     return 0
 
 

@@ -110,6 +110,8 @@ from crt_engine import (
     CRT_TP2_RR, CRT_TP3_RR,
     # v2 Wyckoff phase context (Option KK, audit cycle-7 2026-05-27)
     detect_wyckoff_context, is_crt_phase_aligned, WYCKOFF_PHASE_FILTER,
+    # CRT Pro v1.1 — TP1 mode + 1H trend gate (2026-05-27)
+    adjust_crt_tp1, CRT_TP1_MODE, CRT_REQUIRE_1H_TREND,
 )
 
 _ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -143,6 +145,8 @@ from config import (
     API_RETRIES, API_DELAY, DOM_FETCH_INTERVAL, DOM_THRESHOLD,
     # template safety (Phase 5A)
     EXECUTION_MODE,
+    # per-scanner kill switches (2026-05-27)
+    ENABLE_5M_SWEEP,
     TEMPLATE_MIN_SAMPLE, CIRCUIT_BREAKER_LOOKBACK, CIRCUIT_BREAKER_MIN_WR,
     TIER_DAILY_LIVE_CAPS, BLOCK_RANGING_LIVE, BLOCK_RANGING_TEMPLATES,
     # exit intelligence
@@ -759,7 +763,7 @@ def save_signal(token, price, result, plan, regime):
 # (CRT signals carry their own confidence via crt_quality_to_confidence).
 # This matches the backtest's H6 isolation discipline.
 
-def scan_h4_crt_for_token(token, c5m, c4h, consumed):
+def scan_h4_crt_for_token(token, c5m, c4h, consumed, trend_1h="NEUTRAL"):
     """Detect H4 CRT setup + build live signal result dict for the existing
     save_signal / send_signal_msg pipeline. Mirrors backtest.py's
     run_backtest_token_h4_crt economics + signal-dict construction.
@@ -800,21 +804,37 @@ def scan_h4_crt_for_token(token, c5m, c4h, consumed):
     ts = datetime.utcfromtimestamp(c5m["times"][entry_bar] / 1000)
 
     # ── Killzone filter (parity with backtest H-CRT2-3) ───────────────────
-    # config.liquid_hours is the shared set — both live (here) and backtest
-    # path apply the same filter at the same place in the pipeline.
-    from config import LIVE_LIQUID_HOURS as _liquid_hours
+    # LIVE_CONFIG.liquid_hours is the shared set — both live (here) and
+    # backtest path apply the same filter at the same place in the pipeline.
+    # CRITICAL-1 fix (config audit 2026-05-27): the previous import
+    # `from config import LIVE_LIQUID_HOURS` referenced a symbol that
+    # does NOT exist in config.py — would have ImportError'd the first
+    # time a CRT setup was detected, then crash-looped the bot. Replaced
+    # with the canonical pattern used elsewhere in crypto_alert.py:2069.
+    _liquid_hours = LIVE_CONFIG.liquid_hours
     if _liquid_hours and ts.hour not in _liquid_hours:
         return None, None, "outside_killzone"
 
     # ── 4H bias gate (parity with backtest H-CRT2-4) ──────────────────────
-    # Uses _lookup_4h_bias via the existing main-loop infrastructure. For
-    # the live path we compute it inline from the c4h cache. Same min_bars
-    # discipline as the 5M-sweep path elsewhere in this file.
-    if len(c4h.get("closes", [])) >= 200:
-        bias_4h = get_ict_4h_bias(c4h["closes"], c4h["highs"], c4h["lows"])
+    # MEDIUM-1 fix (config audit 2026-05-27): slice to the last 210 bars
+    # before calling get_ict_4h_bias, matching backtest._lookup_4h_bias
+    # exactly. Previously the live path passed the full c4h cache (which
+    # can grow beyond 210 bars under the live fetcher's rolling window),
+    # producing a slightly different EMA50/200 result than the backtest's
+    # 210-bar slice — a silent live↔BT divergence on CRT setups.
+    _closes_full = c4h.get("closes", [])
+    if len(_closes_full) >= 200:
+        _N = min(len(_closes_full), 210)  # mirror _lookup_4h_bias slice size
+        bias_4h = get_ict_4h_bias(
+            _closes_full[-_N:],
+            c4h["highs"][-_N:],
+            c4h["lows"][-_N:],
+        )
     else:
         bias_4h = "NEUTRAL"
-    # Strict bias_4h gate matches backtest default (config.bias_4h_gate=='loose')
+    # MEDIUM-3 fix (config audit 2026-05-27): the stale comment claimed
+    # the backtest default for bias_4h_gate was 'loose' — actual default
+    # is 'none' (config.py:317). Comment removed to avoid future confusion.
     from config import LIVE_BIAS_4H_GATE as _bias_gate
     _want = "BULLISH" if direction == "BUY" else "BEARISH"
     if _bias_gate == "strict" and bias_4h != _want:
@@ -823,6 +843,18 @@ def scan_h4_crt_for_token(token, c5m, c4h, consumed):
     if _bias_gate == "loose" and bias_4h not in ("NEUTRAL", _want):
         consumed.add(setup["key"])
         return None, None, "bias_gate_blocked"
+
+    # ── CRT Pro v1.1 — optional 1H trend gate (2026-05-27) ────────────────
+    # When CRT_REQUIRE_1H_TREND=1, mirror 5M_SWEEP's trend_1h_gate logic.
+    # Default NEUTRAL when caller omits trend → gate is a no-op (NEUTRAL
+    # passes both directions). Mirrors backtest behavior at backtest.py
+    # for parity.
+    if CRT_REQUIRE_1H_TREND:
+        _bull_ok = trend_1h in ("BULL", "STRONG_BULL", "NEUTRAL")
+        _bear_ok = trend_1h in ("BEAR", "STRONG_BEAR", "NEUTRAL")
+        if (direction == "BUY" and not _bull_ok) or (direction == "SELL" and not _bear_ok):
+            consumed.add(setup["key"])
+            return None, None, "1h_trend_blocked"
 
     # ── v2 Wyckoff phase filter (Option KK, audit cycle-7 2026-05-27) ─────
     # Same logic as backtest path — phase context computed unconditionally
@@ -834,14 +866,24 @@ def scan_h4_crt_for_token(token, c5m, c4h, consumed):
             consumed.add(setup["key"])  # mark zone consumed — phase gate is structural
             return None, None, f"wyckoff_{wyckoff_context.lower()}"
 
-    # ── Trade plan: SL = sweep wick ± buffer, TP1 = C1 opposite, TP2/3 = RR cascade ──
+    # ── Trade plan: SL = sweep wick ± buffer, TP1 = (per CRT_TP1_MODE), TP2/3 = RR cascade ──
     # Parity with backtest H-CRT2-1 (SL buffer) and CRT_TP2_RR/CRT_TP3_RR ladder.
     raw_wick = setup["sl"]
     if direction == "BUY":
         sl_price = raw_wick * (1.0 - ICT_SL_BUFFER_PCT)
     else:
         sl_price = raw_wick * (1.0 + ICT_SL_BUFFER_PCT)
-    tp1_price = setup["tp1"]
+    # CRT Pro TP1 override (2026-05-27): apply CRT_TP1_MODE policy.
+    # mode=dynamic (default) preserves the original C1 opposite logic; this
+    # call is a no-op then. fixed_1r and min_1r let us empirically test
+    # whether uncapping TP1 above the C1 opposite improves avg_R.
+    tp1_price = adjust_crt_tp1(
+        direction=direction,
+        entry_price=entry_price,
+        sl_price=sl_price,
+        c1_high=setup["c1_high"],
+        c1_low=setup["c1_low"],
+    )
     risk_dist = abs(entry_price - sl_price)
     if risk_dist <= 0:
         return None, None, "zero_risk_dist"
@@ -874,6 +916,25 @@ def scan_h4_crt_for_token(token, c5m, c4h, consumed):
               if setup["confluence"]["type"] == "FVG" else "NONE")
     confidence = crt_quality_to_confidence(_mss_q, _fvg_q)
 
+    # CRT OGD feature scoring (2026-05-27 — closes the adaptive-learning gap).
+    # Without these scores, _trigger_weight_update() bails out at "no
+    # feature_scores_json stored" and the per-token OGD weights freeze when
+    # ENABLE_5M_SWEEP=0. With them, every CRT trade close feeds the same
+    # 6-feature gradient pipeline the 5M_SWEEP path uses. Imported lazily
+    # from crt_engine to avoid a top-of-file circular import.
+    from crt_engine import compute_crt_feature_scores
+    from adaptive_engine import _utc_to_session
+    _crt_session = _utc_to_session(ts.hour)
+    _crt_ogd_scores = compute_crt_feature_scores(
+        direction=direction,
+        mss_quality=_mss_q,
+        fvg_quality=_fvg_q,
+        confidence=confidence,
+        session=_crt_session,
+        trend_1h=trend_1h,
+        dr_location="UNKNOWN",  # CRT scanner doesn't compute dealing range
+    )
+
     plan = {
         "sl":          round(sl_price, 8),
         "tp1":         round(tp1_price, 8),
@@ -897,7 +958,7 @@ def scan_h4_crt_for_token(token, c5m, c4h, consumed):
         "mtf_conf":         0,
         "rsi":              50.0,
         "trend_4h":         bias_4h,
-        "trend_1h":         "NEUTRAL",
+        "trend_1h":         trend_1h,   # use real 1H trend passed by caller (was stub NEUTRAL)
         "trend_5m":         "NEUTRAL",
         "confirms":         0,
         "atr":              0.0,
@@ -908,9 +969,13 @@ def scan_h4_crt_for_token(token, c5m, c4h, consumed):
                              f"bias_4h={bias_4h}",
                              f"wyckoff={wyckoff_context}"],
         "plan":             plan,
+        # CRT OGD feature score vector — populated 2026-05-27 to enable
+        # adaptive learning on CRT signal closes. _trigger_weight_update()
+        # reads this JSON and passes it to weight_engine.update().
+        "feature_scores_json": json.dumps(_crt_ogd_scores),
         # CRT-specific fields surfaced via existing schema
         "sr_type":          setup["type"],     # SSL_CRT / BSL_CRT
-        "session":          "UNKNOWN",
+        "session":          _crt_session,      # was UNKNOWN — now proper KZ label
         "dr_4h":            {"location": "UNKNOWN"},
         "mss_result":       {"quality": _mss_q},
         "ict_fvg":          {"quality": _fvg_q},
@@ -3597,21 +3662,27 @@ def main():
                     continue
                 pd=STATE[token].get("last_24h", {})   # reuse cached data — no extra fetch
                 ch24=pd.get("change_24h",0.0); vol24=pd.get("volume_24h",0.0)
-                result,regime=generate_signal(token,price,ch24,vol24)
-                if result:
-                    plan=result["plan"]
-                    sig_id=save_signal(token,price,result,plan,regime)
-                    if sig_id < 0:
-                        print(f"[ERROR] {token} signal DB save failed — no Telegram sent")
-                        continue
-                    # Phase 5A: suppress Telegram in LIVE mode when template blocks live execution
-                    if EXECUTION_MODE == "LIVE" and not result.get("template_live_allowed", 0):
-                        print(f"[PHASE5A] LIVE BLOCK: {token} {result['signal']} "
-                              f"template={result.get('matched_template_id','NONE')} "
-                              f"status={result.get('template_status','?')} "
-                              f"reason={result.get('template_block_reason','')} — signal saved, no Telegram")
-                    else:
-                        send_signal_msg(token,price,ch24,result,plan,sig_id,regime)
+                # ── 5M_SWEEP scanner (Run-168 canonical baseline) ─────────
+                # Per-scanner kill switch: ENABLE_5M_SWEEP=0 (env) disables
+                # the original 5M-sweep detection path so operator can run
+                # CRT-only paper trades. Default ON. The CRT scanner below
+                # is gated independently by ENABLE_H4_CRT.
+                if ENABLE_5M_SWEEP:
+                    result,regime=generate_signal(token,price,ch24,vol24)
+                    if result:
+                        plan=result["plan"]
+                        sig_id=save_signal(token,price,result,plan,regime)
+                        if sig_id < 0:
+                            print(f"[ERROR] {token} signal DB save failed — no Telegram sent")
+                            continue
+                        # Phase 5A: suppress Telegram in LIVE mode when template blocks live execution
+                        if EXECUTION_MODE == "LIVE" and not result.get("template_live_allowed", 0):
+                            print(f"[PHASE5A] LIVE BLOCK: {token} {result['signal']} "
+                                  f"template={result.get('matched_template_id','NONE')} "
+                                  f"status={result.get('template_status','?')} "
+                                  f"reason={result.get('template_block_reason','')} — signal saved, no Telegram")
+                        else:
+                            send_signal_msg(token,price,ch24,result,plan,sig_id,regime)
 
                 # CRT v1 Session 3 (audit cycle-7 2026-05-27): parallel H4-CRT
                 # scan path. No-op when ENABLE_H4_CRT=0 (default — production
@@ -3622,12 +3693,18 @@ def main():
                 if ENABLE_H4_CRT:
                     _c5m = STATE[token]["candles"]["5m"]
                     _c4h = STATE[token]["candles"]["4h"]
+                    _c1h_live = STATE[token]["candles"].get("1h", {})
                     if _c5m and _c4h and len(_c5m.get("closes", [])) > 30 \
                             and len(_c4h.get("closes", [])) > H4_CRT_C2_LOOKBACK + 2:
                         # Inject 'times' if missing (some fetch paths use 'time')
+                        # CRT Pro v1.1 (2026-05-27): pass per-token live 1H trend
+                        # so the optional CRT_REQUIRE_1H_TREND gate has the same
+                        # input as the 5M_SWEEP scanner. Defaults to NEUTRAL
+                        # (passes through) when CRT_REQUIRE_1H_TREND=0.
                         _crt_result, _crt_plan, _crt_reason = scan_h4_crt_for_token(
                             token, _c5m, _c4h,
                             consumed=STATE[token]["consumed_h4_crt"],
+                            trend_1h=STATE[token].get("trend_1h", "NEUTRAL"),
                         )
                         if _crt_result is not None:
                             _crt_entry = _crt_result["entry_price"]
