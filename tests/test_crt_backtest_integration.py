@@ -73,6 +73,99 @@ class TestSourceColumnSchema(unittest.TestCase):
         self.assertEqual(len(row), len(backtest._BACKTEST_SIGNALS_COLS),
                          "row tuple length must equal column tuple length")
 
+    def test_insert_schema_alignment_via_in_memory_sqlite(self):
+        """NEW-5 fix (Option H audit 2026-05-27): tuple-length equality
+        alone doesn't catch column-name drift. This test executes the
+        actual INSERT against an in-memory SQLite with the production
+        schema and verifies it succeeds — proving every column referenced
+        in `_BACKTEST_SIGNALS_COLS` exists in `backtest_signals` and that
+        `_backtest_signal_to_row()` produces a valid parameter binding.
+        """
+        import sqlite3
+        import backtest
+
+        # Build the schema using the same migration the production code uses
+        conn = sqlite3.connect(":memory:")
+        try:
+            # Mirror the schema migration block at init_backtest_db
+            conn.execute("""CREATE TABLE backtest_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_date TEXT, days INTEGER,
+                total_signals INTEGER, overall_wr REAL, avg_rr REAL,
+                status TEXT, summary TEXT, recommendations TEXT,
+                config_hash TEXT
+            )""")
+            conn.execute("""CREATE TABLE backtest_signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER REFERENCES backtest_runs(id),
+                token TEXT, signal TEXT, price REAL, ts TEXT,
+                regime TEXT, confidence INTEGER, wscore REAL,
+                margin REAL, conflict TEXT,
+                tp1_pct REAL, sl_pct REAL, rr1 REAL,
+                tp_reached INTEGER DEFAULT 0, outcome TEXT
+            )""")
+            for col_def in [
+                ("net_tp1_pct", "REAL"), ("net_sl_pct", "REAL"),
+                ("net_rr1", "REAL"), ("breakeven_wr", "REAL"),
+                ("sweep_type", "TEXT"), ("fvg_pct", "REAL"),
+                ("trend_1h", "TEXT"), ("bias_4h", "TEXT"),
+                ("ifvg_present", "INTEGER"), ("ifvg_direction", "TEXT"),
+                ("ifvg_age_bars", "INTEGER"), ("ifvg_5m_used", "INTEGER"),
+                ("session", "TEXT"), ("hour_utc", "INTEGER"),
+                ("day_of_week", "INTEGER"), ("dr_location", "TEXT"),
+                ("mss_quality", "TEXT"), ("fvg_quality", "TEXT"),
+                ("smt_type", "TEXT"), ("smt_confirmed", "INTEGER"),
+                ("entry_type", "TEXT"),
+                ("matched_template_id", "TEXT"),
+                ("template_scores_json", "TEXT"),
+                ("mfe_pct", "REAL"), ("mae_pct", "REAL"), ("realized_r", "REAL"),
+                ("net_tp2_pct", "REAL"), ("net_tp3_pct", "REAL"),
+                ("tb_bin", "INTEGER"), ("tb_touch", "TEXT"),
+                ("tb_ret", "REAL"), ("tb_t1", "INTEGER"),
+                ("source", "TEXT DEFAULT '5M_SWEEP'"),
+            ]:
+                conn.execute(f"ALTER TABLE backtest_signals ADD COLUMN {col_def[0]} {col_def[1]}")
+
+            # Verify the schema has every column the row-builder references
+            cols_in_schema = {
+                row[1] for row in conn.execute("PRAGMA table_info(backtest_signals)")
+            }
+            missing = [c for c in backtest._BACKTEST_SIGNALS_COLS
+                       if c not in cols_in_schema]
+            self.assertEqual(missing, [],
+                f"Columns in _BACKTEST_SIGNALS_COLS missing from schema: {missing}")
+
+            # Insert a fake row + verify
+            cur = conn.execute(
+                "INSERT INTO backtest_runs(run_date, days, total_signals, "
+                "overall_wr, avg_rr, status) VALUES (?, ?, ?, ?, ?, ?)",
+                ("2026-05-27 00:00:00", 365, 1, 100.0, 1.5, "TEST"),
+            )
+            run_id = cur.lastrowid
+
+            synthetic = {
+                "token": "BTC", "signal": "BUY", "price": 1.0, "ts": "t",
+                "regime": "TR", "confidence": 8, "wscore": 0.5, "margin": 1.0,
+                "conflict": "LOW", "tp1_pct": 1.0, "sl_pct": -1.0, "rr1": 1.0,
+                "net_tp1_pct": 0.7, "net_sl_pct": -1.3, "net_rr1": 0.54,
+                "breakeven_wr": 0.5, "tp_reached": 0, "outcome": "EXPIRED",
+            }
+            row = backtest._backtest_signal_to_row(synthetic, run_id=run_id)
+            placeholders = ",".join(["?"] * len(backtest._BACKTEST_SIGNALS_COLS))
+            sql = (f"INSERT INTO backtest_signals "
+                   f"({','.join(backtest._BACKTEST_SIGNALS_COLS)}) "
+                   f"VALUES ({placeholders})")
+            # If this succeeds, the column-name/tuple-position alignment is correct
+            conn.execute(sql, row)
+            # Verify it landed as source='5M_SWEEP' (default for missing source key)
+            stored_source = conn.execute(
+                "SELECT source FROM backtest_signals WHERE run_id=?", (run_id,)
+            ).fetchone()[0]
+            self.assertEqual(stored_source, "5M_SWEEP",
+                "Pre-Session-2 signal dict (no source key) must default to '5M_SWEEP'")
+        finally:
+            conn.close()
+
     def test_config_hash_includes_crt_knobs(self):
         """B-CRT-S2-C2 fix: _compute_run_config_hash must include CRT env knobs
         so a CRT-enabled run and a CRT-disabled run on the same ICT params

@@ -117,6 +117,10 @@ from crypto_alert import (
 from crt_engine import (
     detect_h4_crt, ENABLE_H4_CRT, H4_CRT_DISABLED_TOKENS,
     H4_CRT_C2_LOOKBACK, H4_CRT_MSS_HORIZON,
+    # NEW-4 fix (Session 2 Option H audit 2026-05-27): helpers moved from
+    # backtest.py to crt_engine.py so the live-side integration can import
+    # them via the shared module — eliminates live/BT drift risk.
+    compute_crt_trade_economics, crt_quality_to_confidence,
 )
 # H-CRT2-1 fix (Session 2 Option B audit 2026-05-27): import SL buffer
 # directly from ict_engine (crypto_alert.py doesn't re-export it).
@@ -228,91 +232,10 @@ CRT_TP3_RR                 = 2.0 # TP3 R-multiple extension from entry
 CRT_FORWARD_BARS           = int(os.environ.get("CRT_FORWARD_BARS", "576"))
 
 
-# CRT v1 Session 2 Option E (H-2 partial): shared trade-economics helper for
-# the CRT path. Pure math + cost adjustment + outcome-driven realized R.
-# Used only by the CRT scanner; the 5M-sweep path keeps its existing
-# compute_ict_trade_plan() call (production-validated). Session 3 will
-# extract a more general helper covering all three callers (live + 5M-bt
-# + CRT-bt) when the live caller exists.
-def _compute_crt_trade_economics(direction, entry_price, sl_price,
-                                  tp1_price, tp2_price, tp3_price,
-                                  outcome, rt_cost_pct):
-    """Compute gross/net P&L %, RR multiples, and realized R from outcome.
-
-    Returns a dict with keys matching the CRT signal-dict economics fields:
-      gross_tp1/tp2/tp3, gross_sl, net_tp1/tp2/tp3, net_sl, rr1, net_rr1,
-      realized_r, breakeven_wr.
-    """
-    if direction == "BUY":
-        gross_tp1 = (tp1_price - entry_price) / entry_price * 100
-        gross_tp2 = (tp2_price - entry_price) / entry_price * 100
-        gross_tp3 = (tp3_price - entry_price) / entry_price * 100
-        gross_sl  = (sl_price  - entry_price) / entry_price * 100
-    else:
-        gross_tp1 = (entry_price - tp1_price) / entry_price * 100
-        gross_tp2 = (entry_price - tp2_price) / entry_price * 100
-        gross_tp3 = (entry_price - tp3_price) / entry_price * 100
-        gross_sl  = (entry_price - sl_price)  / entry_price * 100
-    net_tp1 = round(gross_tp1 - rt_cost_pct, 2)
-    net_tp2 = round(gross_tp2 - rt_cost_pct, 2)
-    net_tp3 = round(gross_tp3 - rt_cost_pct, 2)
-    net_sl  = round(gross_sl  - rt_cost_pct, 2)
-    rr1     = round(abs(gross_tp1 / gross_sl), 2) if gross_sl != 0 else 0
-    net_rr1 = round(net_tp1 / abs(net_sl), 2) if net_sl != 0 else 0
-
-    # Realized R-multiple
-    if outcome == "WIN":
-        realized_r = round(net_tp3 / abs(net_sl), 2) if net_sl != 0 else None
-    elif outcome == "PARTIAL_TP2":
-        realized_r = round(net_tp2 / abs(net_sl), 2) if net_sl != 0 else None
-    elif outcome == "PARTIAL_TP1":
-        realized_r = round(net_tp1 / abs(net_sl), 2) if net_sl != 0 else None
-    elif outcome == "LOSS":
-        realized_r = -1.0
-    else:  # EXPIRED
-        realized_r = 0.0
-
-    # Breakeven WR (M-2 bias fix): |SL| / (|SL| + TP1). Formula derived
-    # from EV = wr*tp1 - (1-wr)*|sl| = 0 → wr = |sl| / (|sl| + tp1).
-    # This is the WR at which long-run EV is zero given the R:R.
-    if abs(net_sl) + net_tp1 > 0:
-        breakeven_wr = round(abs(net_sl) / (abs(net_sl) + net_tp1), 4)
-    else:
-        breakeven_wr = 0.0
-
-    return {
-        "gross_tp1":    gross_tp1,
-        "gross_tp2":    gross_tp2,
-        "gross_tp3":    gross_tp3,
-        "gross_sl":     gross_sl,
-        "net_tp1":      net_tp1,
-        "net_tp2":      net_tp2,
-        "net_tp3":      net_tp3,
-        "net_sl":       net_sl,
-        "rr1":          rr1,
-        "net_rr1":      net_rr1,
-        "realized_r":   realized_r,
-        "breakeven_wr": breakeven_wr,
-    }
-
-
-def _crt_quality_to_confidence(mss_quality: str, fvg_quality: str) -> int:
-    """Map CRT MSS + FVG quality grades to a 1-10 confidence integer.
-
-    Option E fix M-4 quality (audit cycle-7 2026-05-27): replaces hardcoded
-    `confidence=10` for all CRT signals. CRT has gradations of quality
-    even with the (FVG OR OB) confluence requirement — MSS quality from
-    score_ict_mss is HIGH (4-5pts) / MEDIUM (2-3pts) / LOW (0-1pt),
-    same for FVG via score_ict_fvg. Map their sum into the 6-10 range
-    so CRT signals stay above the 5M-sweep floor but carry actual
-    quality info for downstream confidence-stratified analysis.
-    """
-    q_score = {"HIGH": 3, "MEDIUM": 2, "LOW": 1, "NONE": 0}
-    pts = q_score.get(mss_quality, 0) + q_score.get(fvg_quality, 0)
-    # pts in [0, 6]. Map → [6, 10] inclusive (CRT floor 6, ceiling 10).
-    # pts=0 → 6 (rare; both quality NONE means OB confluence with no MSS scoring)
-    # pts=6 → 10 (both HIGH = top-tier setup)
-    return max(6, min(10, 6 + (pts * 2) // 3))
+# Session 2 Option H NEW-4 fix (audit cycle-7 2026-05-27): helpers moved to
+# crt_engine.py (compute_crt_trade_economics, crt_quality_to_confidence) so
+# the Session 3 live-side integration can import them via the shared module.
+# Imports are at the top of this file; in-file definitions deleted.
 
 # Locked OOS start date — set once before optimization, never moved.
 # All signals with ts >= this date form the out-of-sample set.
@@ -1488,11 +1411,15 @@ def run_backtest_token_h4_crt(token, c5m, c4h, config=None):
             rej["crt_outside_killzone"] = rej.get("crt_outside_killzone", 0) + 1
             continue
 
-        # H-CRT2-4 fix: 4H bias gate. Spec § 7 promised reuse of existing
-        # 4H bias as Daily Bias proxy. Compute against the H4 window the
-        # CRT detection saw, NOT the full c4h (so we honor the same data
-        # cutoff as the detector for live/BT parity).
-        bias_4h = get_ict_4h_bias(c4h_win["closes"], c4h_win["highs"], c4h_win["lows"])
+        # H-CRT2-4 fix + NEW-2 follow-up (Option H 2026-05-27): 4H bias gate.
+        # The earlier fix passed the 12-bar sub-window to get_ict_4h_bias,
+        # which silently returned NEUTRAL for any input shorter than 200
+        # bars — the gate was inert. Replaced with `_lookup_4h_bias`, the
+        # same helper the 5M-sweep path uses at backtest.py:880. It
+        # binary-searches the FULL c4h for the most-recent bar at the entry
+        # timestamp and computes bias from the last 210 bars — guarantees
+        # adequate sample size and live/BT parity by construction.
+        bias_4h = _lookup_4h_bias(c4h, c5m["times"][entry_bar])
         # Direction must align with bias OR bias is NEUTRAL
         # (strict gate: reject when bias opposes; loose: accept NEUTRAL too;
         # none: skip the gate). Use config.bias_4h_gate which the 5M path also reads.
@@ -1552,14 +1479,20 @@ def run_backtest_token_h4_crt(token, c5m, c4h, config=None):
             direction, entry_price, sl_price, tp1_price, future,
         )
 
-        # Option E H-2 partial fix: economics via shared helper. Computes
-        # gross/net %, RR, realized R, AND breakeven_wr (M-2 bias fix).
+        # NEW-3 + NEW-4 fix (Option H 2026-05-27): economics via shared helper
+        # in crt_engine.py with conventions aligned to compute_ict_trade_plan
+        # (3-dp rounding, MAX_BREAKEVEN_WR gate, net_tp1 ≤ 0 gate). The helper
+        # returns None when a structural gate fails — caller skips the signal
+        # and records the appropriate rejection counter for D2 surfacing.
         rt_cost = TOKEN_RT_COST.get(token, ROUND_TRIP_COST_PCT) * 100
-        econ = _compute_crt_trade_economics(
+        econ = compute_crt_trade_economics(
             direction, entry_price, sl_price,
             tp1_price, tp2_price, tp3_price,
             outcome, rt_cost,
         )
+        if econ is None:
+            rej["crt_economics_gate"] = rej.get("crt_economics_gate", 0) + 1
+            continue
         gross_tp1 = econ["gross_tp1"]
         gross_sl  = econ["gross_sl"]
         net_tp1   = econ["net_tp1"]
@@ -1580,7 +1513,8 @@ def run_backtest_token_h4_crt(token, c5m, c4h, config=None):
         _mss_q = setup.get("mss_quality", "NONE")
         _fvg_q = (setup["confluence"]["details"].get("quality", "NONE")
                   if setup["confluence"]["type"] == "FVG" else "NONE")
-        _crt_conf = _crt_quality_to_confidence(_mss_q, _fvg_q)
+        # NEW-4 fix (Option H 2026-05-27): use moved helper
+        _crt_conf = crt_quality_to_confidence(_mss_q, _fvg_q)
 
         signals.append({
             "token":           token,
@@ -3498,6 +3432,14 @@ def _compute_run_config_hash() -> str:
         "H4_CRT_C2_LOOKBACK":     os.environ.get("H4_CRT_C2_LOOKBACK", "10"),
         "H4_CRT_MSS_HORIZON":     os.environ.get("H4_CRT_MSS_HORIZON", "30"),
         "H4_CRT_VALIDATION_SCHOOL": os.environ.get("H4_CRT_VALIDATION_SCHOOL", "flexible").lower(),
+        # NEW-1 fix (Session 2 Option H audit 2026-05-27): catches two
+        # env-overridable knobs missed by the Option B + Option E batches.
+        # Without these, runs differing only on CRT_FORWARD_BARS (e.g.
+        # 288 vs 576) or on H4_CRT_OB_SCAN_LOOKBACK (e.g. 20 vs 40)
+        # collide on config_hash → DSR n_trials undercount, Pareto
+        # archive collision. Same failure mode as B-CRT-S2-C2.
+        "CRT_FORWARD_BARS":         os.environ.get("CRT_FORWARD_BARS", "576"),
+        "H4_CRT_OB_SCAN_LOOKBACK":  os.environ.get("H4_CRT_OB_SCAN_LOOKBACK", "20"),
     })
 
 

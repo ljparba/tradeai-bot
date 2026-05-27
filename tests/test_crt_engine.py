@@ -382,5 +382,131 @@ class TestCrtEngineDetection(unittest.TestCase):
         self.assertIsNone(signal, "Mitigated C1 range must NOT produce a signal")
 
 
+class TestCrtEconomicsHelper(unittest.TestCase):
+    """Unit tests for crt_engine.compute_crt_trade_economics (NEW-4 moved here)."""
+
+    def setUp(self):
+        _clean_crt_env()
+        for mod in ("ict_engine", "crt_engine"):
+            if mod in sys.modules:
+                del sys.modules[mod]
+
+    def tearDown(self):
+        _clean_crt_env()
+
+    def _import(self):
+        import crt_engine
+        return crt_engine.compute_crt_trade_economics
+
+    def test_bullish_full_win(self):
+        """BUY entry @ 100, sl=99, tp1=101.5, tp2=102.5, tp3=103, outcome=WIN."""
+        compute = self._import()
+        econ = compute(
+            "BUY", entry_price=100.0, sl_price=99.0,
+            tp1_price=101.5, tp2_price=102.5, tp3_price=103.0,
+            outcome="WIN", rt_cost_pct=0.3,
+        )
+        self.assertIsNotNone(econ)
+        # gross_tp1 = 1.5%, gross_sl = -1.0%, net_tp1 = 1.5 - 0.3 = 1.2
+        self.assertAlmostEqual(econ["gross_tp1"], 1.5, places=3)
+        self.assertAlmostEqual(econ["gross_sl"], -1.0, places=3)
+        self.assertEqual(econ["net_tp1"], 1.2)
+        self.assertEqual(econ["realized_r"],
+                         round(econ["net_tp3"] / abs(econ["net_sl"]), 2))
+        # 3-dp rounding convention (matches compute_ict_trade_plan)
+        self.assertEqual(econ["net_tp1"], round(econ["net_tp1"], 3))
+
+    def test_bearish_loss(self):
+        """SELL entry @ 100, sl=101, tp1=98.5, tp2=97.5, tp3=97, outcome=LOSS."""
+        compute = self._import()
+        econ = compute(
+            "SELL", entry_price=100.0, sl_price=101.0,
+            tp1_price=98.5, tp2_price=97.5, tp3_price=97.0,
+            outcome="LOSS", rt_cost_pct=0.3,
+        )
+        self.assertIsNotNone(econ)
+        # gross_tp1 = (100-98.5)/100*100 = 1.5% (profit on short)
+        # gross_sl = (100-101)/100*100 = -1.0% (loss on short)
+        self.assertAlmostEqual(econ["gross_tp1"], 1.5, places=3)
+        self.assertAlmostEqual(econ["gross_sl"], -1.0, places=3)
+        self.assertEqual(econ["realized_r"], -1.0)
+
+    def test_returns_none_when_fees_kill_trade(self):
+        """net_tp1 ≤ 0 → return None (NEW-3 alignment with compute_ict_trade_plan)."""
+        compute = self._import()
+        # tp1 too close: gross_tp1 = 0.2%, but rt_cost=0.5% → net = -0.3
+        econ = compute(
+            "BUY", entry_price=100.0, sl_price=99.0,
+            tp1_price=100.2, tp2_price=100.4, tp3_price=100.6,
+            outcome="WIN", rt_cost_pct=0.5,
+        )
+        self.assertIsNone(econ,
+            "compute_crt_trade_economics must return None when net_tp1 <= 0")
+
+    def test_returns_none_when_breakeven_wr_too_high(self):
+        """breakeven_wr > MAX_BREAKEVEN_WR (= 0.60) → return None."""
+        compute = self._import()
+        # Tight TP relative to SL: gross_tp1=0.5%, gross_sl=-3% → bew way > 60%
+        econ = compute(
+            "BUY", entry_price=100.0, sl_price=97.0,
+            tp1_price=100.5, tp2_price=100.75, tp3_price=101.0,
+            outcome="WIN", rt_cost_pct=0.1,
+        )
+        self.assertIsNone(econ,
+            "must return None when breakeven WR exceeds MAX_BREAKEVEN_WR")
+
+    def test_outcome_none_propagates_realized_r_none(self):
+        """Live preview path: outcome=None → realized_r=None."""
+        compute = self._import()
+        econ = compute(
+            "BUY", entry_price=100.0, sl_price=99.0,
+            tp1_price=101.5, tp2_price=102.5, tp3_price=103.0,
+            outcome=None, rt_cost_pct=0.3,
+        )
+        self.assertIsNotNone(econ)
+        self.assertIsNone(econ["realized_r"])
+
+
+class TestCrtQualityToConfidence(unittest.TestCase):
+    """Unit tests for crt_engine.crt_quality_to_confidence (NEW-4 moved here)."""
+
+    def setUp(self):
+        _clean_crt_env()
+        for mod in ("ict_engine", "crt_engine"):
+            if mod in sys.modules:
+                del sys.modules[mod]
+
+    def _import(self):
+        import crt_engine
+        return crt_engine.crt_quality_to_confidence
+
+    def test_full_matrix(self):
+        """All 16 (mss, fvg) quality grade combinations produce confidence in [6, 10]."""
+        compute = self._import()
+        grades = ["NONE", "LOW", "MEDIUM", "HIGH"]
+        for mss in grades:
+            for fvg in grades:
+                conf = compute(mss, fvg)
+                self.assertGreaterEqual(conf, 6,
+                    f"confidence({mss}, {fvg}) = {conf} < 6 floor")
+                self.assertLessEqual(conf, 10,
+                    f"confidence({mss}, {fvg}) = {conf} > 10 ceiling")
+                self.assertIsInstance(conf, int)
+
+    def test_top_tier(self):
+        """HIGH + HIGH = top-tier setup → confidence 10."""
+        self.assertEqual(self._import()("HIGH", "HIGH"), 10)
+
+    def test_bottom_tier(self):
+        """NONE + NONE = OB-only confluence (no MSS/FVG quality) → confidence 6."""
+        self.assertEqual(self._import()("NONE", "NONE"), 6)
+
+    def test_unknown_grades_treated_as_none(self):
+        """Unknown quality strings default to NONE-equivalent (0 points)."""
+        compute = self._import()
+        # Unknown grades = 0 pts each → conf = 6 + (0*2)//3 = 6
+        self.assertEqual(compute("BOGUS", "ALSO_BOGUS"), 6)
+
+
 if __name__ == "__main__":
     unittest.main()

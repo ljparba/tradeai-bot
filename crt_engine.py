@@ -37,6 +37,7 @@ from typing import Optional
 
 from ict_engine import (
     ICT_MSS_HORIZON,
+    MAX_BREAKEVEN_WR,
     find_ict_swings,
     score_ict_mss,
     score_ict_fvg,
@@ -389,3 +390,113 @@ def detect_h4_crt(c4h: dict, c5m: dict, token: str = "",
             }
 
     return None
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# CRT economics + confidence helpers (Session 2 Option H NEW-4 — moved from
+# backtest.py so the Session 3 live integration (crypto_alert.py → crt_engine)
+# can import them without backwards dependency on backtest.py)
+# ────────────────────────────────────────────────────────────────────────────
+def compute_crt_trade_economics(direction: str, entry_price: float,
+                                 sl_price: float, tp1_price: float,
+                                 tp2_price: float, tp3_price: float,
+                                 outcome: Optional[str], rt_cost_pct: float) -> Optional[dict]:
+    """Compute gross/net P&L %, RR multiples, realized R, and breakeven WR.
+
+    NEW-3 fix (audit cycle-7 Option H 2026-05-27): aligned with
+    `compute_ict_trade_plan` conventions used by the 5M-sweep path:
+      - 3-decimal rounding on net % values (matches ict_engine.py:816,828,829)
+      - Returns None if `net_tp1_pct <= 0` (fees kill the trade)
+      - Returns None if breakeven_wr > MAX_BREAKEVEN_WR (= 0.60)
+
+    Returns None when the trade fails the structural gates — caller treats
+    None as "skip this signal" and records the appropriate rejection counter.
+    Returns dict with all economics fields on success.
+
+    `outcome` may be None when called outside the backtest path (e.g. live
+    signal preview). In that case `realized_r` is left as None.
+    """
+    if direction == "BUY":
+        gross_tp1 = (tp1_price - entry_price) / entry_price * 100
+        gross_tp2 = (tp2_price - entry_price) / entry_price * 100
+        gross_tp3 = (tp3_price - entry_price) / entry_price * 100
+        gross_sl  = (sl_price  - entry_price) / entry_price * 100
+    else:
+        gross_tp1 = (entry_price - tp1_price) / entry_price * 100
+        gross_tp2 = (entry_price - tp2_price) / entry_price * 100
+        gross_tp3 = (entry_price - tp3_price) / entry_price * 100
+        gross_sl  = (entry_price - sl_price)  / entry_price * 100
+
+    # 3-decimal rounding on net % — matches compute_ict_trade_plan (ict_engine.py:816)
+    net_tp1 = round(gross_tp1 - rt_cost_pct, 3)
+    net_tp2 = round(gross_tp2 - rt_cost_pct, 3)
+    net_tp3 = round(gross_tp3 - rt_cost_pct, 3)
+    net_sl  = round(gross_sl  - rt_cost_pct, 2)  # net_sl is intentionally 2-dp per 5M path
+
+    # NEW-3 gate 1: fees kill the trade
+    if net_tp1 <= 0:
+        return None
+
+    # Breakeven WR formula = (|sl| + rt_cost) / (tp1_gross + |sl|).
+    # Note: matches compute_ict_trade_plan's formula at ict_engine.py:819.
+    risk_pct = abs(gross_sl)
+    if (gross_tp1 + risk_pct) <= 0:
+        return None
+    bew = (risk_pct + rt_cost_pct) / (gross_tp1 + risk_pct)
+
+    # NEW-3 gate 2: breakeven WR too high (structurally negative-EV setup)
+    if bew > MAX_BREAKEVEN_WR:
+        return None
+
+    rr1 = round(abs(gross_tp1 / gross_sl), 2) if gross_sl != 0 else 0
+    net_rr1 = round(net_tp1 / abs(net_sl), 2) if net_sl != 0 else 0
+
+    # Realized R-multiple from outcome (None if outcome not provided)
+    if outcome == "WIN":
+        realized_r = round(net_tp3 / abs(net_sl), 2) if net_sl != 0 else None
+    elif outcome == "PARTIAL_TP2":
+        realized_r = round(net_tp2 / abs(net_sl), 2) if net_sl != 0 else None
+    elif outcome == "PARTIAL_TP1":
+        realized_r = round(net_tp1 / abs(net_sl), 2) if net_sl != 0 else None
+    elif outcome == "LOSS":
+        realized_r = -1.0
+    elif outcome == "EXPIRED":
+        realized_r = 0.0
+    else:
+        realized_r = None
+
+    return {
+        "gross_tp1":    gross_tp1,
+        "gross_tp2":    gross_tp2,
+        "gross_tp3":    gross_tp3,
+        "gross_sl":     gross_sl,
+        "net_tp1":      net_tp1,
+        "net_tp2":      net_tp2,
+        "net_tp3":      net_tp3,
+        "net_sl":       net_sl,
+        "rr1":          rr1,
+        "net_rr1":      net_rr1,
+        "realized_r":   realized_r,
+        "breakeven_wr": round(bew, 4),
+    }
+
+
+def crt_quality_to_confidence(mss_quality: str, fvg_quality: str) -> int:
+    """Map MSS + FVG quality grades to a 1-10 confidence integer.
+
+    NEW-4 fix (audit cycle-7 Option H 2026-05-27): moved from backtest.py
+    so the Session 3 live integration can call the same function and produce
+    byte-identical confidence values for the same setup.
+
+    CRT has gradations even with the (FVG OR OB) confluence requirement:
+    MSS quality from score_ict_mss is HIGH (4-5pts) / MEDIUM (2-3pts) /
+    LOW (0-1pt). FVG quality same scale. Map their sum into the 6-10 range
+    so CRT signals stay above the 5M-sweep floor but carry actual quality
+    info for downstream confidence-stratified analysis.
+
+    pts=0 (NONE+NONE — typically pure-OB confluence with no MSS scoring) → 6
+    pts=6 (HIGH+HIGH — top-tier setup with both confluences strong)       → 10
+    """
+    q_score = {"HIGH": 3, "MEDIUM": 2, "LOW": 1, "NONE": 0}
+    pts = q_score.get(mss_quality, 0) + q_score.get(fvg_quality, 0)
+    return max(6, min(10, 6 + (pts * 2) // 3))
