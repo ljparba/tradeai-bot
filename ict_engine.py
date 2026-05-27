@@ -840,3 +840,122 @@ def compute_ict_trade_plan(price, signal, sweep_wick, sh_1h, sl_1h, extra_liq=No
         "tp2_target_type": tp2_label,
         "entry_note":f"ICT FVG retracement | SL below swept {sweep_wick:.5f}",
     }
+
+
+# ── Order Block detection (CRT v1 confluence — added 2026-05-27) ──────────
+# An ICT Order Block (OB) is the LAST opposite-direction candle immediately
+# preceding a strong displacement. It marks where institutions absorbed the
+# opposite-side flow before initiating the real move — and therefore where
+# they are likely to defend on a retest.
+#
+# Bullish OB:  last BEARISH candle (close < open) before a strong BULLISH
+#              displacement. Acts as a demand zone — price expected to bounce
+#              UP from this zone on retest.
+# Bearish OB:  last BULLISH candle (close > open) before a strong BEARISH
+#              displacement. Acts as a supply zone — price expected to reverse
+#              DOWN from this zone on retest.
+#
+# Used by crt_engine.py as a confluence filter alongside FVG: a CRT setup
+# qualifies for entry only if the C2 sweep wick (or the MSS bar) overlaps
+# with either a fresh FVG or a fresh OB. Per the Trading Wyckoff article,
+# the OB is the PRIMARY confluence (more significant than FVG alone) so
+# including it materially improves the CRT signal quality stack.
+ICT_OB_MIN_DISPLACEMENT_PCT = 0.005   # 0.5% body magnitude required for "strong" displacement
+ICT_OB_OPPOSITE_LOOKBACK    = 5       # bars before displacement to scan for the last opposite-direction candle
+
+
+def detect_ict_order_block(opens, highs, lows, closes, lookback=20,
+                           min_disp_body_pct=ICT_OB_MIN_DISPLACEMENT_PCT,
+                           opposite_lookback=ICT_OB_OPPOSITE_LOOKBACK):
+    """Detect the most recent Order Block on the given candle stream.
+
+    Scans the last `lookback` bars (most recent first) for a strong
+    displacement candle, then walks back up to `opposite_lookback` bars to
+    find the last opposite-direction candle — that candle's range is the OB.
+
+    Args:
+        opens, highs, lows, closes: equal-length arrays of candle data
+        lookback:           bars from the end to scan for displacement (default 20)
+        min_disp_body_pct:  displacement body must be ≥ this fraction of price (default 0.5%)
+        opposite_lookback:  max bars before displacement to find opposite candle (default 5)
+
+    Returns:
+        dict with the OB metadata or None if no OB found within window.
+
+        {
+          "bar_idx":          int,    # index of the OB candle
+          "displacement_bar": int,    # index of the displacement candle
+          "displacement_pct": float,  # body magnitude as fraction of price
+          "top":              float,  # OB candle high (zone ceiling)
+          "bottom":           float,  # OB candle low (zone floor)
+          "mid":              float,  # midpoint of OB zone
+          "direction":        "BUY" | "SELL",  # which CRT direction the OB supports
+        }
+
+    A bullish OB (direction="BUY") supports BUY signals — its zone is a
+    demand block, so a BUY-side CRT whose sweep wick reaches this zone
+    has institutional defense backing the reversal.
+    """
+    n = len(closes)
+    if n < 2 or len(opens) != n or len(highs) != n or len(lows) != n:
+        return None
+    start = max(1, n - lookback)
+
+    # Walk backward from most recent candle looking for displacement
+    for i in range(n - 1, start - 1, -1):
+        price = closes[i]
+        if price <= 0:
+            continue
+        body = abs(closes[i] - opens[i])
+        if body / price < min_disp_body_pct:
+            continue
+
+        is_bullish_disp = closes[i] > opens[i]
+        is_bearish_disp = closes[i] < opens[i]
+
+        # Walk back to find last opposite-direction candle
+        opp_start = max(0, i - opposite_lookback)
+        for j in range(i - 1, opp_start - 1, -1):
+            j_bullish = closes[j] > opens[j]
+            j_bearish = closes[j] < opens[j]
+
+            if is_bullish_disp and j_bearish:
+                # Bullish OB — last bearish candle before bullish move
+                return {
+                    "bar_idx":          j,
+                    "displacement_bar": i,
+                    "displacement_pct": round(body / price, 4),
+                    "top":              round(highs[j], 6),
+                    "bottom":           round(lows[j], 6),
+                    "mid":              round((highs[j] + lows[j]) / 2, 6),
+                    "direction":        "BUY",
+                }
+            if is_bearish_disp and j_bullish:
+                # Bearish OB — last bullish candle before bearish move
+                return {
+                    "bar_idx":          j,
+                    "displacement_bar": i,
+                    "displacement_pct": round(body / price, 4),
+                    "top":              round(highs[j], 6),
+                    "bottom":           round(lows[j], 6),
+                    "mid":              round((highs[j] + lows[j]) / 2, 6),
+                    "direction":        "SELL",
+                }
+            # If we hit a same-direction candle while walking back, the
+            # "last opposite" search is broken — stop and look for a
+            # different displacement candle.
+            if (is_bullish_disp and j_bullish) or (is_bearish_disp and j_bearish):
+                break
+
+    return None
+
+
+def order_block_overlaps_range(ob, range_high, range_low):
+    """True if the OB zone [bottom, top] overlaps the given price range.
+
+    Used by crt_engine.py to confirm OB confluence with a CRT C1 range or
+    the MSS bar's high/low envelope.
+    """
+    if ob is None:
+        return False
+    return not (ob["bottom"] > range_high or ob["top"] < range_low)
