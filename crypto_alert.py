@@ -3520,14 +3520,45 @@ def main():
     print(weight_engine.summary())
     _tokens_str = " ".join(BINANCE_TOKENS.keys())
     _drift_note_clean = _drift_note.strip()
+    # CRT-aware startup message (telegram audit 2026-05-27 — C-1 followup):
+    # The old "ICT mode" title + 5M_SWEEP-only strategy line was misleading
+    # under the operator's current CRT-only config. Now reflects which
+    # scanner(s) are actually active so the operator's startup notification
+    # matches the bot's runtime behavior.
+    _5m_on  = bool(ENABLE_5M_SWEEP)
+    _crt_on = bool(ENABLE_H4_CRT)
+    if _5m_on and _crt_on:
+        _mode_title    = "DUAL mode (5M_SWEEP + H4_CRT)"
+        _strategy_line = "5M_SWEEP + H4_CRT (parallel scanners)"
+    elif _crt_on and not _5m_on:
+        _mode_title    = "CRT-only mode"
+        _strategy_line = "H4 Candle Range Theory (CRT) — 5M_SWEEP disabled"
+    elif _5m_on and not _crt_on:
+        _mode_title    = "ICT mode (5M_SWEEP)"
+        _strategy_line = "ICT sweep + MSS + FVG retracement"
+    else:
+        # Both off — bot will emit zero signals; surface this as a warning
+        _mode_title    = "ALL SCANNERS DISABLED"
+        _strategy_line = "WARNING: ENABLE_5M_SWEEP=0 AND ENABLE_H4_CRT=0 — no signals will fire"
+
+    # CRT-specific param line — shown only when CRT is the active source so
+    # the operator sees TP1 mode + Wyckoff filter state at a glance.
+    _crt_line = ""
+    if _crt_on:
+        from crt_engine import CRT_TP1_MODE as _ctm, WYCKOFF_PHASE_FILTER as _wpf
+        _crt_line = (
+            f"CRT params TP1={_h(_ctm)}  Wyckoff={_h(_wpf)}  "
+            f"bias_4h={_h(getattr(__import__('config'), 'LIVE_BIAS_4H_GATE', 'none'))}\n"
+        )
     send_telegram(
-        "<b>TradeAI v13 STARTED  -  ICT mode</b>\n\n"
+        f"<b>TradeAI v13 STARTED  -  {_h(_mode_title)}</b>\n\n"
         "<pre>"
         f"Mode       {_h(EXECUTION_MODE)}\n"
         f"Tokens     {_h(len(BINANCE_TOKENS))}  ({_h(_tokens_str)})\n"
-        f"Strategy   ICT sweep + MSS + FVG retracement\n"
+        f"Strategy   {_h(_strategy_line)}\n"
+        + _crt_line +
         f"SL         0.3% beyond swept wick  (max {MAX_SL_PCT*100:.1f}%)\n"
-        f"TP         1H swing levels  (1.5R - 4R)\n"
+        f"TP         1H swing levels (5M_SWEEP) / 1.5R-2R cascade (CRT)\n"
         f"Expiry     12h    Cooldown {_h(SIGNAL_COOLDOWN)} min\n"
         f"BEW gate   {MAX_BREAKEVEN_WR:.0%}     RT cost {ROUND_TRIP_COST_PCT*100:.2f}%"
         "</pre>"
@@ -3677,6 +3708,14 @@ def main():
                 port_st  = portfolio_layer.get_status()
                 open_cnt = port_st["total_open"]
                 eff_thr  = SIGNAL_THRESHOLD + _signal_threshold_adj
+                # CRT-aware heartbeat (telegram audit 2026-05-27 — C-1 followup):
+                # surface scanner state so operator sees at a glance which
+                # source(s) the bot is currently watching for signals.
+                _hb_scanners = (
+                    ("5M_SWEEP" if ENABLE_5M_SWEEP else "") +
+                    (("+" if ENABLE_5M_SWEEP and ENABLE_H4_CRT else "") +
+                     ("H4_CRT" if ENABLE_H4_CRT else ""))
+                ) or "DISABLED"
                 _hb_alerter.send(
                     "Heartbeat",
                     "<b>Heartbeat  -  bot alive</b>\n\n"
@@ -3684,6 +3723,7 @@ def main():
                     f"Time      {_h(datetime.now().strftime('%Y-%m-%d %H:%M'))}\n"
                     f"Cycle     {_h(cycle)}\n"
                     f"Mode      {_h(EXECUTION_MODE)}\n"
+                    f"Scanners  {_h(_hb_scanners)}\n"
                     f"Open      {_h(open_cnt)} / {_h(MAX_OPEN_POSITIONS)}\n"
                     f"WR        {wr_live:.0%}\n"
                     f"Threshold {_h(eff_thr)}%"
