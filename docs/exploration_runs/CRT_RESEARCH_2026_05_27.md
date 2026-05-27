@@ -181,28 +181,60 @@ implementation simplification.
 
 ---
 
-## 7. TradeAI's Opinionated CRT Specification
+## 7. TradeAI's Opinionated CRT Specification (Phased: v1 → v2)
 
-Combines the best of all sources, leverages existing TradeAI infrastructure
-to minimize new surface area, and reflects operator decisions (H4 reference,
-5M entry, all 10 tokens).
+Honest-research correction (2026-05-27, operator review):
+The original spec had three decisions framed as "convenient for TradeAI"
+rather than "what the best research actually advocates." Operator
+directive: follow research-best, accept the additional implementation
+cost. Spec below is the revised, honestly-research-grounded version.
 
-| Spec dimension | Decision | Rationale |
+The spec is split into v1 (initial implementation, 55-62% WR ceiling)
+and v2 (enhancements that reach the article's reported 60-65% ceiling).
+v2 only starts after v1 backtest validates the foundation.
+
+### Common (v1 + v2)
+
+| Spec dimension | Decision | Source / Rationale |
 |---|---|---|
-| **Reference timeframe** | H4 | Per crypto guidance from multiple sources. Aligns with article's "4H CRT Model" specifically. Avoids M1/M5 noise. |
-| **Entry timeframe** | 5M | Existing infrastructure. Precision entry refinement after H4 CRT confirmed. |
-| **Validation school** | FLEXIBLE (Wyckoff) | Allows reuse of `ict_engine.detect_ict_mss()` as confirmation. Major simplification. |
-| **Entry mode** | CONSERVATIVE | Wait for 5M MSS, not just C2 wick. Matches TradeAI's existing risk discipline. |
-| **Stop placement** | Below C2 wick (sweep low/high) | 100% consensus across sources. |
-| **Take profit (TP1)** | Opposite extreme of C1 range | Universal rule. |
-| **Take profit (TP2/TP3)** | Use existing trade plan logic (`ict_engine.compute_ict_trade_plan`) | Reuse rather than reinvent. |
-| **Mitigation** | One-shot per zone | Reuse existing `consumed_sweeps_abs` pattern. |
-| **HTF filter** | Existing 4H bias gate (`LIVE_BIAS_4H_GATE`) as "Daily Bias proxy" | The 4H bias already approximates "is the market currently bullish/bearish at the macro?" |
-| **Confluence required** | FVG overlap with C1 range OR with MSS bar | Reuse existing FVG quality scoring. |
-| **Tokens** | All 10 (BTC, ETH, XRP, HBAR, AVAX, LINK, BNB, ADA, POL, TON) | Operator decision: TradeAI's Run-81 already validated 10-token portfolio empirically. Article's "BTC+ETH only" is conservative default for forex traders adopting CRT; we have empirical evidence smaller caps work for ICT-style logic in our setup. See §8 below. |
-| **Killzones** | Reuse existing NY AM / London / Asia gates | Proven calibration. |
+| **Reference timeframe** | H4 | Per crypto guidance across 4+ sources. Aligns with article's "4H CRT Model" specifically. Avoids M1/M5 noise. |
+| **Entry timeframe** | 5M | Existing TradeAI infrastructure. Precision entry refinement after H4 CRT confirmed. |
+| **Stop placement** | Below C2 wick (sweep low/high) | 100% consensus across all sources. |
+| **Take profit (TP1)** | Opposite extreme of C1 range | Universal rule across sources. |
+| **Take profit (TP2/TP3)** | Reuse `ict_engine.compute_ict_trade_plan()` | Maintains TradeAI's existing TP cascade logic. |
+| **Mitigation** | One-shot per C1 zone | "A CRT zone only works once" — universal rule. Reuse `consumed_sweeps_abs` pattern. |
+| **HTF filter** | Existing 4H bias gate (`LIVE_BIAS_4H_GATE`) as "Daily Bias proxy" | 4H bias already approximates the macro direction filter article calls "Daily Bias." |
+| **Tokens** | All 10 (BTC, ETH, XRP, HBAR, AVAX, LINK, BNB, ADA, POL, TON) | Operator override of article's "BTC+ETH only" default — justified by Run-81 empirical evidence on full portfolio. See §8. |
+| **Killzones** | Reuse existing NY AM / London / Asia gates | Proven TradeAI calibration. |
 | **Daily cap** | Same as existing template tiers | Tier classification still applies. |
 | **Risk per trade** | Same 1% (no change) | Risk management unchanged. |
+
+### v1 — Foundation (target: 55-62% WR ceiling per article's stats)
+
+| Spec dimension | v1 Decision | Honest research rationale |
+|---|---|---|
+| **Validation school** | FLEXIBLE (Wyckoff) | Trading Wyckoff article author **explicitly recommends** this school: "from a Wyckoff Method perspective, the question of where the sweep candle closes is not the determining factor" + "Practical Recommendation: If you trade from a Wyckoff perspective, the key is the confirmation candle." Authoritative source recommendation, not convenience. |
+| **Entry mode** | **HYBRID — LTF MSS per Wyckoff/flexible authorization** | NOT article-conservative (which means waiting for full H4 C3 close = 4+ hours after sweep). NOT article-aggressive (which enters on raw C2 wick break with no confirmation). The 5M MSS approach is explicitly authorized by the flexible school's "Look for MSS (Market Structure Shift) on lower timeframe" alternative. Faster than article-conservative (~30 min vs 4 hours) but more structural than article-aggressive (requires MSS, not just wick). Honest framing: TradeAI hybrid adaptation within Wyckoff school. |
+| **Confluence required** | **(FVG OR Order Block) overlap with C1 range OR MSS bar** | Article highlights **Order Block as the PRIMARY confluence** ("CRT + Order Block... probability of reversal increases significantly") with FVG as secondary. Requires new `detect_ict_order_block()` function (~3-4h). Single-confluence requirement (FVG OR OB) rather than both, to avoid over-filtering. |
+| **Wyckoff phase context** | NOT IN v1 (documented gap) | Article shows phase context (Accumulation Phase C, Distribution Phase D) is required to reach the 60-65% WR ceiling. Without it, v1's expected WR ceiling is ~55-62%. Deferred to v2. |
+
+### v2 — Research-best ceiling (target: 60-65% WR per article's stats)
+
+| Spec dimension | v2 Addition | Honest research rationale |
+|---|---|---|
+| **Wyckoff phase detection** | Add `detect_wyckoff_phase()` on H4/D1 — identify accumulation/distribution phases (A/B/C/D/E) | Required for the article's top-tier WR (60-65%). Filter CRT signals: bullish CRT only valid in Wyckoff accumulation Phase C or D; bearish CRT only in distribution Phase C or D. Significant new work (~6-10h) — defers until v1 baseline validates the foundation. |
+| **Strict-vs-Wyckoff A/B test** | Implement BOTH validation schools, A/B test via parallel backtest, keep whichever yields higher DSR | Article explicitly says both schools are valid. Author favors flexible but acknowledges strict is more conservative. Best research-correctness: don't pick upfront — let the data decide for OUR specific crypto context. ~4-6h additional code path + backtest comparison. |
+
+### v1 → v2 sequencing rule
+
+v2 work does NOT start until v1 has:
+- Produced ≥ 100 backtest CRT signals across 10 tokens
+- CPCV verdict = PASS or MARGINAL (not FAIL)
+- DSR ≥ 80% (loose floor for experimental track)
+- Per-token attribution shows ≥ 5 tokens with WR ≥ 50%
+
+If v1 fails these gates → root-cause analysis BEFORE adding v2 complexity.
+Adding more confluences on a broken foundation doesn't fix the foundation.
 
 ---
 
@@ -438,19 +470,45 @@ production.
 
 ---
 
-## 12. Implementation Effort Estimate
+## 12. Implementation Effort Estimate (Revised for Phased v1 → v2)
+
+### v1 — Foundation (target: 22-25 hours, 55-62% WR ceiling)
 
 | Task | Hours |
 |---|---|
-| `crt_engine.py` — H4 detection + flexible C3/MSS validation | 4-6 |
+| `crt_engine.py` — H4 CRT detection + Wyckoff/flexible validation | 4-6 |
+| `crt_engine.py` — LTF MSS hybrid entry logic (reuses `detect_ict_mss`) | 1-2 |
+| `ict_engine.py` — add `detect_ict_order_block()` function | 3-4 |
+| `crt_engine.py` — (FVG OR OB) confluence filter | 1 |
 | Schema migration (`source` column + backfill default) | 1 |
 | `backtest.py` integration (parallel scan path + tag) | 2 |
 | `crypto_alert.py` integration | 2 |
-| Per-token blacklist env handling | 1 |
-| Test suite — 6-10 unit tests for CRT detection | 3 |
-| Initial backtest run + per-token analysis | 1-2 |
+| Per-token blacklist env handling (`H4_CRT_DISABLED_TOKENS`) | 1 |
+| Test suite — 8-12 unit tests (CRT detection + OB detection + integration) | 3-4 |
+| Initial backtest run + per-token attribution analysis | 1-2 |
 | Documentation update (CLAUDE.md, README.md, ADAPTIVE_LEARNING.md) | 1 |
-| **Total** | **15-18 hours** |
+| **v1 Total** | **22-25 hours** |
+
+### v2 — Research-best ceiling (additional 10-15 hours, 60-65% WR target)
+
+Only starts after v1 passes its validation gates (see §7 sequencing rule).
+
+| Task | Hours |
+|---|---|
+| `crt_engine.py` — `detect_wyckoff_phase()` on H4/D1 (5 phases: A/B/C/D/E) | 6-10 |
+| Phase-context filter integration into CRT signal pipeline | 1-2 |
+| Dual validation school code paths (strict + flexible) | 2-3 |
+| A/B backtest harness — run both schools, compare DSR | 1-2 |
+| Test suite expansion — phase detection + dual-school cases | 2-3 |
+| Re-baseline backtest + per-school per-phase attribution | 1-2 |
+| Documentation update with v2 findings + chosen school | 1 |
+| **v2 Total** | **10-15 hours** |
+
+### Combined v1 + v2 grand total
+
+**32-40 hours of focused engineering work** to reach research-best CRT
+implementation. Spread across multiple sessions with backtest validation
+gates between phases.
 
 ---
 
@@ -508,8 +566,26 @@ production.
 
 ## 16. Document History
 
-- **2026-05-27** — Created. Research consolidated from Trading Wyckoff
-  long-form article + 4 web searches across ICT/CRT topic space. Operator
-  spec confirmed: H4 reference, 5M entry, all 10 tokens (override of
-  BTC+ETH-only conservative default with empirical justification from
+- **2026-05-27 (initial)** — Created. Research consolidated from Trading
+  Wyckoff long-form article + 4 web searches across ICT/CRT topic space.
+  Operator spec confirmed: H4 reference, 5M entry, all 10 tokens (override
+  of BTC+ETH-only conservative default with empirical justification from
   Run-81 baseline performance).
+
+- **2026-05-27 (revision — honest research correction)** — Operator
+  flagged that three spec decisions (entry mode, confluence requirement,
+  validation school) were framed as "convenient for TradeAI" rather than
+  "what authoritative research advocates." Revised:
+  - Entry mode honestly labeled as "HYBRID LTF MSS per Wyckoff/flexible
+    authorization" (not "conservative" which has a specific article
+    meaning we don't match)
+  - Confluence broadened to "FVG OR Order Block" — article highlights OB
+    as the PRIMARY confluence, not FVG. Adds `detect_ict_order_block()`
+    implementation (~3-4h)
+  - Validation school rationale rewritten from "code reuse" to "article
+    author's explicit recommendation"
+  - Added v2 phase with Wyckoff phase detection + strict-vs-flexible
+    A/B test to reach the article's reported 60-65% WR ceiling
+  - Phased rollout v1 (foundation, 22-25h, 55-62% WR ceiling) → v2
+    (research-best, +10-15h, 60-65% WR ceiling) with explicit gates
+    between phases
