@@ -411,8 +411,12 @@ def _precache_warm(cache_minutes_max: int = 30) -> None:
     # exact env the actual trials will run under — cache hits stay valid
     # across the session and the warm-run cost reflects the right scanner
     # mix (not whatever the operator's paper-soak `.env` happens to have).
-    env["ENABLE_5M_SWEEP"] = os.environ.get("EXPLORER_ENABLE_5M_SWEEP", "1")
-    env["ENABLE_H4_CRT"]   = os.environ.get("EXPLORER_ENABLE_H4_CRT",   "0")
+    # Defaults follow EXPLORER_SEARCH_SPACE (crt → CRT-only, 5m → 5M-only).
+    _space = os.environ.get("EXPLORER_SEARCH_SPACE", "crt").lower()
+    _default_5m  = "1" if _space == "5m" else "0"
+    _default_crt = "0" if _space == "5m" else "1"
+    env["ENABLE_5M_SWEEP"] = os.environ.get("EXPLORER_ENABLE_5M_SWEEP", _default_5m)
+    env["ENABLE_H4_CRT"]   = os.environ.get("EXPLORER_ENABLE_H4_CRT",   _default_crt)
     started = time.time()
     # Snapshot before so we only clean OUR precache row (FIX C1)
     max_id_before = 0
@@ -451,15 +455,61 @@ def _precache_warm(cache_minutes_max: int = 30) -> None:
 
 
 def _suggest_params(trial: optuna.Trial) -> dict:
+    """Optuna search space.
+
+    Default mode selectable via env knob `EXPLORER_SEARCH_SPACE`:
+      "crt"    — CRT-tuned (default 2026-05-27 onward) — 8 CRT-side params
+      "5m"     — legacy 5M_SWEEP-tuned (pre-CRT search space, kept for fallback)
+    """
+    space = os.environ.get("EXPLORER_SEARCH_SPACE", "crt").lower()
+    if space == "5m":
+        # Legacy 5M_SWEEP search space (pre-CRT, kept for operator override).
+        # See deploy/env.explorer.example "5m fallback profile".
+        return {
+            "ICT_SWEEP_LOOKBACK":       trial.suggest_int("ICT_SWEEP_LOOKBACK", 15, 60, step=5),
+            "ICT_MSS_HORIZON":          trial.suggest_int("ICT_MSS_HORIZON",    10, 60, step=5),
+            "ICT_FVG_MIN_GAP":          trial.suggest_float("ICT_FVG_MIN_GAP", 0.0005, 0.0030, step=0.0001),
+            "DEALING_RANGE_LOOKBACK":   trial.suggest_int("DEALING_RANGE_LOOKBACK", 30, 100, step=10),
+            "BACKTEST_BIAS_4H_GATE":    trial.suggest_categorical("BACKTEST_BIAS_4H_GATE",  ["none", "loose", "strict"]),
+            "BACKTEST_TREND_1H_GATE":   trial.suggest_categorical("BACKTEST_TREND_1H_GATE", ["none", "loose", "strict"]),
+            "BACKTEST_FVG_MIN_QUALITY": trial.suggest_categorical("BACKTEST_FVG_MIN_QUALITY", ["LOW", "MEDIUM", "HIGH"]),
+            "BACKTEST_MSS_MIN_QUALITY": trial.suggest_categorical("BACKTEST_MSS_MIN_QUALITY", ["LOW", "MEDIUM", "HIGH"]),
+        }
+
+    # ── DEFAULT: CRT-tuned search space (2026-05-27 — replaces legacy 5M space) ──
+    # 8 params targeting H4_CRT scanner behavior. Anti-pattern locks enforced
+    # at session startup via CRT_ANTI_PATTERN_LOCKS (line 175):
+    #   - WYCKOFF_PHASE_FILTER excludes "strict" (empirically -5.22pp WR)
+    #   - CRT_APPLY_QUALITY_GATES is NOT in this search space at all
+    #     (locked off; empirically -21% R)
     return {
-        "ICT_SWEEP_LOOKBACK":       trial.suggest_int("ICT_SWEEP_LOOKBACK", 15, 60, step=5),
-        "ICT_MSS_HORIZON":          trial.suggest_int("ICT_MSS_HORIZON",    10, 60, step=5),
-        "ICT_FVG_MIN_GAP":          trial.suggest_float("ICT_FVG_MIN_GAP", 0.0005, 0.0030, step=0.0001),
-        "DEALING_RANGE_LOOKBACK":   trial.suggest_int("DEALING_RANGE_LOOKBACK", 30, 100, step=10),
-        "BACKTEST_BIAS_4H_GATE":    trial.suggest_categorical("BACKTEST_BIAS_4H_GATE",  ["none", "loose", "strict"]),
-        "BACKTEST_TREND_1H_GATE":   trial.suggest_categorical("BACKTEST_TREND_1H_GATE", ["none", "loose", "strict"]),
-        "BACKTEST_FVG_MIN_QUALITY": trial.suggest_categorical("BACKTEST_FVG_MIN_QUALITY", ["LOW", "MEDIUM", "HIGH"]),
-        "BACKTEST_MSS_MIN_QUALITY": trial.suggest_categorical("BACKTEST_MSS_MIN_QUALITY", ["LOW", "MEDIUM", "HIGH"]),
+        # TP1 placement policy — today's empirical winner is "min_1r"; explorer
+        # can re-confirm or find better via DSR-honest selection.
+        "CRT_TP1_MODE":             trial.suggest_categorical("CRT_TP1_MODE",
+                                        ["dynamic", "fixed_1r", "min_1r"]),
+        # TP2 / TP3 R-multiples — defaults are 1.5R / 2.0R; tune the cascade
+        # to find the sweet spot between hit-rate and per-trade reward.
+        "CRT_TP2_RR":               trial.suggest_float("CRT_TP2_RR", 1.2, 2.5, step=0.1),
+        "CRT_TP3_RR":               trial.suggest_float("CRT_TP3_RR", 1.8, 3.5, step=0.1),
+        # H4 C1 lookback window — how far back to scan for the reference candle.
+        # Default 10 (~40h); range 4-20 = 16-80h.
+        "H4_CRT_C2_LOOKBACK":       trial.suggest_int("H4_CRT_C2_LOOKBACK", 4, 20, step=2),
+        # Wyckoff phase filter — "strict" excluded (locked anti-pattern).
+        # "off" preserves v1 behavior, "loose" rejects only TRANSITION phase.
+        "WYCKOFF_PHASE_FILTER":     trial.suggest_categorical("WYCKOFF_PHASE_FILTER",
+                                        ["off", "loose"]),
+        # Optional 1H trend gate for CRT path (mirrors 5M_SWEEP's TREND_1H_GATE).
+        # Categorical 0/1 — boolean tune.
+        "CRT_REQUIRE_1H_TREND":     trial.suggest_categorical("CRT_REQUIRE_1H_TREND",
+                                        ["0", "1"]),
+        # 4H bias gate — shared with 5M_SWEEP, but CRT uses it independently.
+        # Operator's current PAPER soak runs "strict"; explorer can confirm.
+        "BACKTEST_BIAS_4H_GATE":    trial.suggest_categorical("BACKTEST_BIAS_4H_GATE",
+                                        ["none", "loose", "strict"]),
+        # Outcome window — how long to wait for TP/SL resolution.
+        # Default 576 (48h); test 24h / 48h / 72h variants.
+        "CRT_FORWARD_BARS":         trial.suggest_categorical("CRT_FORWARD_BARS",
+                                        ["288", "576", "864"]),
     }
 
 
@@ -480,19 +530,22 @@ def _params_to_env(params: dict) -> dict:
     # Fix B-1 (explorer audit 2026-05-27): pin the per-scanner kill switches
     # so trial subprocesses don't silently inherit the operator's paper-soak
     # mode. Without this, an operator running `.env` with ENABLE_5M_SWEEP=0
-    # for CRT-only paper soak would launch explorer trials where ALL 8
-    # search-space params (ICT_SWEEP_LOOKBACK, BACKTEST_FVG_MIN_QUALITY, etc.)
-    # are no-ops on the disabled 5M_SWEEP scanner, while CRT-only signal
-    # metrics get misattributed to those untouched params → polluted Pareto
-    # archive + wasted compute.
+    # for CRT-only paper soak would launch explorer trials where search-space
+    # params become no-ops on disabled scanners, while the active scanner's
+    # signal metrics get misattributed to those untouched params → polluted
+    # Pareto archive + wasted compute.
     #
-    # Defaults: 5M_SWEEP=ON (the search space targets it), H4_CRT=OFF
-    # (current explorer doesn't tune CRT params; running it without
-    # attribution would conflate scanners). Operator can override per
-    # session via EXPLORER_ENABLE_5M_SWEEP / EXPLORER_ENABLE_H4_CRT env vars
-    # (typically set in .env.explorer) when running a CRT-aware experiment.
-    env["ENABLE_5M_SWEEP"] = os.environ.get("EXPLORER_ENABLE_5M_SWEEP", "1")
-    env["ENABLE_H4_CRT"]   = os.environ.get("EXPLORER_ENABLE_H4_CRT",   "0")
+    # Defaults are search-space-aligned (2026-05-27 — when search space
+    # switched from 5M to CRT):
+    #   EXPLORER_SEARCH_SPACE=crt (default) → 5M_SWEEP=0, H4_CRT=1
+    #   EXPLORER_SEARCH_SPACE=5m            → 5M_SWEEP=1, H4_CRT=0
+    # Operator can override either knob explicitly via .env.explorer for
+    # joint-mode (both-on) attribution-blend experiments.
+    _space = os.environ.get("EXPLORER_SEARCH_SPACE", "crt").lower()
+    _default_5m  = "1" if _space == "5m"  else "0"
+    _default_crt = "0" if _space == "5m"  else "1"
+    env["ENABLE_5M_SWEEP"] = os.environ.get("EXPLORER_ENABLE_5M_SWEEP", _default_5m)
+    env["ENABLE_H4_CRT"]   = os.environ.get("EXPLORER_ENABLE_H4_CRT",   _default_crt)
     return env
 
 
@@ -879,8 +932,11 @@ def _auto_promote(study_name: str, trial_no: int, params: dict, m: dict, m2: dic
     pin = _read_pin_json()
     pin_settings = (pin.get("key_settings") or {})
     for k, v in params.items():
-        # Map env-name to pin key (best-effort)
+        # Map env-name to pin key (best-effort). Includes both legacy 5M_SWEEP
+        # keys and the new CRT keys (2026-05-27) so the headline-param picker
+        # works regardless of EXPLORER_SEARCH_SPACE selection.
         nice_key = {
+            # 5M_SWEEP search space (legacy + still valid when EXPLORER_SEARCH_SPACE=5m)
             "BACKTEST_BIAS_4H_GATE":  "bias_4h_gate",
             "BACKTEST_TREND_1H_GATE": "trend_1h_gate",
             "BACKTEST_FVG_MIN_QUALITY": "fvg_min_quality",
@@ -889,6 +945,16 @@ def _auto_promote(study_name: str, trial_no: int, params: dict, m: dict, m2: dic
             "ICT_MSS_HORIZON":     "ict_mss_horizon",
             "ICT_FVG_MIN_GAP":     "ict_fvg_min_gap",
             "DEALING_RANGE_LOOKBACK": "dealing_range_lookback",
+            # CRT search space (default 2026-05-27 onward) — keys must match
+            # `promote_baseline._current_settings()` (today's E-3 fix) so
+            # the headline-param picker correctly diffs against the pin.
+            "CRT_TP1_MODE":           "crt_tp1_mode",
+            "CRT_TP2_RR":             "crt_tp2_rr",
+            "CRT_TP3_RR":             "crt_tp3_rr",
+            "H4_CRT_C2_LOOKBACK":     "h4_crt_c2_lookback",
+            "WYCKOFF_PHASE_FILTER":   "wyckoff_phase_filter",
+            "CRT_REQUIRE_1H_TREND":   "crt_require_1h_trend",
+            "CRT_FORWARD_BARS":       "crt_forward_bars",
         }.get(k, k.lower())
         prev = pin_settings.get(nice_key)
         if prev is not None and str(prev) != str(v):

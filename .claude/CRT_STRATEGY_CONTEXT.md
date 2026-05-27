@@ -142,7 +142,7 @@ When auditing TradeAI:
 - **CRT-only paper soak in progress.** Do not flip `ENABLE_5M_SWEEP=1` without explicit operator instruction — it would interrupt the attribution-clean soak.
 - **Wyckoff context still TAGGED in entry_type** even with filter off, so OGD can learn per-phase confidence in the future once enough paper trades close per context bucket.
 - **No CRT promotion yet.** The Pareto archive + baseline_pin still reference Run-168 (the 5M_SWEEP pin from 2026-05-24). CRT is in paper-validation phase, not yet a canonical baseline.
-- **Explorer trials still tune 5M_SWEEP params only.** When operator runs explorer next, the trial subprocesses force `ENABLE_5M_SWEEP=1, ENABLE_H4_CRT=0` regardless of operator's `.env` (B-1 fix). To explore CRT params, the search space would need extension — not in scope until CRT paper soak completes.
+- **Explorer search space is now CRT-tuned (default 2026-05-27).** `EXPLORER_SEARCH_SPACE=crt` (default) tunes 8 CRT params: `CRT_TP1_MODE`, `CRT_TP2_RR`, `CRT_TP3_RR`, `H4_CRT_C2_LOOKBACK`, `WYCKOFF_PHASE_FILTER` (off/loose only), `CRT_REQUIRE_1H_TREND`, `BACKTEST_BIAS_4H_GATE`, `CRT_FORWARD_BARS`. Trial subprocesses auto-pin `ENABLE_5M_SWEEP=0, ENABLE_H4_CRT=1` to match. Legacy 5M-tuned space available via `EXPLORER_SEARCH_SPACE=5m`. `CRT_ANTI_PATTERN_LOCKS` keeps `WYCKOFF_PHASE_FILTER=strict` and `CRT_APPLY_QUALITY_GATES=1` out of any session.
 
 ---
 

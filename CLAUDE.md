@@ -20,7 +20,7 @@ Each signal carries `source='5M_SWEEP'` or `source='H4_CRT'` for per-scanner att
 
 - Sends Telegram alerts to operator with entry, SL, TPs
 - **Operator manually executes** — bot is signal-only, no auto-trading
-- Has adaptive learning (OGD per-token weights, source-aware after 2026-05-27), honest validation (CPCV + DSR), and autonomous R&D explorer (Optuna — search space tunes 5M_SWEEP params only, CRT params manual-calibrated)
+- Has adaptive learning (OGD per-token weights, source-aware after 2026-05-27), honest validation (CPCV + DSR), and autonomous R&D explorer (Optuna — **CRT-tuned search space by default 2026-05-27**; legacy 5M_SWEEP search space available via `EXPLORER_SEARCH_SPACE=5m`)
 
 ---
 
@@ -394,6 +394,7 @@ python3 scripts/snapshot_baseline.py --restore <snapshot_filename>
 | 2026-05-27 | **CRT-only operational mode shipped.** ENABLE_5M_SWEEP=0 + ENABLE_H4_CRT=1 + CRT_TP1_MODE=min_1r. Live bot running CRT exclusively in PAPER. |
 | 2026-05-27 | CRT Pro v1.1: TP1 modes (dynamic/fixed_1r/min_1r), CRT_APPLY_QUALITY_GATES, CRT_REQUIRE_1H_TREND. Empirical findings locked. Commit `6c9137e`. |
 | 2026-05-27 | Adaptive learning gap closed: `compute_crt_feature_scores()` bridges CRT data into OGD's 6-feature schema. Bootstrap WHERE clause loosened to admit OB-only CRT rows (was excluding 90% of CRT signals). |
+| 2026-05-27 | **Explorer search space switched to CRT-tuned (8 CRT params).** Default `EXPLORER_SEARCH_SPACE=crt`; legacy 5M_SWEEP space via `=5m`. Tunes CRT_TP1_MODE, CRT_TP2_RR/TP3_RR, H4_CRT_C2_LOOKBACK, WYCKOFF_PHASE_FILTER (off/loose only — strict locked), CRT_REQUIRE_1H_TREND, BACKTEST_BIAS_4H_GATE, CRT_FORWARD_BARS. |
 | 2026-05-27 | Tracker dashboard CRT-aware: by_source panel, source mix tile, config_hash chips, CRT card layout (badge + Confluence + Phase), blend warning banner on Honest Metrics. |
 | 2026-05-27 | Explorer audit fixes: trial subprocesses pin scanner toggles (no longer inherit operator's CRT-only .env); runtime_env captured in Pareto + promotion log; CRT_ANTI_PATTERN_LOCKS for WYCKOFF=strict + QUALITY_GATES=1; crt_engine.py in code-drift CODE_FILES. |
 | 2026-05-27 | CRITICAL bomb defused: `LIVE_LIQUID_HOURS` ImportError at crypto_alert.py:809 would have crash-looped the bot on the FIRST CRT signal. Replaced with `LIVE_CONFIG.liquid_hours`. Caught by config audit before any CRT signal fired. |
