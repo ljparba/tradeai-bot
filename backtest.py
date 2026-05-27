@@ -121,6 +121,15 @@ from crt_engine import (
     # backtest.py to crt_engine.py so the live-side integration can import
     # them via the shared module — eliminates live/BT drift risk.
     compute_crt_trade_economics, crt_quality_to_confidence,
+    # Option S fix (audit cycle-7 2026-05-27): CRT_TP2_RR / CRT_TP3_RR /
+    # CRT_FORWARD_BARS moved to crt_engine.py so Session 3's crypto_alert.py
+    # imports the SAME values via the shared module. Final 3 constants out
+    # of backtest.py per LBC reviewer's recommendation.
+    CRT_TP2_RR, CRT_TP3_RR, CRT_FORWARD_BARS,
+    # Option S fix: per-gate rejection reason helper for D2 diagnostic
+    # — splits the opaque `crt_economics_gate` counter into 3 specific
+    # gate-fired counters (fees_kill / bew_too_high / invalid_inputs).
+    crt_trade_rejection_reason,
 )
 # H-CRT2-1 fix (Session 2 Option B audit 2026-05-27): import SL buffer
 # directly from ict_engine (crypto_alert.py doesn't re-export it).
@@ -220,16 +229,8 @@ CRT_H4_WINDOW_BUFFER       = 2   # padding bars on top of H4_CRT_C2_LOOKBACK
 CRT_5M_WINDOW_SIZE         = 300 # 5M bars in the sub-window passed to detect_h4_crt
 CRT_5M_HEADROOM_BUFFER     = 5   # extra 5M bars beyond H4_CRT_MSS_HORIZON for MSS scan
 CRT_H4_BAR_DURATION_MS     = 4 * 3600 * 1000  # 4 hours in ms — for H4 close-time anchoring
-CRT_TP2_RR                 = 1.5 # TP2 R-multiple extension from entry
-CRT_TP3_RR                 = 2.0 # TP3 R-multiple extension from entry
-
-# Option E fix M-CRT2-2 (audit cycle-7 2026-05-27): CRT forward-scan window
-# may legitimately need longer than the 5M-sweep's 24h (FORWARD_BARS=288).
-# H4 setups develop over longer timescales; capping at 24h could TIMEOUT
-# winners that would resolve in 36-48h. Env-overridable per spec discipline.
-# Default 2x the 5M-sweep window (576 bars = 48h). Operator can tune via
-# CRT_FORWARD_BARS env knob without touching the 5M-sweep behavior.
-CRT_FORWARD_BARS           = int(os.environ.get("CRT_FORWARD_BARS", "576"))
+# CRT_TP2_RR + CRT_TP3_RR + CRT_FORWARD_BARS moved to crt_engine.py (Option S
+# audit cycle-7 2026-05-27) for shared live/backtest import — see imports above.
 
 
 # Session 2 Option H NEW-4 fix (audit cycle-7 2026-05-27): helpers moved to
@@ -1491,7 +1492,15 @@ def run_backtest_token_h4_crt(token, c5m, c4h, config=None):
             outcome, rt_cost,
         )
         if econ is None:
-            rej["crt_economics_gate"] = rej.get("crt_economics_gate", 0) + 1
+            # Option S fix (audit cycle-7 2026-05-27): split opaque
+            # `crt_economics_gate` counter into per-gate counters so the
+            # D2 diagnostic surfaces WHICH gate fired (fees_kill /
+            # bew_too_high / invalid_inputs).
+            _reason = crt_trade_rejection_reason(
+                direction, entry_price, sl_price, tp1_price, rt_cost,
+            )
+            _key = f"crt_economics_{_reason}"
+            rej[_key] = rej.get(_key, 0) + 1
             continue
         gross_tp1 = econ["gross_tp1"]
         gross_sl  = econ["gross_sl"]

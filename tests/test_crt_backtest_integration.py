@@ -21,9 +21,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def _clean_crt_env():
+    # Option S fix (audit cycle-7 2026-05-27): added CRT_FORWARD_BARS,
+    # CRT_TP2_RR, CRT_TP3_RR — the LBC re-audit flagged these as missing
+    # from test isolation, latent risk if any future test sets them in env.
     for k in ("ENABLE_H4_CRT", "H4_CRT_DISABLED_TOKENS", "H4_CRT_C2_LOOKBACK",
               "H4_CRT_MSS_HORIZON", "H4_CRT_OB_SCAN_LOOKBACK",
-              "H4_CRT_VALIDATION_SCHOOL"):
+              "H4_CRT_VALIDATION_SCHOOL",
+              "CRT_FORWARD_BARS", "CRT_TP2_RR", "CRT_TP3_RR"):
         os.environ.pop(k, None)
 
 
@@ -167,15 +171,24 @@ class TestSourceColumnSchema(unittest.TestCase):
             conn.close()
 
     def test_config_hash_includes_crt_knobs(self):
-        """B-CRT-S2-C2 fix: _compute_run_config_hash must include CRT env knobs
-        so a CRT-enabled run and a CRT-disabled run on the same ICT params
-        produce different config_hashes (prevents DSR n_trials collision)."""
+        """B-CRT-S2-C2 + NEW-1 + Option S fix: _compute_run_config_hash
+        must include EVERY env-overridable CRT knob so two runs differing
+        only on any one of them produce different config_hashes (prevents
+        DSR n_trials collision + Pareto archive overwrite + checkpoint
+        cross-contamination).
+
+        Option S fix (audit cycle-7 2026-05-27): cumulative re-audit
+        FINDING-1 — earlier assertion missed CRT_FORWARD_BARS (Option E)
+        and H4_CRT_OB_SCAN_LOOKBACK (Session 1). Now asserts all 7 knobs.
+        """
         import backtest
         import inspect
         src = inspect.getsource(backtest._compute_run_config_hash)
         for knob in ("ENABLE_H4_CRT", "H4_CRT_DISABLED_TOKENS",
                      "H4_CRT_C2_LOOKBACK", "H4_CRT_MSS_HORIZON",
-                     "H4_CRT_VALIDATION_SCHOOL"):
+                     "H4_CRT_VALIDATION_SCHOOL",
+                     # Added in Option S cleanup
+                     "CRT_FORWARD_BARS", "H4_CRT_OB_SCAN_LOOKBACK"):
             self.assertIn(knob, src,
                           f"config_hash payload must include CRT knob {knob}")
 

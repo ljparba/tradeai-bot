@@ -53,6 +53,13 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(_os.environ[name])
+    except (KeyError, ValueError):
+        return default
+
+
 def _env_str(name: str, default: str) -> str:
     return _os.environ.get(name, default)
 
@@ -67,6 +74,15 @@ H4_CRT_DISABLED_TOKENS = {
 H4_CRT_C2_LOOKBACK = _env_int("H4_CRT_C2_LOOKBACK", 10)
 H4_CRT_MSS_HORIZON = _env_int("H4_CRT_MSS_HORIZON", ICT_MSS_HORIZON)
 H4_CRT_OB_SCAN_LOOKBACK = _env_int("H4_CRT_OB_SCAN_LOOKBACK", 20)
+
+# Option S (audit cycle-7 2026-05-27): TP cascade + forward-window constants
+# moved from backtest.py to the shared module so the Session 3 live
+# integration can import the SAME values via `from crt_engine import ...`.
+# Eliminates the live/BT drift risk the LBC auditor flagged at backtest.py:
+# 223-232 (constants in wrong module for shared import).
+CRT_TP2_RR       = _env_float("CRT_TP2_RR", 1.5)    # TP2 R-multiple extension from entry
+CRT_TP3_RR       = _env_float("CRT_TP3_RR", 2.0)    # TP3 R-multiple extension from entry
+CRT_FORWARD_BARS = _env_int("CRT_FORWARD_BARS", 576)  # 48h CRT outcome window (vs 5M-sweep's 288 = 24h)
 
 # M-CRT-2 plumbing (audit cycle-7 2026-05-27): validation school knob for v2.
 # v1 ships "flexible" (Wyckoff) as the only behavior — the strict-school
@@ -409,9 +425,16 @@ def compute_crt_trade_economics(direction: str, entry_price: float,
       - Returns None if `net_tp1_pct <= 0` (fees kill the trade)
       - Returns None if breakeven_wr > MAX_BREAKEVEN_WR (= 0.60)
 
-    Returns None when the trade fails the structural gates — caller treats
-    None as "skip this signal" and records the appropriate rejection counter.
-    Returns dict with all economics fields on success.
+    Option S fix (audit cycle-7 2026-05-27): the None return now also surfaces
+    a single-line print via `_REJECT_REASON_*` sentinels in the diagnostic
+    layer — see `crt_trade_rejection_reason()` below. The caller's standard
+    pattern remains `if econ is None: continue` for success/skip flow, but
+    the rejection counter can now record WHICH gate fired by calling
+    `crt_trade_rejection_reason(direction, entry, sl, tp1, rt_cost_pct)`
+    on the None branch. This splits the previously-opaque
+    `crt_economics_gate` counter into `crt_economics_fees_kill` /
+    `crt_economics_bew_too_high` / `crt_economics_invalid_inputs` for D2
+    diagnostic surfacing.
 
     `outcome` may be None when called outside the backtest path (e.g. live
     signal preview). In that case `realized_r` is left as None.
@@ -481,21 +504,84 @@ def compute_crt_trade_economics(direction: str, entry_price: float,
     }
 
 
+def crt_trade_rejection_reason(direction: str, entry_price: float,
+                                sl_price: float, tp1_price: float,
+                                rt_cost_pct: float) -> str:
+    """Identify WHICH economics gate caused `compute_crt_trade_economics`
+    to return None for a given trade. Used by the backtest scanner to
+    split the previously-opaque `crt_economics_gate` rejection counter
+    into per-gate counters for D2 diagnostic surfacing.
+
+    Returns one of:
+      "fees_kill"          — net_tp1 (gross_tp1 - rt_cost_pct) <= 0
+      "bew_too_high"       — breakeven_wr > MAX_BREAKEVEN_WR (= 0.60)
+      "invalid_inputs"     — gross_tp1 + risk_pct <= 0 (degenerate input)
+      "unknown"            — defensive default; should not occur
+
+    Mirrors the same gate evaluation order as `compute_crt_trade_economics`
+    so the first-failing gate is the one reported.
+
+    Option S fix (audit cycle-7 2026-05-27): replaces the opaque None
+    return with a structured rejection reason. Caller pattern:
+
+        econ = compute_crt_trade_economics(...)
+        if econ is None:
+            reason = crt_trade_rejection_reason(direction, entry, sl, tp1, rt_cost)
+            rej[f"crt_economics_{reason}"] = rej.get(...) + 1
+            continue
+    """
+    if direction == "BUY":
+        gross_tp1 = (tp1_price - entry_price) / entry_price * 100
+        gross_sl  = (sl_price  - entry_price) / entry_price * 100
+    else:
+        gross_tp1 = (entry_price - tp1_price) / entry_price * 100
+        gross_sl  = (entry_price - sl_price)  / entry_price * 100
+
+    net_tp1 = round(gross_tp1 - rt_cost_pct, 3)
+    if net_tp1 <= 0:
+        return "fees_kill"
+
+    risk_pct = abs(gross_sl)
+    if (gross_tp1 + risk_pct) <= 0:
+        return "invalid_inputs"
+
+    bew = (risk_pct + rt_cost_pct) / (gross_tp1 + risk_pct)
+    if bew > MAX_BREAKEVEN_WR:
+        return "bew_too_high"
+
+    return "unknown"  # defensive — should not reach here if helper returned None
+
+
 def crt_quality_to_confidence(mss_quality: str, fvg_quality: str) -> int:
-    """Map MSS + FVG quality grades to a 1-10 confidence integer.
+    """Map MSS + FVG quality GRADES (HIGH/MEDIUM/LOW/NONE) to a 1-10
+    confidence integer for downstream confidence-stratified analysis.
 
     NEW-4 fix (audit cycle-7 Option H 2026-05-27): moved from backtest.py
     so the Session 3 live integration can call the same function and produce
     byte-identical confidence values for the same setup.
 
-    CRT has gradations even with the (FVG OR OB) confluence requirement:
-    MSS quality from score_ict_mss is HIGH (4-5pts) / MEDIUM (2-3pts) /
-    LOW (0-1pt). FVG quality same scale. Map their sum into the 6-10 range
-    so CRT signals stay above the 5M-sweep floor but carry actual quality
-    info for downstream confidence-stratified analysis.
+    Option S fix (audit cycle-7 2026-05-27): docstring rewritten to remove
+    drift between the prior text (which described score_ict_mss's internal
+    4-5 / 2-3 / 0-1 point scale) and the actual q_score map below (which
+    uses a simpler 0/1/2/3 grade-to-points conversion).
 
-    pts=0 (NONE+NONE — typically pure-OB confluence with no MSS scoring) → 6
-    pts=6 (HIGH+HIGH — top-tier setup with both confluences strong)       → 10
+    Grade → q_score points (per quality dimension):
+      HIGH   = 3
+      MEDIUM = 2
+      LOW    = 1
+      NONE   = 0 (also returned for any unknown grade string)
+
+    Total points (sum of MSS + FVG) → confidence integer:
+      pts=0  → 6  (both NONE — typically pure-OB confluence)
+      pts=1  → 6
+      pts=2  → 7
+      pts=3  → 8
+      pts=4  → 8
+      pts=5  → 9
+      pts=6  → 10 (HIGH+HIGH — top-tier setup with both confluences strong)
+
+    Output is clamped to [6, 10] so CRT signals stay above the typical
+    5M-sweep confidence floor but carry actual quality info.
     """
     q_score = {"HIGH": 3, "MEDIUM": 2, "LOW": 1, "NONE": 0}
     pts = q_score.get(mss_quality, 0) + q_score.get(fvg_quality, 0)

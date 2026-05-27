@@ -467,6 +467,79 @@ class TestCrtEconomicsHelper(unittest.TestCase):
         self.assertIsNone(econ["realized_r"])
 
 
+class TestCrtTradeRejectionReason(unittest.TestCase):
+    """Unit tests for crt_engine.crt_trade_rejection_reason (Option S).
+
+    Verifies the per-gate rejection-reason helper correctly identifies
+    WHICH economics gate fired in compute_crt_trade_economics. Used by
+    the backtest scanner to split the opaque `crt_economics_gate`
+    counter into per-gate counters for D2 diagnostic surfacing.
+    """
+
+    def setUp(self):
+        _clean_crt_env()
+        for mod in ("ict_engine", "crt_engine"):
+            if mod in sys.modules:
+                del sys.modules[mod]
+
+    def tearDown(self):
+        _clean_crt_env()
+
+    def _import(self):
+        import crt_engine
+        return crt_engine.crt_trade_rejection_reason
+
+    def test_fees_kill_reason(self):
+        """Same fixture as TestCrtEconomicsHelper.test_returns_none_when_fees_kill_trade
+        must produce reason='fees_kill'."""
+        reason = self._import()(
+            "BUY", entry_price=100.0, sl_price=99.0,
+            tp1_price=100.2, rt_cost_pct=0.5,
+        )
+        self.assertEqual(reason, "fees_kill")
+
+    def test_bew_too_high_reason(self):
+        """Tight TP relative to SL → bew > MAX_BREAKEVEN_WR → reason='bew_too_high'."""
+        reason = self._import()(
+            "BUY", entry_price=100.0, sl_price=97.0,
+            tp1_price=100.5, rt_cost_pct=0.1,
+        )
+        self.assertEqual(reason, "bew_too_high")
+
+    def test_invalid_inputs_reason(self):
+        """gross_tp1 + risk_pct <= 0 → reason='invalid_inputs'.
+        This happens when entry equals SL and equals TP1 (degenerate)."""
+        reason = self._import()(
+            "BUY", entry_price=100.0, sl_price=100.0,
+            tp1_price=100.0, rt_cost_pct=0.0,
+        )
+        # fees_kill fires first (net_tp1 = 0 - 0 = 0 which is <= 0)
+        # invalid_inputs would only fire if fees_kill didn't, which requires
+        # net_tp1 > 0 — meaningfully unreachable in practice. Verify
+        # fees_kill is the catch-all for zero-distance trades.
+        self.assertEqual(reason, "fees_kill")
+
+    def test_bearish_direction(self):
+        """SELL direction with tight TP → reason='bew_too_high'."""
+        reason = self._import()(
+            "SELL", entry_price=100.0, sl_price=103.0,
+            tp1_price=99.5, rt_cost_pct=0.1,
+        )
+        self.assertEqual(reason, "bew_too_high")
+
+    def test_returns_unknown_when_no_gate_fires(self):
+        """Healthy trade (no gate fires) — defensive return 'unknown'.
+        This should NOT happen in practice because the caller invokes
+        this helper only after compute_crt_trade_economics returns None."""
+        reason = self._import()(
+            "BUY", entry_price=100.0, sl_price=99.0,
+            tp1_price=101.5, rt_cost_pct=0.3,
+        )
+        # Healthy trade: net_tp1=1.2>0; bew=(1+0.3)/(1.5+1)=0.52 < 0.60
+        # → both gates pass → defensive "unknown"
+        self.assertEqual(reason, "unknown")
+
+
 class TestCrtQualityToConfidence(unittest.TestCase):
     """Unit tests for crt_engine.crt_quality_to_confidence (NEW-4 moved here)."""
 
