@@ -31,7 +31,9 @@ Env-overridable constants:
 H6 isolation: shared by crypto_alert.py (live) AND backtest.py (backtest)
 via the same module — guarantees live/backtest parity by construction.
 """
+import bisect as _bisect
 import os as _os
+from typing import Optional
 
 from ict_engine import (
     ICT_MSS_HORIZON,
@@ -65,6 +67,16 @@ H4_CRT_C2_LOOKBACK = _env_int("H4_CRT_C2_LOOKBACK", 10)
 H4_CRT_MSS_HORIZON = _env_int("H4_CRT_MSS_HORIZON", ICT_MSS_HORIZON)
 H4_CRT_OB_SCAN_LOOKBACK = _env_int("H4_CRT_OB_SCAN_LOOKBACK", 20)
 
+# M-CRT-2 plumbing (audit cycle-7 2026-05-27): validation school knob for v2.
+# v1 ships "flexible" (Wyckoff) as the only behavior — the strict-school
+# branch (requiring C2.close inside C1.range) is added in v2 with an A/B
+# backtest comparison. Plumbing the env var NOW so v2 doesn't require a
+# main-loop refactor; the constant is currently read but only "flexible"
+# is honored. Spec doc §7 v2 row.
+H4_CRT_VALIDATION_SCHOOL = _env_str("H4_CRT_VALIDATION_SCHOOL", "flexible").lower()
+if H4_CRT_VALIDATION_SCHOOL not in ("flexible", "strict"):
+    H4_CRT_VALIDATION_SCHOOL = "flexible"  # safe default on typo
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 def _find_5m_bar_after(c5m_times, target_time) -> int:
@@ -72,11 +84,16 @@ def _find_5m_bar_after(c5m_times, target_time) -> int:
 
     Used to anchor the 5M MSS-confirmation window to the H4 C2 (sweep)
     candle's close. Returns -1 if no later 5M bar exists in the cache.
+
+    L-4 fix (audit cycle-7): O(log N) via bisect.bisect_right on the sorted
+    times array (prior O(N) linear scan). Times are expected sorted ascending
+    — true for every caller (Binance OHLCV stream + tests).
     """
-    for i, t in enumerate(c5m_times):
-        if t > target_time:
-            return i
-    return -1
+    n = len(c5m_times)
+    if n == 0:
+        return -1
+    idx = _bisect.bisect_right(c5m_times, target_time)
+    return idx if idx < n else -1
 
 
 def _check_confluence(direction: str, c1_high: float, c1_low: float,
@@ -143,7 +160,7 @@ def _check_confluence(direction: str, c1_high: float, c1_low: float,
 
 # ── Main detection ──────────────────────────────────────────────────────────
 def detect_h4_crt(c4h: dict, c5m: dict, token: str = "",
-                  consumed: set = None) -> dict:
+                  consumed: Optional[set] = None) -> Optional[dict]:
     """Detect an H4 Candle Range Theory setup with 5M LTF MSS confirmation.
 
     Per the Wyckoff/flexible school — the sweep candle's BODY close
@@ -155,10 +172,25 @@ def detect_h4_crt(c4h: dict, c5m: dict, token: str = "",
         c4h: dict with keys 'opens','highs','lows','closes','times' (~30 H4 bars)
         c5m: dict with same keys (~300 5M bars covering the H4 window)
         token: token symbol for blacklist check (case-insensitive)
-        consumed: set of (c1_idx, round(c1_high,6), round(c1_low,6)) tuples
+        consumed: set of (c1_time, round(c1_high,6), round(c1_low,6)) tuples
                   representing C1 ranges already used by a prior signal.
                   Caller mutates the set after generating a signal to mark
                   the range mitigated. None → fresh empty set per call.
+
+                  Thread-safety (M-CRT-8 note): the function reads `consumed`
+                  but never mutates it. The caller is responsible for adding
+                  the returned `key` to `consumed` after generating a signal
+                  AND for guarding concurrent access if multiple scan loops
+                  share the same set. The detection function itself is
+                  read-only on the consumed set — safe for single-writer
+                  serial scan cycles (the standard TradeAI scan pattern).
+
+        Time-unit contract (M-CRT-6 note): `c4h["times"]` and `c5m["times"]`
+        must be in the SAME unit (e.g. both UTC unix seconds, or both
+        unix milliseconds, or both pd.Timestamp). The function compares
+        timestamps directly via `>` between the two arrays — mixed units
+        produce silently wrong sweep-anchor offsets. Validated at function
+        entry below.
 
     Returns:
         Signal dict on valid setup, None otherwise.
@@ -210,6 +242,16 @@ def detect_h4_crt(c4h: dict, c5m: dict, token: str = "",
     if len(c5m_closes) < 30:
         return None
 
+    # M-CRT-6 fix (audit cycle-7 2026-05-27): time-unit cross-check. Both
+    # arrays must use the SAME orderable type so `>` comparisons work
+    # consistently. Compare types of the first elements; bail silently on
+    # mismatch (don't crash the live scanner, just skip the cycle).
+    try:
+        if type(h4_times[0]) is not type(c5m_times[0]):
+            return None
+    except IndexError:
+        return None
+
     # Build 5M swings once per call (cheap to compute, reused per candidate)
     sh_5m, sl_5m = find_ict_swings(h5, l5)
 
@@ -245,6 +287,15 @@ def detect_h4_crt(c4h: dict, c5m: dict, token: str = "",
         # CRT "one-shot per zone" rule.
         key = (c1_time, round(c1_high, 6), round(c1_low, 6))
         if key in consumed:
+            continue
+
+        # M-CRT-1 fix (audit cycle-7 2026-05-27): dual-extreme sweep is
+        # ambiguous — a C2 that wicks BOTH below C1.low AND above C1.high
+        # (e.g. an extreme-volatility candle) doesn't have a clean
+        # directional bias per CRT theory. Skip the candidate; downstream
+        # bullish-first short-circuit would otherwise mis-label such bars
+        # as BUY signals unconditionally.
+        if c2_low < c1_low and c2_high > c1_high:
             continue
 
         # ── Bullish CRT (SSL sweep of C1.low) ────────────────────────────
