@@ -947,6 +947,15 @@ def scan_h4_crt_for_token(token, c5m, c4h, consumed, trend_1h="NEUTRAL"):
         "rr1":         econ["rr1"],
         "rr2":         round(CRT_TP2_RR, 1),
         "rr3":         round(CRT_TP3_RR, 1),
+        # CRITICAL B-0 fix (telegram audit 2026-05-27): the Telegram renderer
+        # at crypto_alert.py:3192-3194 reads plan['net_tp1_pct'],
+        # plan['breakeven_wr'], plan['net_rr1'] directly (NOT via .get) — would
+        # KeyError on every CRT signal, falling into the outer cycle handler
+        # which sends "Bot ERROR" to operator instead of the signal alert.
+        # After 15 such errors, bot self-stops. Propagating econ -> plan now.
+        "net_tp1_pct": round(econ["net_tp1"], 2),
+        "net_rr1":     econ["net_rr1"],
+        "breakeven_wr": econ["breakeven_wr"],
     }
     result = {
         "signal":           direction,
@@ -960,6 +969,14 @@ def scan_h4_crt_for_token(token, c5m, c4h, consumed, trend_1h="NEUTRAL"):
         "trend_4h":         bias_4h,
         "trend_1h":         trend_1h,   # use real 1H trend passed by caller (was stub NEUTRAL)
         "trend_5m":         "NEUTRAL",
+        # HIGH B-1 fix (telegram audit 2026-05-27): the renderer at
+        # crypto_alert.py:3102-3103 reads `ict_trend_1h` / `ict_bias_4h`
+        # (5M_SWEEP-era key names). Without these, CRT alerts always
+        # showed "4H NEUTRAL / 1H NEUTRAL" even when the bias gate
+        # explicitly required BULLISH/BEARISH alignment — confusing the
+        # operator. Mirror the canonical key shape.
+        "ict_trend_1h":     trend_1h,
+        "ict_bias_4h":      bias_4h,
         "confirms":         0,
         "atr":              0.0,
         "roc":              0.0,
@@ -3129,8 +3146,32 @@ def send_signal_msg(token,price,ch24,result,plan,sig_id,regime):
 
     # ── Title + header ──
     ts_now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    # HIGH B-2/B-3 fix (telegram audit 2026-05-27): surface scanner source +
+    # CRT-specific context (Wyckoff phase, sr_type, TP1 mode) so the operator
+    # can visually distinguish CRT alerts from legacy 5M_SWEEP alerts and
+    # make informed manual-trade decisions. CRT signals carry source='H4_CRT'
+    # and entry_type like 'H4_CRT_FVG_MARKUP' (3-part: source_confluence_phase).
+    _src      = (result.get("source") or "5M_SWEEP").upper()
+    _et_full  = str(result.get("entry_type") or "")
+    _scanner_banner = ""
+    if _src == "H4_CRT" or _et_full.startswith("H4_CRT"):
+        # Parse "H4_CRT_<FVG|OB>_<PHASE>"; default UNKNOWN on missing parts.
+        _parts = _et_full.split("_")
+        _conf  = _parts[2] if len(_parts) >= 3 else "?"
+        _phase = "_".join(_parts[3:]) if len(_parts) >= 4 else "?"
+        _sr    = result.get("sr_type") or "?"
+        _tp1m  = os.environ.get("CRT_TP1_MODE", "dynamic")
+        _scanner_banner = (
+            f"<i>Scanner: <b>H4_CRT</b>  -  "
+            f"Conflu: <b>{_h(_conf)}</b>  -  "
+            f"Phase: <b>{_h(_phase)}</b>  -  "
+            f"sr_type: {_h(_sr)}  -  TP1 mode: {_h(_tp1m)}</i>\n"
+        )
+    elif _src == "5M_SWEEP":
+        _scanner_banner = "<i>Scanner: <b>5M_SWEEP</b></i>\n"
     msg = (
         f"<b>{_h(token)} {_h(signal)}  signal #{_h(sig_id)}</b>\n"
+        + _scanner_banner +
         f"{_h(ts_now)} UTC  -  price ${price:.4f}  (24h {ch24:+.2f}%)\n"
     )
 
