@@ -911,14 +911,25 @@ def _reproduce(params: dict, original_metrics: dict, timeout_s: int = 1800) -> t
 
 def _refresh_cross_config_std() -> None:
     """Re-run compute_cross_config_sr_std.py so the next trial's DSR uses the
-    pool that now includes the just-promoted baseline."""
+    pool that now includes the just-promoted baseline.
+
+    M-6 fix (cycle-9 audit 2026-05-28): pass --scanner-mode matching the
+    EXPLORER_SEARCH_SPACE so a CRT-only explorer session re-computes the
+    pool from CRT-only configs (not the default 'any' which would average
+    in 5M_SWEEP-era configs and silently muddy the DSR denominator).
+    """
+    _space = os.environ.get("EXPLORER_SEARCH_SPACE", "crt").lower()
+    _scanner_mode = {"crt": "crt_only", "5m": "5m_only"}.get(_space, "any")
     try:
         result = subprocess.run(
-            [sys.executable, os.path.join(_ROOT, "scripts", "compute_cross_config_sr_std.py")],
+            [sys.executable,
+             os.path.join(_ROOT, "scripts", "compute_cross_config_sr_std.py"),
+             "--scanner-mode", _scanner_mode],
             cwd=_ROOT, capture_output=True, text=True, timeout=60
         )
         if result.returncode == 0:
-            print(f"[promote] cross-config sr_trial_std refreshed (honest DSR pool now includes new baseline)")
+            print(f"[promote] cross-config sr_trial_std refreshed "
+                  f"(scanner_mode={_scanner_mode}; honest DSR pool now includes new baseline)")
         else:
             print(f"[promote] cross-config refresh failed: {result.stderr[:200]}")
     except Exception as e:

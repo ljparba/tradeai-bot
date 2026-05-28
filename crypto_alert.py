@@ -116,6 +116,9 @@ from crt_engine import (
     detect_wyckoff_context, is_crt_phase_aligned, WYCKOFF_PHASE_FILTER,
     # CRT Pro v1.1 — TP1 mode + 1H trend gate (2026-05-27)
     adjust_crt_tp1, CRT_TP1_MODE, CRT_REQUIRE_1H_TREND,
+    # M-NEW-9 fix (cycle-9 audit 2026-05-28): import CRT_FORWARD_BARS so the
+    # live expiry tracks the backtest outcome window (was hardcoded 48h).
+    CRT_FORWARD_BARS,
 )
 
 _ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -740,17 +743,18 @@ def save_signal(token, price, result, plan, regime):
              result.get("btc_trend_4h","NEUTRAL"),result.get("btc_dom_dir","NEUTRAL"),
              result.get("wscore_buy",0.0),result.get("wscore_sell",0.0),
              result.get("conflict_level","LOW"),result.get("candle_pattern","NONE"),
-             # H-2 fix (audit cycle-8 2026-05-27): CRT signals need a 48h
-             # expiry window to match CRT_FORWARD_BARS=576 (48h backtest
-             # outcome window). Previously inherited the 5M_SWEEP-era
-             # EXPIRY_BY_REGIME["UNKNOWN"]=12h default → any CRT setup
-             # reaching TP1 between hour 12-48 logged as EXPIRED (-0.25R)
-             # instead of WIN, corrupting OGD label-learning.
-             # 5M_SWEEP path (regime != UNKNOWN or source != H4_CRT) keeps
-             # its original regime-aware expiry.
+             # H-2 fix (audit cycle-8 2026-05-27) + M-NEW-9 fix (cycle-9
+             # audit 2026-05-28): CRT signals need an expiry window matching
+             # the backtest outcome window so trades that reach TP between
+             # the old 12h default and the real window aren't logged as
+             # EXPIRED (-0.25R) instead of WIN.
+             # Pre-M-NEW-9: hardcoded 48h that drifted from CRT_FORWARD_BARS
+             # the moment the explorer tuned the latter to 288 (24h) or
+             # 864 (72h). Now derived from CRT_FORWARD_BARS (5min bars × 5 ÷ 60).
+             # 5M_SWEEP path keeps its regime-aware expiry.
              (_now+timedelta(
                  hours=(
-                     48 if (result.get("source") == "H4_CRT")
+                     (CRT_FORWARD_BARS * 5 / 60.0) if (result.get("source") == "H4_CRT")
                      else EXPIRY_BY_REGIME.get(regime.get("regime","UNKNOWN"),12)
                  )
              )).strftime("%Y-%m-%d %H:%M:%S"),
@@ -4130,7 +4134,16 @@ def main():
                             # value defaulted to "NEUTRAL" forever, breaking
                             # both the CRT_REQUIRE_1H_TREND gate AND OGD's
                             # trend_strength feature attribution.
-                            _crt_trend_1h = get_trend(_c1h_live.get("closes", [])) if _c1h_live else "NEUTRAL"
+                            # L-NEW-3 fix (cycle-9 audit 2026-05-28): exclude
+                            # the forming 1H bar before calling get_trend.
+                            # Pre-fix the in-progress bar (which can repaint
+                            # at any tick) was included, so during the first
+                            # ~10 min of each H1 the trend could flip BULL↔BEAR
+                            # mid-cycle. Mirrors the [:-1] discipline used
+                            # everywhere else closed-only logic is required.
+                            _c1h_closes = _c1h_live.get("closes", []) if _c1h_live else []
+                            _c1h_closed_only = _c1h_closes[:-1] if len(_c1h_closes) > 1 else _c1h_closes
+                            _crt_trend_1h = get_trend(_c1h_closed_only) if _c1h_closed_only else "NEUTRAL"
                             # Cache it back to STATE so other code paths
                             # (e.g. dashboard, Telegram render) see the real
                             # value too (was None / missing).
@@ -4141,6 +4154,21 @@ def main():
                                 trend_1h=_crt_trend_1h,
                             )
                         if _crt_result is not None:
+                            # GAP-CRT-2 fix (cycle-9 audit 2026-05-28):
+                            # per-direction time cooldown. Mirrors the
+                            # 5M_SWEEP gate at line 2854. Pre-fix: 2 TON SELL
+                            # CRT signals fired 3 min apart (audit empirical
+                            # evidence) because CRT didn't consult
+                            # last_signal_times. Now matches the 30-min
+                            # default + per-token per-direction granularity.
+                            _crt_dir = _crt_result.get("signal")
+                            _crt_last_t = STATE[token]["last_signal_times"].get(_crt_dir)
+                            if _crt_last_t and (datetime.now(timezone.utc)
+                                                - _crt_last_t).total_seconds() / 60 < SIGNAL_COOLDOWN:
+                                print(f"[{datetime.now().strftime('%H:%M')}] "
+                                      f"{token} CRT {_crt_dir} cooldown active "
+                                      f"({SIGNAL_COOLDOWN}min from last) — skipping")
+                                continue
                             # H-1 fix (audit cycle-8 2026-05-27): apply the
                             # SAME risk gates the 5M_SWEEP path enforces at
                             # crypto_alert.py:2435 (kill switches) and
@@ -4199,6 +4227,12 @@ def main():
                             if _crt_sig_id < 0:
                                 print(f"[ERROR] {token} H4-CRT signal DB save failed — no Telegram sent")
                             else:
+                                # GAP-CRT-2 fix (cycle-9 audit 2026-05-28):
+                                # update last_signal_times for cooldown so
+                                # the next scan respects the gate at
+                                # crypto_alert.py:~4180. Mirrors the
+                                # 5M_SWEEP write at line 3045.
+                                STATE[token]["last_signal_times"][_crt_dir] = datetime.now(timezone.utc)
                                 # LIVE mode template-block check applies to CRT too,
                                 # but CRT signals have template_live_allowed=0 by
                                 # design (no template classification). In LIVE

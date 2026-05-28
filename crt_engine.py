@@ -281,7 +281,15 @@ def _check_confluence(direction: str, c1_high: float, c1_low: float,
         for d in (mss_bar_5m - 1, mss_bar_5m):
             if d < 1 or d + 1 >= len(c5):
                 continue
-            fvg = score_ict_fvg(d, h5, l5, o5, c5)
+            # L-NEW-1 fix (cycle-9 audit 2026-05-28): cap the FVG mitigation
+            # lookahead to H4_CRT_MSS_HORIZON bars past the FVG formation.
+            # Bars beyond the MSS confirmation window are post-signal and
+            # should not retroactively invalidate the setup. Pre-fix the
+            # backtest CRT path passed unbounded c5 → mitigation scanned up
+            # to 35 future bars and rejected FVGs the live path (which can
+            # only see ~MSS_HORIZON closed bars at signal time) accepted.
+            fvg = score_ict_fvg(d, h5, l5, o5, c5,
+                                max_post_d_bars=H4_CRT_MSS_HORIZON)
             if fvg is None or fvg["direction"] != direction:
                 continue
             # FVG must overlap the swept-extreme zone (H-CRT-1 fix)

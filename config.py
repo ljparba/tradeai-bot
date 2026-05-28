@@ -443,4 +443,13 @@ __all__ = [
     "WEIGHTS", "SIGNAL_THRESHOLD", "REGIME_RULES",
     # gate config kwargs (consumed by strategy_engine.py)
     "LIVE_CONFIG_KWARGS", "BACKTEST_CONFIG_KWARGS",
+    # L-NEW-5 fix (cycle-9 audit 2026-05-28): scanner kill switch + Phase A
+    # tracking env knobs were defined in the module but absent from __all__,
+    # so `from config import *` consumers (e.g. the explorer's _runtime_env
+    # snapshot, audit tools) couldn't see them. All four are operator-tunable
+    # and operationally important.
+    "ENABLE_5M_SWEEP",
+    "CRT_LIMIT_FILL_WINDOW_MIN",
+    "CRT_SLIPPAGE_WARN_PCT",
+    "CRT_SLIPPAGE_CRIT_PCT",
 ]

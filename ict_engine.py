@@ -295,7 +295,7 @@ def detect_ict_mss(sweep_bar, closes, sh, sl, sweep_type, horizon=ICT_MSS_HORIZO
     return score_ict_mss(sweep_bar, closes, [], [], [], sh, sl, sweep_type, horizon)["confirmed"]
 
 
-def score_ict_fvg(d, highs, lows, opens=(), closes=()):
+def score_ict_fvg(d, highs, lows, opens=(), closes=(), max_post_d_bars=None):
     """Score Fair Value Gap quality on 3-bar pattern [d-1, d, d+1].
 
     Quality criteria (max 3 pts):
@@ -303,6 +303,13 @@ def score_ict_fvg(d, highs, lows, opens=(), closes=()):
       Body       — displacement bar body/range ≥ 0.65: 1 pt
       H4: Freshness removed — age was always 2-4 bars in normal signal flow,
           so it awarded +1 to every FVG and never discriminated quality.
+
+    L-NEW-1 fix (cycle-9 audit 2026-05-28): `max_post_d_bars` caps the
+    mitigation lookahead so the backtest CRT path (which can pass slices
+    extending up to ~35 bars past the FVG formation point) doesn't reject
+    FVGs that the LIVE path — only seeing closed bars up to "now" at signal
+    time — would have accepted. Default None preserves the pre-existing
+    no-cap behavior used by the live and 5M_SWEEP paths.
 
     quality: "HIGH" (3 pts = large gap + strong body)
              "MEDIUM" (2 pts = large gap only, or medium gap + strong body)
@@ -331,9 +338,12 @@ def score_ict_fvg(d, highs, lows, opens=(), closes=()):
     # to the midpoint of any gap within 30min (6 5M bars), eliminating nearly all FVGs.
     # "Mitigated" = gap no longer structurally exists; partial fills leave the gap intact.
     if len(closes) > d + 2:
-        if direction == "BUY" and any(closes[k] <= bottom for k in range(d + 2, len(closes))):
+        # L-NEW-1: bound the scan window with max_post_d_bars if caller specified one
+        _mit_end = (min(len(closes), d + 2 + max_post_d_bars)
+                    if max_post_d_bars is not None else len(closes))
+        if direction == "BUY" and any(closes[k] <= bottom for k in range(d + 2, _mit_end)):
             return None
-        if direction == "SELL" and any(closes[k] >= top for k in range(d + 2, len(closes))):
+        if direction == "SELL" and any(closes[k] >= top for k in range(d + 2, _mit_end)):
             return None
     size_pct = (top - bottom) / max(bottom, 1e-10) * 100
 

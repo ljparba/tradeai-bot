@@ -132,9 +132,22 @@ def main() -> int:
         ),
     )
 
+    # L-NEW-4 fix (cycle-9 audit 2026-05-28): watchdog self-heartbeat.
+    # Pre-fix this loop could itself hang on emit() or is_stale() and
+    # systemd would still report the service "active" with no operator
+    # notification — the classic who-watches-the-watcher gap. We now
+    # touch a self-heartbeat file every loop iteration so an external
+    # check (cron, dashboard ping, or supervisord) can detect a frozen
+    # watchdog. Self-test, no alert path — purely a liveness marker.
+    _self_hb_path = hb_path.parent / "watchdog_alive.txt"
     last_alert_ts = 0.0
     last_state = "OK"   # OK | STALE
     while True:
+        # Self-heartbeat write — best-effort, never raises into the loop
+        try:
+            _self_hb_path.write_text(str(int(time.time())))
+        except Exception:
+            pass
         stale, age, payload = is_stale(hb_path, staleness_sec=args.staleness)
         now = time.time()
 
