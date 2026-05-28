@@ -3735,21 +3735,86 @@ def main():
         "\n\U0001F3AF <b>Win rate so far:</b> waiting for first closed signal"
     )
 
-    # Tokens watched as a bullet list — wrap to keep the message scannable
-    _tokens_bullets = "\n".join(f"• {_h(t)}" for t in BINANCE_TOKENS.keys())
+    # 2026-05-28 — operator template (image reference): card-style with
+    # unicode-line dividers between sections, emoji + bold section headers,
+    # 2-column token grid in <pre> (monospace alignment unavailable elsewhere
+    # in Telegram HTML — small block, not a dense data table).
+
+    _hr = "━" * 22  # divider line between sections
+
+    # Token grid: 2 columns, row-major, left-aligned to width 6 (longest
+    # token name in our 10-token list is "HBAR" = 4 chars + bullet spacing)
+    _tk_list = list(BINANCE_TOKENS.keys())
+    _rows = []
+    for i in range(0, len(_tk_list), 2):
+        _left  = f"• {_tk_list[i]:<5}"
+        _right = f"• {_tk_list[i+1]}" if i + 1 < len(_tk_list) else ""
+        _rows.append(f"  {_left}  {_right}".rstrip())
+    _tokens_grid = "<pre>" + "\n".join(_rows) + "</pre>"
+
+    # Adaptive learning block — render as bullets under a section header
+    _adaptive_block = ""
+    if _w_live or _w_boot:
+        _adaptive_block = f"\n\n{_hr}\n\n\U0001F48E <b>Adaptive Learning</b>\n"
+        if _w_live:
+            _adaptive_block += (
+                f"\n✅ <b>Live ({len(_w_live)}):</b> {_h(', '.join(_w_live))}"
+            )
+        if _w_boot:
+            _adaptive_block += (
+                f"\n⏳ <b>Warming Up ({len(_w_boot)}):</b> "
+                f"{_h(', '.join(_w_boot))}"
+            )
+
+    # Status section — open positions + WR + closed-signal count
+    _status_block = (
+        f"\n\n{_hr}\n\n\U0001F4CA <b>Status</b>\n"
+        f"\n\U0001F4CB <b>Open Positions Resumed:</b> {_h(_open_now)} / "
+        f"{_h(MAX_OPEN_POSITIONS)}"
+    )
+    if _closed_n > 0:
+        _status_block += (
+            f"\n\U0001F3AF <b>Win Rate So Far:</b> {_wr_live:.0%}"
+            f"\n\U0001F4CC <b>Closed Signals:</b> {_h(_closed_n)}"
+        )
+    else:
+        _status_block += (
+            "\n\U0001F3AF <b>Win Rate So Far:</b> waiting for first closed signal"
+        )
+
+    # CRT settings section — only when CRT is the active source
+    _crt_block = ""
+    if _crt_on:
+        try:
+            from crt_engine import CRT_TP1_MODE as _ctm, WYCKOFF_PHASE_FILTER as _wpf
+            _bias = getattr(__import__('config'), 'LIVE_BIAS_4H_GATE', 'none')
+            _crt_block = (
+                f"\n\n{_hr}\n\n⚙️ <b>Active CRT Settings</b>\n"
+                f"\n• <b>TP1 Mode:</b> {_h(_ctm)}"
+                f"\n• <b>Wyckoff Filter:</b> {_h(str(_wpf).upper())}"
+                f"\n• <b>4H Bias Gate:</b> {_h(str(_bias).upper())}"
+            )
+        except Exception:
+            pass
+
+    # Market notice — translated DRIFT-GATE warning
+    _notice_block = ""
+    if _drift_note_clean:
+        _notice_block = (
+            f"\n\n{_hr}\n\n⚠️ <b>Market Notice</b>\n"
+            f"\n<i>{_h(_drift_note_clean)}</i>"
+        )
 
     send_telegram(
         f"\U0001F680 <b>BOT STARTED — {_h(_mode_title)}</b>\n"
         f"\n⚙️ <b>Mode:</b> {_h(EXECUTION_MODE)}"
-        f"\n\U0001F4E1 <b>Strategy:</b> {_h(_strategy_line)}"
-        f"\n\n\U0001F4CB <b>Tokens watched ({_h(len(BINANCE_TOKENS))}):</b>\n"
-        + _tokens_bullets
-        + _adaptive_line
-        + f"\n\n\U0001F4CA <b>Open positions resumed:</b> {_h(_open_now)} / "
-          f"{_h(MAX_OPEN_POSITIONS)}"
-        + _wr_line
-        + _crt_summary
-        + (f"\n\n⚠️ <i>{_h(_drift_note_clean)}</i>" if _drift_note_clean else "")
+        f"\n\U0001F300 <b>Strategy:</b> {_h(_strategy_line)}"
+        f"\n\n{_hr}\n\n\U0001F4D4 <b>Tokens Watched ({_h(len(BINANCE_TOKENS))})</b>\n\n"
+        + _tokens_grid
+        + _adaptive_block
+        + _status_block
+        + _crt_block
+        + _notice_block
     )
     load_performance_state()
     # M26: Pre-flight Binance connectivity check — abort before entering the main loop
