@@ -436,6 +436,8 @@ def detect_h4_crt(c4h: dict, c5m: dict, token: str = "",
         if key in consumed:
             continue
 
+        c2_close = h4_closes[c2_idx]
+
         # M-CRT-1 fix (audit cycle-7 2026-05-27): dual-extreme sweep is
         # ambiguous — a C2 that wicks BOTH below C1.low AND above C1.high
         # (e.g. an extreme-volatility candle) doesn't have a clean
@@ -446,7 +448,19 @@ def detect_h4_crt(c4h: dict, c5m: dict, token: str = "",
             continue
 
         # ── Bullish CRT (SSL sweep of C1.low) ────────────────────────────
-        if c2_low < c1_low:
+        # 2026-05-28 strict-school wiring (ict-logic-validator F-6 followup):
+        # canonical ICT CRT requires C2 to NOT JUST wick beyond C1's range
+        # but to CLOSE BACK INSIDE that range — the "manipulation rejected"
+        # signature. Pre-wire only the "flexible" school fired: a C2 that
+        # closed BELOW C1.low for a bullish CRT (= continuation candle, not
+        # manipulation candle) was admitted on the strength of LTF MSS
+        # confirmation alone.
+        #
+        # Toggle via env: H4_CRT_VALIDATION_SCHOOL=strict (vs flexible default).
+        # When strict, an additional close-back-inside check fires here. The
+        # MSS confirmation downstream is unchanged in both schools.
+        _strict = (H4_CRT_VALIDATION_SCHOOL == "strict")
+        if c2_low < c1_low and (not _strict or c2_close >= c1_low):
             sweep_5m_idx = _find_5m_bar_after(c5m_times, c2_time)
             if sweep_5m_idx < 0:
                 continue
@@ -502,7 +516,10 @@ def detect_h4_crt(c4h: dict, c5m: dict, token: str = "",
             }
 
         # ── Bearish CRT (BSL sweep of C1.high) ───────────────────────────
-        if c2_high > c1_high:
+        # Strict-school check mirrors the bullish branch above: canonical
+        # ICT requires C2 to close BACK INSIDE C1's range (rejecting the
+        # upward manipulation). Flexible school accepts wick-only sweep.
+        if c2_high > c1_high and (not _strict or c2_close <= c1_high):
             sweep_5m_idx = _find_5m_bar_after(c5m_times, c2_time)
             if sweep_5m_idx < 0:
                 continue
