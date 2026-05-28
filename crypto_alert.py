@@ -3833,16 +3833,14 @@ def main():
                 ) or "DISABLED"
                 _hb_alerter.send(
                     "Heartbeat",
-                    "<b>Heartbeat  -  bot alive</b>\n\n"
-                    "<pre>"
-                    f"Time      {_h(datetime.now().strftime('%Y-%m-%d %H:%M'))}\n"
-                    f"Cycle     {_h(cycle)}\n"
-                    f"Mode      {_h(EXECUTION_MODE)}\n"
-                    f"Scanners  {_h(_hb_scanners)}\n"
-                    f"Open      {_h(open_cnt)} / {_h(MAX_OPEN_POSITIONS)}\n"
-                    f"WR        {wr_live:.0%}\n"
-                    f"Threshold {_h(eff_thr)}%"
-                    "</pre>",
+                    "\U0001F49A <b>BOT ALIVE</b>\n"
+                    f"\n⏰ <b>Time:</b> {_h(datetime.now().strftime('%Y-%m-%d %H:%M'))}"
+                    f"\n\U0001F501 <b>Cycle:</b> {_h(cycle)}"
+                    f"\n⚙️ <b>Mode:</b> {_h(EXECUTION_MODE)}"
+                    f"\n\U0001F4E1 <b>Scanners:</b> {_h(_hb_scanners)}"
+                    f"\n\U0001F4CA <b>Open positions:</b> {_h(open_cnt)} / {_h(MAX_OPEN_POSITIONS)}"
+                    f"\n\U0001F3AF <b>Win rate:</b> {wr_live:.0%}"
+                    f"\n\U0001F6AA <b>Threshold:</b> {_h(eff_thr)}%",
                 )
                 _last_heartbeat = time.time()
             for token in BINANCE_TOKENS:

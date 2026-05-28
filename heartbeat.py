@@ -247,15 +247,14 @@ class Heartbeat:
         import html as _html
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         body = (
-            "<b>Selftest  -  alert path check</b>\n\n"
-            "<pre>"
-            f"Time      {_html.escape(ts)} UTC\n"
-            f"PID       {_html.escape(str(os.getpid()))}\n"
-            f"Beat      #{_html.escape(str(self._counter))}"
-            "</pre>\n"
-            "Confirms both Telegram AND SMTP are reachable. If you do not\n"
-            "see this on every configured channel, the alert path is\n"
-            "degraded - investigate before LIVE."
+            "\U0001FA7A <b>ALERT PATH CHECK</b>\n"
+            f"\n⏰ <b>Time:</b> {_html.escape(ts)} UTC"
+            f"\n\U0001F522 <b>PID:</b> {_html.escape(str(os.getpid()))}"
+            f"\n\U0001F493 <b>Beat:</b> #{_html.escape(str(self._counter))}"
+            "\n"
+            "\n<i>Confirms both Telegram AND SMTP are reachable. "
+            "If you don't see this on every configured channel, "
+            "the alert path is degraded — investigate before LIVE.</i>"
         )
         outcome = self.alerter.send("Selftest", body, force_secondary=True)
         logger.info(
