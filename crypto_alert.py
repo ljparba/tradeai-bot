@@ -3656,7 +3656,7 @@ def main():
         _strategy_line = "5M_SWEEP + H4_CRT (parallel scanners)"
     elif _crt_on and not _5m_on:
         _mode_title    = "CRT-only mode"
-        _strategy_line = "H4 Candle Range Theory (CRT) — 5M_SWEEP disabled"
+        _strategy_line = "H4 Candle Range Theory (CRT)"
     elif _5m_on and not _crt_on:
         _mode_title    = "ICT mode (5M_SWEEP)"
         _strategy_line = "ICT sweep + MSS + FVG retracement"
@@ -3718,17 +3718,15 @@ def main():
 
     _adaptive_line = ""
     if _w_live or _w_boot:
-        if _w_live and _w_boot:
-            _adaptive_line = (
-                f"\n\U0001F9E0 <b>Adaptive learning:</b> {len(_w_live)} live "
-                f"({_h(', '.join(_w_live))}), {len(_w_boot)} warming up"
+        _adaptive_line = "\n\n\U0001F9E0 <b>Adaptive learning:</b>"
+        if _w_live:
+            _adaptive_line += (
+                f"\n• Live ({len(_w_live)}): {_h(', '.join(_w_live))}"
             )
-        elif _w_live:
-            _adaptive_line = (f"\n\U0001F9E0 <b>Adaptive learning:</b> all {len(_w_live)} tokens "
-                              f"on live weights")
-        else:
-            _adaptive_line = (f"\n\U0001F9E0 <b>Adaptive learning:</b> {len(_w_boot)} tokens "
-                              f"warming up (no live data yet)")
+        if _w_boot:
+            _adaptive_line += (
+                f"\n• Warming up ({len(_w_boot)}): {_h(', '.join(_w_boot))}"
+            )
 
     _wr_line = (
         f"\n\U0001F3AF <b>Win rate so far:</b> {_wr_live:.0%}  "
@@ -3737,14 +3735,17 @@ def main():
         "\n\U0001F3AF <b>Win rate so far:</b> waiting for first closed signal"
     )
 
+    # Tokens watched as a bullet list — wrap to keep the message scannable
+    _tokens_bullets = "\n".join(f"• {_h(t)}" for t in BINANCE_TOKENS.keys())
+
     send_telegram(
         f"\U0001F680 <b>BOT STARTED — {_h(_mode_title)}</b>\n"
         f"\n⚙️ <b>Mode:</b> {_h(EXECUTION_MODE)}"
         f"\n\U0001F4E1 <b>Strategy:</b> {_h(_strategy_line)}"
-        f"\n\U0001F4CB <b>Tokens watched:</b> {_h(len(BINANCE_TOKENS))}  "
-        f"({_h(_tokens_str)})"
+        f"\n\n\U0001F4CB <b>Tokens watched ({_h(len(BINANCE_TOKENS))}):</b>\n"
+        + _tokens_bullets
         + _adaptive_line
-        + f"\n\U0001F4CA <b>Open positions resumed:</b> {_h(_open_now)} / "
+        + f"\n\n\U0001F4CA <b>Open positions resumed:</b> {_h(_open_now)} / "
           f"{_h(MAX_OPEN_POSITIONS)}"
         + _wr_line
         + _crt_summary
