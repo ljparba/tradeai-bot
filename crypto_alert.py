@@ -35,6 +35,10 @@ def _h(value) -> str:
     """
     return html.escape(str(value))
 
+# Visual section divider used across all Telegram messages (signal, exit
+# suggestion, heartbeat, startup). Same width everywhere for consistency.
+_TG_HR = "━" * 22
+
 # Load .env / .env.vault BEFORE any other module reads os.environ.
 # secrets_loader is the bot's centralized secrets entry point (Phase A item #4).
 from secrets_loader import load_env as _load_env
@@ -1810,6 +1814,7 @@ def send_exit_suggestion(sig, assessment, price):
     msg = (
         f"{header_emoji} <b>{_h(header_text)} — {_h(token)} "
         f"{_h(direction)} #{_h(sig_id)}</b>\n"
+        f"\n{_TG_HR}\n"
         f"\n\U0001F3AF <b>Entry:</b> ${entry:.4f}"
         f"\n\U0001F4CA <b>Now:</b> ${price:.4f}"
         f"\n\U0001F4C8 <b>Floating P&amp;L:</b> {pnl_sign}{pnl:.2f}%"
@@ -1819,15 +1824,17 @@ def send_exit_suggestion(sig, assessment, price):
         msg += f"\n⏰ <b>Expires in:</b> {_h(time_rem)}h"
 
     if signals:
-        msg += f"\n\n⚠️ <b>Exit signals firing ({_h(len(signals))}):</b>"
+        msg += f"\n\n{_TG_HR}\n\n⚠️ <b>Exit signals firing ({_h(len(signals))}):</b>"
         for s in signals:
             msg += f"\n• {_h(s)}"
     else:
-        msg += "\n\n<i>No reversal signals — purely coverage-based.</i>"
+        msg += f"\n\n{_TG_HR}\n\n<i>No reversal signals — purely coverage-based.</i>"
 
     msg += (
-        f"\n\n✅ <b>Verdict:</b>\n{note}"
-        f"\n\n\U0001F3AF <b>TP1:</b> ${tp1:.4f}"
+        f"\n\n{_TG_HR}\n"
+        f"\n✅ <b>Verdict:</b>\n{note}"
+        f"\n\n{_TG_HR}\n"
+        f"\n\U0001F3AF <b>TP1:</b> ${tp1:.4f}"
         f"\n\U0001F3AF <b>TP2:</b> ${tp2:.4f}"
         "\n\n<i>Analysis only. Your call.</i>"
     )
@@ -3310,6 +3317,7 @@ def send_signal_msg(token,price,ch24,result,plan,sig_id,regime):
     # ── Trade plan (Entry / SL / TP1-3) ──
     if plan:
         msg += (
+            f"\n\n{_TG_HR}\n"
             f"\n\U0001F4CD <b>Entry:</b> ${price:.4f}"
             f"\n\U0001F6D1 <b>Stop Loss:</b> ${plan['sl']:.4f}   ({plan['sl_pct']:+.2f}%)"
             f"\n\U0001F3AF <b>TP1:</b> ${plan['tp1']:.4f}   "
@@ -3347,19 +3355,21 @@ def send_signal_msg(token,price,ch24,result,plan,sig_id,regime):
     if session_lbl and session_lbl not in ("", "UNKNOWN"):
         _conflu_lines.append(f"Session: {_h(session_lbl)}")
     if _conflu_lines:
-        msg += "\n\n✅ <b>Confluences:</b>"
+        msg += f"\n\n{_TG_HR}\n\n✅ <b>Confluences:</b>"
         for _c in _conflu_lines[:5]:  # cap at 5 bullets — keep it scannable
             msg += f"\n• {_c}"
 
     # ── Execution discipline (LIMIT order, 30-min window) ──
     if plan:
         msg += (
-            f"\n\n\U0001F4CB <b>LIMIT {_h(signal)} @ ${price:.4f}</b> "
+            f"\n\n{_TG_HR}\n"
+            f"\n\U0001F4CB <b>LIMIT {_h(signal)} @ ${price:.4f}</b> "
             f"— cancel if not filled in 30 min"
         )
 
     # ── Footer ──
-    msg += "\n\n\U0001F4CC Full details on the dashboard."
+    msg += f"\n\n{_TG_HR}\n"
+    msg += "\n\U0001F4CC Full details on the dashboard."
     msg += "\n<i>Analysis only. Your call.</i>"
 
     if len(msg) > 4000:
@@ -3740,7 +3750,7 @@ def main():
     # 2-column token grid in <pre> (monospace alignment unavailable elsewhere
     # in Telegram HTML — small block, not a dense data table).
 
-    _hr = "━" * 22  # divider line between sections
+    _hr = _TG_HR  # shared divider — see module-level _TG_HR definition
 
     # Token list — single comma-separated line (matches the Adaptive Learning
     # "Live (n): A, B, C" style). Drops both the <pre> copy affordance and
@@ -3965,6 +3975,7 @@ def main():
                 _hb_alerter.send(
                     "Heartbeat",
                     "\U0001F49A <b>BOT ALIVE</b>\n"
+                    f"\n{_TG_HR}\n"
                     f"\n⏰ <b>Time:</b> {_h(datetime.now().strftime('%Y-%m-%d %H:%M'))}"
                     f"\n\U0001F501 <b>Cycle:</b> {_h(cycle)}"
                     f"\n⚙️ <b>Mode:</b> {_h(EXECUTION_MODE)}"

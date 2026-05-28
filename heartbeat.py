@@ -246,12 +246,14 @@ class Heartbeat:
         """
         import html as _html
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        _hr = "━" * 22  # mirrors crypto_alert._TG_HR — same visual width
         body = (
             "\U0001FA7A <b>ALERT PATH CHECK</b>\n"
+            f"\n{_hr}\n"
             f"\n⏰ <b>Time:</b> {_html.escape(ts)} UTC"
             f"\n\U0001F522 <b>PID:</b> {_html.escape(str(os.getpid()))}"
             f"\n\U0001F493 <b>Beat:</b> #{_html.escape(str(self._counter))}"
-            "\n"
+            f"\n\n{_hr}\n"
             "\n<i>Confirms both Telegram AND SMTP are reachable. "
             "If you don't see this on every configured channel, "
             "the alert path is degraded — investigate before LIVE.</i>"
