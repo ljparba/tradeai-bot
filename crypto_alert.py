@@ -3268,149 +3268,105 @@ def send_signal_msg(token,price,ch24,result,plan,sig_id,regime):
     fvg_bot     = fvg.get("bottom", 0.0)
     fvg_top     = fvg.get("top",    0.0)
     fvg_size_pct = (fvg_top - fvg_bot) / max(price, 1e-10) * 100
-    ifvg_5m_found = ifvg_5m_r.get("ifvg_5m_found", False)
-    entry_zone_line = (
-        f"  Entry:  [{ifvg_5m_r['ifvg_5m_bottom']:.5f}–{ifvg_5m_r['ifvg_5m_top']:.5f}] (5M iFVG)"
-        if ifvg_5m_found
-        else f"  Entry:  [{fvg_bot:.5f}–{fvg_top:.5f}] (FVG zone)"
-    )
-    entry_label = "5M iFVG precision" if ifvg_5m_found else "FVG retracement"
-    ifvg_line   = (f"  IFVG:   [{ifvg_r['ifvg_bottom']:.5f}–{ifvg_r['ifvg_top']:.5f}] ✓"
-                   if ifvg_r.get("ifvg_present") else "  IFVG:   None")
+    # Note: 2026-05-28 redesign — entry_zone_line / entry_label / ifvg_line
+    # and template diagnostic fields (_tmpl_id, _tmpl_status, _exec_tag) were
+    # removed from the Telegram template per operator request. The data is
+    # still surfaced on the dashboard. Template + ICT raw fields above remain
+    # extracted so future template-tier work (Phase B) can reuse them.
 
-    # Phase 5A — template safety section
-    _tmpl_id     = result.get("matched_template_id", "NONE")
-    _tmpl_status = result.get("template_status", "UNKNOWN_TEMPLATE")
-    _tmpl_live   = result.get("template_live_allowed", 0)
-    _tmpl_reason = result.get("template_block_reason", "")
-    _exec_tag    = "LIVE-OK" if _tmpl_live else "PAPER"
-
-    # ── Title + header ──
-    ts_now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
-    # HIGH B-2/B-3 fix (telegram audit 2026-05-27): surface scanner source +
-    # CRT-specific context (Wyckoff phase, sr_type, TP1 mode) so the operator
-    # can visually distinguish CRT alerts from legacy 5M_SWEEP alerts and
-    # make informed manual-trade decisions. CRT signals carry source='H4_CRT'
-    # and entry_type like 'H4_CRT_FVG_MARKUP' (3-part: source_confluence_phase).
-    _src      = (result.get("source") or "5M_SWEEP").upper()
-    _et_full  = str(result.get("entry_type") or "")
-    _scanner_banner = ""
-    if _src == "H4_CRT" or _et_full.startswith("H4_CRT"):
-        # Parse "H4_CRT_<FVG|OB>_<PHASE>"; default UNKNOWN on missing parts.
+    # ── 2026-05-28 redesign (operator request): clean Telegram template.
+    # Keep only what's actionable for manual execution: pair, timeframe,
+    # entry, SL, TP1-3, 3-5 confluences, execution discipline, dashboard
+    # pointer. Everything else (ICT raw detail, BTC context, Regime/ADX,
+    # Size/Risk/Fees, Net economics, full reasons list, compound projection,
+    # template diagnostics) is on the dashboard and just clutters the
+    # Telegram alert at decision time.
+    #
+    # Parse source so we can label timeframe correctly and assemble the
+    # right confluences list for each scanner.
+    _src     = (result.get("source") or "5M_SWEEP").upper()
+    _et_full = str(result.get("entry_type") or "")
+    _is_crt  = _src == "H4_CRT" or _et_full.startswith("H4_CRT")
+    if _is_crt:
+        # Parse "H4_CRT_<FVG|OB>_<PHASE>"; default ? on missing parts
         _parts = _et_full.split("_")
         _conf  = _parts[2] if len(_parts) >= 3 else "?"
         _phase = "_".join(_parts[3:]) if len(_parts) >= 4 else "?"
-        _sr    = result.get("sr_type") or "?"
-        _tp1m  = os.environ.get("CRT_TP1_MODE", "dynamic")
-        _scanner_banner = (
-            f"<i>Scanner: <b>H4_CRT</b>  -  "
-            f"Conflu: <b>{_h(_conf)}</b>  -  "
-            f"Phase: <b>{_h(_phase)}</b>  -  "
-            f"sr_type: {_h(_sr)}  -  TP1 mode: {_h(_tp1m)}</i>\n"
-        )
-    elif _src == "5M_SWEEP":
-        _scanner_banner = "<i>Scanner: <b>5M_SWEEP</b></i>\n"
-    msg = (
-        f"<b>{_h(token)} {_h(signal)}  signal #{_h(sig_id)}</b>\n"
-        + _scanner_banner +
-        f"{_h(ts_now)} UTC  -  price ${price:.4f}  (24h {ch24:+.2f}%)\n"
+        _timeframe_lbl = "H4 CRT"
+    else:
+        _conf  = ""
+        _phase = ""
+        _timeframe_lbl = "5M SWEEP"
+
+    # ── Title ──
+    msg = f"\U0001F4E2 <b>POTENTIAL {_h(signal)} SIGNAL</b>  #{_h(sig_id)}\n"
+
+    # ── Header block ──
+    msg += (
+        f"\n\U0001F504 <b>Pair:</b> {_h(token)}/USDT"
+        f"\n⏰ <b>Timeframe:</b> {_h(_timeframe_lbl)}"
     )
 
     # ── Trade plan (Entry / SL / TP1-3) ──
     if plan:
         msg += (
-            "\n<pre>"
-            f"Entry  {price:>12.5f}\n"
-            f"SL     {plan['sl']:>12.5f}   {plan['sl_pct']:+6.2f}%\n"
-            f"TP1    {plan['tp1']:>12.5f}   {plan['tp1_pct']:+6.2f}%   R:R {plan['rr1']:>4}   close 40%\n"
-            f"TP2    {plan['tp2']:>12.5f}   {plan['tp2_pct']:+6.2f}%   R:R {plan['rr2']:>4}   close 40%\n"
-            f"TP3    {plan['tp3']:>12.5f}   {plan['tp3_pct']:+6.2f}%   R:R {plan['rr3']:>4}   close 20%"
-            "</pre>\n"
-        )
-        # ── Execution discipline (2026-05-28 operator decision: Option 1 — limit orders) ──
-        # The bot's `entry_price` is the 5M candle open from the MSS confirmation
-        # bar — which may be 5-15 min OLD by the time this alert fires. A market
-        # order at the alert moment fills at a worse price (slippage). Discipline:
-        # place a LIMIT order at the bot's entry; if price doesn't retrace within
-        # 30 min, cancel + skip (the move has fully developed and entry is unsafe).
-        msg += (
-            f"\n<b>Execution:</b> LIMIT {result.get('signal','?')} @ "
-            f"${price:.4f}  -  cancel if not filled in 30 min\n"
+            f"\n\U0001F4CD <b>Entry:</b> ${price:.4f}"
+            f"\n\U0001F6D1 <b>Stop Loss:</b> ${plan['sl']:.4f}   ({plan['sl_pct']:+.2f}%)"
+            f"\n\U0001F3AF <b>TP1:</b> ${plan['tp1']:.4f}   "
+            f"({plan['tp1_pct']:+.2f}% · R:R {plan['rr1']})"
+            f"\n\U0001F3AF <b>TP2:</b> ${plan['tp2']:.4f}   "
+            f"({plan['tp2_pct']:+.2f}% · R:R {plan['rr2']})"
+            f"\n\U0001F3AF <b>TP3:</b> ${plan['tp3']:.4f}   "
+            f"({plan['tp3_pct']:+.2f}% · R:R {plan['rr3']})"
         )
 
-    # ── At-a-glance summary line ──
-    msg += (
-        f"\n<b>Conf {_h(conf)}/10</b>   "
-        f"{_h(_tmpl_id)} {_h(_tmpl_status)} ({_h(_exec_tag)})\n"
-        f"Regime {_h(reg)}  ADX {_h(reg_adx)}  Eff {reg_eff:.2f}\n"
-        f"HTF    4H {_h(bias_4h)}   /   1H {_h(trend_1h)}\n"
-        f"BTC    4H {_h(btc_t4h)}   /   1H {_h(btc_t1h)}   /   Dom {btc_dom:.1f}%   /   {_h(btc_status)}\n"
-    )
+    # ── Confluences (scanner-aware) ──
+    # Keep to 4-5 bullets — the most decision-relevant features for each
+    # scanner. The dashboard carries the full reasons list, ICT raw data,
+    # and EV diagnostics for deeper review.
+    _conflu_lines = []
+    if _is_crt:
+        _conflu_lines.append(f"H4 CRT — {_h(_conf)} confluence")
+        if bias_4h and bias_4h != "?":
+            _conflu_lines.append(f"4H bias: {_h(bias_4h)}")
+        if mss_qual and mss_qual not in ("", "NONE"):
+            _conflu_lines.append(f"MSS quality: {_h(mss_qual)}")
+        if _phase and _phase != "?":
+            _conflu_lines.append(f"Wyckoff phase: {_h(_phase)}")
+    else:  # 5M_SWEEP
+        if sweep_type and sweep_type != "?":
+            _conflu_lines.append(f"Sweep: {_h(sweep_type)}")
+        if fvg_qual and fvg_qual not in ("", "NONE"):
+            _conflu_lines.append(f"FVG quality: {_h(fvg_qual)}")
+        if mss_qual and mss_qual not in ("", "NONE"):
+            _conflu_lines.append(f"MSS quality: {_h(mss_qual)}")
+        if bias_4h and bias_4h != "?":
+            _conflu_lines.append(f"4H bias: {_h(bias_4h)}")
+        if trend_1h and trend_1h != "?":
+            _conflu_lines.append(f"1H trend: {_h(trend_1h)}")
+    if session_lbl and session_lbl not in ("", "UNKNOWN"):
+        _conflu_lines.append(f"Session: {_h(session_lbl)}")
+    if _conflu_lines:
+        msg += "\n\n✅ <b>Confluences:</b>"
+        for _c in _conflu_lines[:5]:  # cap at 5 bullets — keep it scannable
+            msg += f"\n• {_c}"
 
-    # ── ICT setup detail ──
-    if ifvg_5m_found:
-        _entry_line = (f"Entry    {ifvg_5m_r['ifvg_5m_bottom']:.5f} - {ifvg_5m_r['ifvg_5m_top']:.5f}  "
-                       f"(5M iFVG precision)")
-    else:
-        _entry_line = f"Entry    FVG retracement zone"
-    _smt_state = "confirmed" if smt_r.get("smt_confirmed") else "absent"
-    _ifvg_state = "matched" if ifvg_r.get("ifvg_present") else "none"
-    _ev_str = f"{ev_score:+.3f}%" if ev_score is not None else "N/A"
-    msg += (
-        "\n<pre>"
-        f"Sweep    {_h(sweep_type)} @ {sweep_lev:.5f}\n"
-        f"DR (4H)  {_h(dr_location)}  mid {dr_mid:.4f}\n"
-        f"FVG      {fvg_bot:.5f} - {fvg_top:.5f}  ({fvg_size_pct:.2f}%, {_h(fvg_qual)})\n"
-        f"{_entry_line}\n"
-        f"Reaction {_h(entry_tp)}\n"
-        f"MSS      {_h(mss_qual)}\n"
-        f"SMT      {_h(smt_type)}  ({_h(_smt_state)} vs BTC)\n"
-        f"iFVG     {_h(_ifvg_state)}\n"
-        f"Session  {_h(session_lbl)}\n"
-        f"EV       {_h(_ev_str)}  (n={_h(ev_sample_n)}, {_h(ev_status)})"
-        "</pre>\n"
-    )
-
-    # ── Size + net economics ──
+    # ── Execution discipline (LIMIT order, 30-min window) ──
     if plan:
-        sz_notional = sizing.get("notional_usd", 0.0)
-        sz_risk_pct = sizing.get("account_risk_pct", 0.0)
-        sz_max_loss = sizing.get("max_loss_usd", 0.0)
-        sz_fees     = sizing.get("fees_usd", 0.0)
         msg += (
-            f"\nSize ${sz_notional:,.0f}  -  "
-            f"Risk {sz_risk_pct:.1f}% (${sz_max_loss:.2f})  -  "
-            f"Fees ~${sz_fees:.2f}\n"
-            f"Net TP1 {plan['net_tp1_pct']:+.2f}%  -  "
-            f"BEW {plan['breakeven_wr']:.0%}  -  "
-            f"Net R:R {plan['net_rr1']}\n"
+            f"\n\n\U0001F4CB <b>LIMIT {_h(signal)} @ ${price:.4f}</b> "
+            f"— cancel if not filled in 30 min"
         )
 
-    # ── Template block reason (only if actually blocked) ──
-    if _tmpl_reason:
-        msg += f"\n<i>Template blocked: {_h(_tmpl_reason)}</i>\n"
-
-    # ── Why this signal (reasons list) ──
-    msg += "\n<b>Why this signal:</b>\n"
-    for r in result["reasons"]:
-        msg += f"  - {_h(r)}\n"
-
-    # ── Compound projection (optional) ──
-    if comp and len(comp) >= 5:
-        msg += (
-            f"\nCompound at {wr_live:.0%} WR:  "
-            f"${YOUR_CAPITAL:,.0f}  ->  "
-            f"5T ${comp[4]:,.0f}  ->  "
-            f"10T ${comp[9]:,.0f}\n"
-        )
-
+    # ── Footer ──
+    msg += "\n\n\U0001F4CC Full details on the dashboard."
     msg += "\n<i>Analysis only. Your call.</i>"
 
     if len(msg) > 4000:
         msg = msg[:3980] + "...[trimmed]"
     send_telegram(msg)
     ifvg_tag    = " IFVG" if ifvg_r.get("ifvg_present") else ""
-    ifvg_5m_tag = " 5M-iFVG" if ifvg_5m_found else ""
+    ifvg_5m_tag = " 5M-iFVG" if ifvg_5m_r.get("ifvg_5m_found") else ""
     print(f"[SIGNAL] {token} {signal} ${price:.4f} "
           f"Sweep:{sweep_type} FVG:{fvg_size_pct:.2f}%[{fvg_qual}]{ifvg_tag}{ifvg_5m_tag} "
           f"MSS:[{mss_qual}] Entry:{entry_tp} "
