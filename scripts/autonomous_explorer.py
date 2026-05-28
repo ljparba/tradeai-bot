@@ -613,7 +613,23 @@ def _run_backtest(env: dict, timeout_s: int = 1800) -> dict:
         ).fetchall()
         con.close()
         if not new_rows:
-            m["error"] = "backtest_subprocess_wrote_no_row"
+            # 2026-05-28 fix: distinguish "subprocess crashed" from
+            # "subprocess succeeded with 0 signals". returncode==0 was
+            # already verified at line 582-584 above — so reaching here
+            # with no row means backtest.py ran clean but save_backtest_run
+            # returned early on `if not all_signals: return None`
+            # (backtest.py:3480). That's a structural FAIL (this param
+            # combo produces no signals), NOT an ERROR. Pre-fix this
+            # surfaced as `backtest_subprocess_wrote_no_row` ERROR and 3
+            # in a row tripped the anti-overfit guard at line 1207 —
+            # causing entire explorer sessions to auto-pause when Optuna
+            # picked structurally-empty param combos (e.g., post-cycle-10
+            # `CRT_TP1_MODE=fixed_1r` is incompatible with the new
+            # ICT_MIN_RR_GATE=1.5 floor and produces zero CRT signals).
+            # Now classified as FAIL with `n=0`; the _verdict() function
+            # picks it up via `m["n"] is None or m["n"] < GATES["n_min"]`
+            # and Optuna learns to avoid the combo.
+            m["n"] = 0
             return m
         if len(new_rows) > 1:
             print(f"[explorer] WARN: {len(new_rows)} new backtest_runs rows since trial start — "
