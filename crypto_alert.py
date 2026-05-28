@@ -3804,7 +3804,7 @@ def main():
         f"\U0001F680 <b>BOT STARTED — {_h(_mode_title)}</b>\n"
         f"\n⚙️ <b>Mode:</b> {_h(EXECUTION_MODE)}"
         f"\n\U0001F300 <b>Strategy:</b> {_h(_strategy_line)}"
-        f"\n\n{_hr}\n\n\U0001F4D4 <b>Tokens Watched ({_h(len(BINANCE_TOKENS))}):</b> "
+        f"\n\n{_hr}\n\n\U0001F4D4 <b>Tokens Watched ({_h(len(BINANCE_TOKENS))}):</b>\n"
         + _h(_tokens_inline)
         + _adaptive_block
         + _status_block
