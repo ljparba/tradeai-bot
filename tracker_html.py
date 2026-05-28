@@ -677,7 +677,8 @@ tr:hover td{background:rgba(37,37,56,.45)}
   <div id="panelOpen" class="tab-panel active">
     <div class="honest-section-intro" style="margin:0 0 1rem 0">
       <b>What is this tab?</b> Your <b>live action board</b>. Shows every signal that is still in-progress
-      (not yet hit TP1 / TP2 / SL / expiry) and the cumulative P&amp;L equity curve from all closed signals.
+      (not yet hit TP1 / TP2 / TP3 / SL and not past the outcome window &mdash; 48h for CRT, 24h for 5M_SWEEP)
+      and the cumulative P&amp;L equity curve from all closed signals.
       <br><br>
       Each card is one active position with its entry, stop loss, take-profit ladder, real-time MFE/MAE,
       and a manual close button (for when you exit before TP/SL fires &mdash; the bot will recompute the P&amp;L from your exit price).
@@ -773,6 +774,12 @@ tr:hover td{background:rgba(37,37,56,.45)}
         Real-time view of the filters the bot is currently applying. If <b>Conf Floor</b> rises, the bot
         is being stricter (only firing high-conviction signals). <b>Tokens w/ Floor↑</b> = tokens whose
         recent WR dropped below 35% and now have a tighter floor applied. Empty = no filters tightened.
+        <br><br>
+        Also active in the background: <b>Phase 5A template-safety gates</b> &mdash;
+        <code>INSUFFICIENT_SAMPLE</code> blocks a tier when n&lt;50 closed signals, <code>CIRCUIT_BREAKER</code>
+        blocks when rolling WR&lt;55%, <code>DAILY_CAP</code> blocks per-tier per UTC day (A=3, B=2, C=0).
+        When any of these trip, the bot stays silent in LIVE; check Signal History for the matched-tier
+        column to spot blocked patterns.
       </div>
       <div class="intel-cards">
         <div class="icard">
@@ -860,8 +867,9 @@ tr:hover td{background:rgba(37,37,56,.45)}
         </span>
       </div>
       <div class="honest-section-intro" style="margin:.4rem 0 .8rem 0;border-left-color:#06b6d4">
-        Win rate by hour-of-day (UTC) and day-of-week. Reveals timing edges. ICT killzones
-        (London 7&ndash;10 UTC, NY AM 12&ndash;15 UTC) typically show the strongest cells.
+        Win rate by hour-of-day (UTC) and day-of-week. Reveals timing edges &mdash; for the 5M_SWEEP
+        scanner the ICT killzones (London 7&ndash;10 UTC, NY AM 12&ndash;15 UTC) tend to dominate;
+        for CRT the edges concentrate around H4 candle closes (0/4/8/12/16/20 UTC).
         Cells with fewer than 2 signals are uncolored to avoid false confidence.
       </div>
       <div id="hourDayHeatmap" class="hm-wrap">
@@ -905,8 +913,10 @@ tr:hover td{background:rgba(37,37,56,.45)}
       &mdash; closed and open, winners and losers. This is your forensic view.
       <br><br>
       Filter chips above the table let you slice by <b>outcome</b> (Wins / Losses / Partial / Open / Expired)
-      and by <b>token</b>. Click any column header to sort. Click a row to expand the full signal context
-      (FVG quality, MSS quality, sweep type, session, ICT structure, OGD weights at fire-time, template match, etc.).
+      and by <b>token</b>. Click any column header to sort. Click a row to expand the full signal context.
+      Fields differ by scanner: 5M_SWEEP populates sweep_type / DR location / FVG quality; CRT populates
+      Wyckoff phase + confluence type (FVG/OB) / MSS quality. Both also show OGD weights at fire-time,
+      template tier match, and Phase A slippage + fill status.
       <br><br>
       <b>Tip:</b> Use this when investigating why a specific trade lost &mdash; the expanded row shows
       every feature value at signal-fire time, so you can spot patterns (e.g. "all my SELL losses were
@@ -934,13 +944,13 @@ tr:hover td{background:rgba(37,37,56,.45)}
           <th class="sortable" onclick="histSetSort('id')">ID <span class="sort-ico on" id="sh-id">&#9660;</span></th>
           <th class="sortable" onclick="histSetSort('token')">Token <span class="sort-ico" id="sh-token"></span></th>
           <th class="sortable" onclick="histSetSort('signal')">Signal <span class="sort-ico" id="sh-signal"></span></th>
-          <th class="sortable" onclick="histSetSort('matched_template_id')" title="Template tier (CRT_A/B/C or TIER_A/B/C; — for unclassified)">Tier <span class="sort-ico" id="sh-matched_template_id"></span></th>
+          <th class="sortable" onclick="histSetSort('matched_template_id')" title="Template tier — CRT_A = FVG + MSS=HIGH (best); CRT_B = OB + MSS≥MEDIUM; CRT_C = paper-only catch-all (live_allowed=0). Legacy TIER_A/B/C apply to 5M_SWEEP signals. Daily LIVE caps: A=3, B=2, C=0.">Tier <span class="sort-ico" id="sh-matched_template_id"></span></th>
           <th>Entry</th><th>SL</th><th>TP1</th><th>TP2</th><th>TP3</th>
           <th class="sortable" onclick="histSetSort('rr1')">R:R <span class="sort-ico" id="sh-rr1"></span></th>
           <th class="sortable" onclick="histSetSort('confidence')">Conf <span class="sort-ico" id="sh-confidence"></span></th>
           <th>MTF</th><th>RSI</th><th>4H</th><th>1H</th><th>5M</th>
           <th>Session</th><th>Sweep</th><th>EV</th>
-          <th title="Slippage between fired signal price and live tick">Slip</th>
+          <th title="Slippage between fired signal price and live tick at save. Green ≤0.5%, yellow 0.5–2%, red >2% (CRT_SLIPPAGE_WARN_PCT=0.5, CRT_SLIPPAGE_CRIT_PCT=2.0).">Slip</th>
           <th title="Did price retouch the entry within the limit-order fill window">Fill</th>
           <th class="sortable" onclick="histSetSort('outcome')">Result <span class="sort-ico" id="sh-outcome"></span></th>
           <th class="sortable" onclick="histSetSort('profit_pct')">P&amp;L <span class="sort-ico" id="sh-profit_pct"></span></th>
@@ -959,14 +969,16 @@ tr:hover td{background:rgba(37,37,56,.45)}
   <div id="panelBacktest" class="tab-panel">
 
     <div class="honest-section-intro" style="margin:0 0 1rem 0">
-      <b>What is this tab?</b> The <b>strategy validation</b> view. Runs the exact same ICT signal logic
-      that fires live signals, but over the last 365 days of historical data. Tells you whether
-      the strategy <em>would have worked</em> across many market conditions.
+      <b>What is this tab?</b> The <b>strategy validation</b> view. Runs the same scanners that fire live
+      signals (CRT by default; 5M_SWEEP when <code>ENABLE_5M_SWEEP=1</code>), but over the last 365 days
+      of historical data. Tells you whether the strategy <em>would have worked</em> across many market conditions.
       <br><br>
-      Click <b>Run Backtest</b> to execute (VPN required &mdash; Binance is the data source; ~15&ndash;30 min on 5M candles).
-      Results break down by token, regime, hour, day-of-week, sweep type, confluence template, and more.
-      The <b>Walk-Forward</b> section shows out-of-sample (OOS) vs in-sample (IS) win rates &mdash; a small or negative
-      overfit gap (IS &le; OOS) is a strong signal the edge is real.
+      Click <b>Run Backtest</b> to execute (VPN required &mdash; Binance is the data source).
+      Typical runtime: ~11 min with warm cache; up to ~30 min on a cold fetch of all 10 tokens.
+      Results break down by token, regime, hour, day-of-week, signal source (5M_SWEEP / H4_CRT),
+      confluence template, and more. The <b>Walk-Forward</b> section shows out-of-sample (OOS) vs
+      in-sample (IS) win rates &mdash; a small or negative overfit gap (IS &le; OOS) is a strong signal
+      the edge is real.
       <br><br>
       <b>Tip:</b> Backtest WR is the <em>headline</em> number (easy to overfit). For LIVE-readiness,
       cross-check the <b>Honest Metrics</b> tab (CPCV + DSR) and <b>QuantStats</b> (Sharpe, Sortino, Calmar, drawdown).
@@ -998,7 +1010,7 @@ tr:hover td{background:rgba(37,37,56,.45)}
         <div class="bt-progress-bar"><div class="bt-progress-fill" id="btProgressFill" style="width:0%"></div></div>
         <div class="bt-progress-msg" id="btProgressMsg">Ready</div>
       </div>
-      <small style="color:var(--muted)">&#9888; VPN required &nbsp;&#183;&nbsp; ~15-30 min (5M resolution) &nbsp;&#183;&nbsp; auto-saves to DB</small>
+      <small style="color:var(--muted)">&#9888; VPN required &nbsp;&#183;&nbsp; ~11 min warm cache (up to ~30 min cold fetch) &nbsp;&#183;&nbsp; auto-saves to DB</small>
     </div>
     <div id="btErrorLog" style="display:none;margin-top:10px;background:#1a0a0a;border:1px solid #ff4444;border-radius:8px;padding:12px;">
       <div style="color:#ff6666;font-size:11px;font-weight:600;margin-bottom:6px;">ERROR LOG</div>
@@ -1036,7 +1048,7 @@ tr:hover td{background:rgba(37,37,56,.45)}
         <div class="intel-sec-title">
           Win Rate by Signal Source
           <span class="badge" style="font-size:.65rem;text-transform:none;letter-spacing:0;font-weight:400;color:var(--muted)">
-            5M_SWEEP = Run-168 baseline scanner · H4_CRT = Candle Range Theory scanner
+            5M_SWEEP = legacy 5M-sweep scanner (Run-168 baseline, dormant in operator's current .env) · H4_CRT = active CRT scanner
           </span>
         </div>
         <div class="conf-breakdown" id="btSourceList"></div>
@@ -1054,9 +1066,9 @@ tr:hover td{background:rgba(37,37,56,.45)}
         <div class="conf-breakdown" id="btDirList"></div>
       </div>
 
-      <!-- ICT Kill Zone Session -->
+      <!-- Session Win Rate -->
       <div class="intel-sec">
-        <div class="intel-sec-title">Win Rate by ICT Kill Zone Session</div>
+        <div class="intel-sec-title">Win Rate by Session</div>
         <div class="conf-breakdown" id="btSessionList"></div>
       </div>
 
@@ -1346,13 +1358,13 @@ tr:hover td{background:rgba(37,37,56,.45)}
           <div class="honest-label">Bot Version</div>
           <div class="honest-value" id="hmBotVersion">—</div>
           <div class="honest-sub" id="hmExecutionMode">—</div>
-          <div class="honest-desc">Current strategy variant. PAPER mode = signals only, no auto-trades.</div>
+          <div class="honest-desc">Current build &amp; scanner mode (CRT-only / 5M-only / dual). PAPER mode = signals only, no auto-trades.</div>
         </div>
         <div class="honest-card honest-status">
           <div class="honest-label">Latest Audit Score</div>
           <div class="honest-value" id="hmAuditScore">—</div>
           <div class="honest-sub" id="hmAuditDate">—</div>
-          <div class="honest-desc">Out of 10 — combined verdict of 11 specialist code audits (ICT logic, risk, statistics, etc.). ≥9 is enterprise-grade.</div>
+          <div class="honest-desc">Out of 10 — combined verdict of 11 specialist code audits (CRT logic, ICT logic, risk, statistics, honest-metrics, etc.). ≥9 is enterprise-grade.</div>
         </div>
         <div class="honest-card honest-status">
           <div class="honest-label">OGD Health</div>
@@ -1396,9 +1408,10 @@ tr:hover td{background:rgba(37,37,56,.45)}
              background:rgba(245,166,35,0.08);border:1px solid var(--yellow);border-radius:6px;
              color:var(--yellow);font-size:0.82rem;line-height:1.45">
           <strong>&#9888; Mixed-source backtest</strong> &mdash; <span id="hmBlendDetail"></span>
-          The CPCV/DSR/Sharpe metrics below average across both scanners. If live mode is currently CRT-only
-          (ENABLE_5M_SWEEP=0), interpret the verdict with care: the headline could pass on a strong 5M_SWEEP
-          subset while the live H4_CRT path is actually weaker (or vice versa).
+          Live mode is currently <strong>CRT-only</strong> (<code>ENABLE_5M_SWEEP=0</code>). The CPCV/DSR/Sharpe
+          metrics below average across both scanners &mdash; the headline could pass on a strong 5M_SWEEP
+          subset while the live H4_CRT path is actually weaker (or vice versa). Run a CRT-only backtest
+          (<code>ENABLE_5M_SWEEP=0</code> in <code>.env.explorer</code>) for an honest read.
         </div>
         <div class="honest-grid">
           <div class="honest-cell">
@@ -1422,7 +1435,7 @@ tr:hover td{background:rgba(37,37,56,.45)}
           <div class="honest-cell honest-highlight">
             <div class="honest-cell-label">CPCV mean WR &#11088;</div>
             <div class="honest-cell-value" id="hmCpcvWr">—</div>
-            <div class="honest-cell-sub">Honest average (target &ge;58%)</div>
+            <div class="honest-cell-sub">Honest average (target &ge;60% for LIVE)</div>
             <div class="honest-cell-desc">Average win rate across 10 different time slices of the data. Resists overfitting. This is the WR you should actually trust.</div>
           </div>
           <div class="honest-cell">
@@ -1457,12 +1470,12 @@ tr:hover td{background:rgba(37,37,56,.45)}
           </div>
         </div>
         <div class="honest-verdict-row">
-          <span class="honest-verdict-label">Phase A Verdict:</span>
+          <span class="honest-verdict-label">Backtest Honest Verdict:</span>
           <span class="honest-verdict-value" id="hmVerdict">—</span>
         </div>
         <div class="honest-verdict-legend">
-          <span><span class="honest-legend-dot pass"></span> <b>PASS</b> = CPCV &ge;58% AND DSR &ge;95%. LIVE-ready.</span>
-          <span><span class="honest-legend-dot marginal"></span> <b>MARGINAL</b> = CPCV &ge;55% AND DSR &ge;95%. Acceptable, but not ideal.</span>
+          <span><span class="honest-legend-dot pass"></span> <b>PASS</b> = CPCV &ge;60% AND DSR &ge;95% AND N&ge;30 closed paper signals. LIVE-ready.</span>
+          <span><span class="honest-legend-dot marginal"></span> <b>MARGINAL</b> = CPCV in 55&ndash;60% AND DSR &ge;95%. Below LIVE gate &mdash; informational only, NOT ready for real money.</span>
           <span><span class="honest-legend-dot fail"></span> <b>FAIL</b> = below either threshold. NOT ready for LIVE.</span>
         </div>
       </div>
@@ -1472,10 +1485,14 @@ tr:hover td{background:rgba(37,37,56,.45)}
         <div class="honest-section-title">&#127919; Limit-Order Discipline (Phase A)</div>
         <div class="honest-section-intro">
           The bot publishes a <b>theoretical entry price</b> at signal time. Real fills happen
-          only if you actually post a limit order and price retouches that level within the fill
-          window. This panel measures both gaps that decide whether the backtest WR carries to
+          only if you actually post a limit order and price retouches that level within the
+          <b>30-minute</b> fill window (set by <code>CRT_LIMIT_FILL_WINDOW_MIN</code>). If price
+          never retouches, the limit cancels and the trade is SKIPPED in your real ledger &mdash;
+          even though the bot still tracks the theoretical outcome.
+          <br><br>
+          This panel measures both gaps that decide whether the backtest WR carries to
           real money: <b>slippage</b> (how far live tick has drifted from the published entry)
-          and <b>fillability</b> (did price actually retouch within the limit window).
+          and <b>fillability</b> (did price actually retouch within the 30-minute window).
           Restricting your scorecard to <em>filled-only</em> signals is the honest read &mdash;
           the "limit-only WR" is what you can realistically earn at the desk.
         </div>
@@ -1484,13 +1501,13 @@ tr:hover td{background:rgba(37,37,56,.45)}
             <div class="honest-cell-label">Fill Rate</div>
             <div class="honest-cell-value" id="hmFillRate">—</div>
             <div class="honest-cell-sub" id="hmFillRateSub">— filled / — evaluated</div>
-            <div class="honest-cell-desc">% of evaluated signals where price retouched the entry within the fill window. Higher = fewer missed limits.</div>
+            <div class="honest-cell-desc">% of evaluated signals where price retouched the entry within the 30-minute fill window. Higher = fewer missed limits.</div>
           </div>
           <div class="honest-cell">
             <div class="honest-cell-label">Avg |Slippage|</div>
             <div class="honest-cell-value" id="hmAvgSlip">—</div>
             <div class="honest-cell-sub" id="hmAvgSlipSub">Across tracked signals</div>
-            <div class="honest-cell-desc">Mean absolute gap between published entry and live tick at signal save. Lower = telegram price is closer to executable.</div>
+            <div class="honest-cell-desc">Mean absolute gap between published entry and live tick at signal save (% of price). Lower = telegram price is closer to executable. Color bands at 0.5% (warn) and 2% (crit).</div>
           </div>
           <div class="honest-cell honest-highlight">
             <div class="honest-cell-label">Limit-Only WR &#11088;</div>
@@ -1558,7 +1575,7 @@ tr:hover td{background:rgba(37,37,56,.45)}
       monthly heatmap, rolling Sharpe, and the full HTML report embedded below.
       <br><br>
       <b>Annualization is auto-scaled</b> to your actual trade frequency, not the default 252-day assumption &mdash; so the
-      Sharpe number is honest for sparse ICT signals.
+      Sharpe number is honest for sparse signal cadence (typical of both 5M_SWEEP and CRT scanners).
       <br><br>
       <b>Tip:</b> Toggle source between <b>Backtest</b> (historical validation) and <b>Paper</b> (live signals as they accumulate).
     </div>
@@ -1641,7 +1658,11 @@ tr:hover td{background:rgba(37,37,56,.45)}
       gates as manual backtests; auto-promoted winners (Pareto-improving + reproducible) become the new baseline pin
       automatically. <strong>Never auto-flips LIVE</strong> &mdash; that decision stays operator-deliberate.
       <br><br>
-      Start a session manually with <code style="background:var(--bg);padding:1px 5px;border-radius:3px">python scripts/autonomous_explorer.py --trials 30</code>.
+      Preferred start: <code style="background:var(--bg);padding:1px 5px;border-radius:3px">sudo systemctl start tradeai-explorer</code> (survives SSH disconnect).
+      Legacy tmux: <code style="background:var(--bg);padding:1px 5px;border-radius:3px">python scripts/autonomous_explorer.py --trials 30</code>.
+      Default search space tunes CRT params (CRT_TP1_MODE, CRT_TP2_RR/TP3_RR, H4_CRT_C2_LOOKBACK,
+      WYCKOFF_PHASE_FILTER off/loose, CRT_REQUIRE_1H_TREND, BACKTEST_BIAS_4H_GATE, CRT_FORWARD_BARS).
+      Set <code>EXPLORER_SEARCH_SPACE=5m</code> in <code>.env.explorer</code> for the legacy 5M_SWEEP space.
       Each trial = ~11 min. Status updates here every 15s while running.
       <br>
       <button class="faq-learn-btn" onclick="openFAQ('explorer')">&#128214; Learn more &rarr;</button>
@@ -1786,12 +1807,12 @@ tr:hover td{background:rgba(37,37,56,.45)}
 
   <div id="faq_open">
     <h3>What is this panel?</h3>
-    <p>The <strong>Open Positions</strong> tab is your <strong>live action board</strong>. It shows every signal the bot has fired that is still in-progress &mdash; meaning it has not yet hit TP1, TP2, TP3, the stop loss, or expired. It also displays the cumulative P&amp;L equity curve from all closed signals over the selected window.</p>
+    <p>The <strong>Open Positions</strong> tab is your <strong>live action board</strong>. It shows every signal the bot has fired that is still in-progress &mdash; meaning it has not yet hit the stop loss, any take-profit (TP1/TP2/TP3), or the outcome window expiry (48h for CRT, 24h for 5M_SWEEP). It also displays the cumulative P&amp;L equity curve from all closed signals over the selected window.</p>
     <h3>Why it exists</h3>
     <p>You need a single screen to answer: <em>"What real money am I exposed to right now?"</em> Every open card represents a trade the bot wants you to execute manually. Closing one early or letting it ride affects your real outcomes &mdash; this tab is where you make those decisions.</p>
     <h3>Section-by-section</h3>
     <h4>Open signal cards</h4>
-    <p>Each card represents one in-flight signal with: token, direction (BUY/SELL), entry price, stop loss, take-profit ladder (TP1 / TP2 / TP3), R:R ratios, confidence (1&ndash;10), live MFE/MAE, and a manual close button.</p>
+    <p>Each card represents one in-flight signal with: token, direction (BUY/SELL), entry price, stop loss, take-profit ladder (TP1 40% close / TP2 40% close / TP3 20% close &mdash; the <strong>set-and-forget cascade</strong>), R:R ratios, confidence (1&ndash;10), live MFE/MAE, and a manual close button. CRT signals expire after <strong>48 hours</strong>; 5M_SWEEP signals expire after <strong>24 hours</strong>.</p>
     <h4>Equity curve</h4>
     <p>Hidden until the first signal closes. Plots cumulative P&amp;L over closed trades. Annotated with peak equity and max drawdown. Range selector: 30d / 90d / 1y.</p>
     <h3>When to check it</h3>
@@ -1813,7 +1834,7 @@ tr:hover td{background:rgba(37,37,56,.45)}
     </table>
     <h3>Common scenarios</h3>
     <div class="faq-tip"><strong>Scenario A:</strong> Telegram pings at 3am with a BUY on AVAX. You wake at 7am, check Open Positions, see AVAX up 2% (already past TP1). You manually close at +2% via the modal &mdash; the bot logs this as a manual exit and computes P&amp;L from your exit price, not the bot's TP target.</div>
-    <div class="faq-warn"><strong>Scenario B:</strong> You see 4 open positions but only have time to execute 2. Adaptive tab shows MAX_OPEN_POSITIONS limit (20 in PAPER, 4 in LIVE) so the bot would have allowed all 4. Pick the 2 with highest confidence + best R:R from the cards.</div>
+    <div class="faq-warn"><strong>Scenario B:</strong> You see 4 open positions but only have time to execute 2. Adaptive tab shows MAX_OPEN_POSITIONS limit (20 in PAPER, 4 in LIVE). LIVE also caps per-tier per UTC day (CRT_A=3, CRT_B=2, CRT_C=0), so even if MAX_OPEN allowed 4, the daily cap may have already skipped some. Pick the 2 with highest tier (A &gt; B) + best R:R from the cards.</div>
     <h3>Glossary</h3>
     <ul>
       <li><strong>MFE (Maximum Favorable Excursion):</strong> the peak profit the position reached before reversing &mdash; how good it briefly looked</li>
@@ -1836,7 +1857,7 @@ tr:hover td{background:rgba(37,37,56,.45)}
     <h4>Main table</h4>
     <p>Sortable columns: ID, token, signal direction, entry, SL, TP1/2/3, R:R, confidence, timestamp, status. Click any column header to sort.</p>
     <h4>Row expansion</h4>
-    <p>Click a row to reveal the full feature snapshot at signal-fire time: market regime, sweep type, session, dealing-range location, MSS quality, FVG quality, SMT type, entry type, EV score, ICT bias, template match, OGD weights, and more.</p>
+    <p>Click a row to reveal the full feature snapshot at signal-fire time: regime, sweep type (5M_SWEEP) or Wyckoff phase + confluence (CRT), session, DR location, MSS quality, FVG quality, SMT type, entry type, EV score, 4H bias, matched tier (CRT_A/B/C or TIER_A/B/C), OGD weights at fire-time, Phase A slippage + fill status, and more.</p>
     <h3>When to check it</h3>
     <ul>
       <li>After a losing streak &mdash; filter by "Losses" + token to find common patterns</li>
@@ -1859,13 +1880,20 @@ tr:hover td{background:rgba(37,37,56,.45)}
     <div class="faq-warn"><strong>Scenario B:</strong> "Bot fired but I didn't get the Telegram." Filter by Open (or by token) + check the timestamp matches what you saw. If the row exists but Telegram failed, the issue is in the alert delivery, not the bot. Logs would have a [TG FAILED] line.</div>
     <h3>Glossary</h3>
     <ul>
-      <li><strong>OPEN:</strong> signal fired, in-flight, not yet TP/SL/expired</li>
-      <li><strong>WIN:</strong> hit TP3 fully (max profit)</li>
-      <li><strong>PARTIAL / PARTIAL_TP1 / PARTIAL_TP2:</strong> hit TP1 (and/or TP2), then reversed before TP3 &mdash; still counts as a winner in WR math</li>
-      <li><strong>LOSS:</strong> hit SL before any TP</li>
-      <li><strong>EXPIRED:</strong> entry window passed without hitting either TP or SL</li>
-      <li><strong>Sweep type:</strong> BSL (buy-side liquidity, used for SELL setup) or SSL (sell-side liquidity, used for BUY setup)</li>
+      <li><strong>OPEN:</strong> signal fired, outcome window still running</li>
+      <li><strong>WIN:</strong> reached TP3 fully OR (under the <strong>C6 priority rule</strong>) hit TP1 first and was later closed at full profit even if price subsequently reversed to SL</li>
+      <li><strong>PARTIAL / PARTIAL_TP1 / PARTIAL_TP2:</strong> hit TP1 (and/or TP2) then reversed before TP3 &mdash; partial-cascade outcomes count as a winner in WR math (PARTIAL = 0.5 of a WIN)</li>
+      <li><strong>LOSS:</strong> hit SL before any TP (C6: SL after TP1 was hit does NOT downgrade a WIN)</li>
+      <li><strong>EXPIRED:</strong> outcome window elapsed without hitting TP or SL (24h for 5M_SWEEP, <strong>48h for CRT</strong> &mdash; driven by <code>CRT_FORWARD_BARS=576</code> × 5min)</li>
+      <li><strong>Sweep type:</strong> BSL (buy-side liquidity, used for SELL setup) or SSL (sell-side liquidity, used for BUY setup). Populated on 5M_SWEEP signals; CRT uses BSL_CRT / SSL_CRT.</li>
       <li><strong>EV score:</strong> expected value rank (template-specific quality bonus)</li>
+      <li><strong>CRT_A_FVG_ALIGNED:</strong> highest-quality CRT tier &mdash; FVG confluence in C2 + MSS quality = HIGH</li>
+      <li><strong>CRT_B_OB_HIGH_MSS:</strong> medium-quality CRT tier &mdash; Order-Block confluence + MSS quality &ge; MEDIUM</li>
+      <li><strong>CRT_B_FVG_RELAXED:</strong> deprecated legacy tier (kept for historical-DB compatibility)</li>
+      <li><strong>CRT_C_OB_DEFAULT:</strong> catch-all paper-only CRT tier (live_allowed=0; never fires in LIVE)</li>
+      <li><strong>TIER_A / TIER_B / TIER_C:</strong> legacy 5M_SWEEP tier system (still used when ENABLE_5M_SWEEP=1)</li>
+      <li><strong>Daily LIVE cap by tier:</strong> A=3, B=2, C=0 signals per UTC day (Phase 5A safety)</li>
+      <li><strong>Wyckoff phase tag:</strong> shown on each CRT signal but <em>not</em> used to gate entry &mdash; empirical test (Run #140 Test B) showed strict Wyckoff gating costs &minus;5.22pp WR. Phase is fed into OGD for per-phase learning instead.</li>
     </ul>
   </div>
 
@@ -1937,9 +1965,9 @@ tr:hover td{background:rgba(37,37,56,.45)}
 
   <div id="faq_backtest">
     <h3>What is this panel?</h3>
-    <p>The <strong>Backtest</strong> tab is the <strong>strategy validation</strong> view. It runs the same ICT signal logic that fires live, but over historical data (last 365 days of 5M Binance candles). Tells you whether the strategy <em>would have worked</em> across many market conditions.</p>
+    <p>The <strong>Backtest</strong> tab is the <strong>strategy validation</strong> view. It runs the same scanners that fire live (CRT by default, plus 5M_SWEEP when <code>ENABLE_5M_SWEEP=1</code>), but over historical data (last 365 days of 5M Binance candles, plus H4 for the CRT scanner). Tells you whether the strategy <em>would have worked</em> across many market conditions.</p>
     <h3>Why it exists</h3>
-    <p>Live trading data accumulates slowly (3-5 signals/month). Backtest fills the gap by simulating the strategy over a year of historical data in ~11 minutes. It gives you statistical power (n=40+) for decisions that would otherwise wait 8+ months of paper trading.</p>
+    <p>Live trading data accumulates slowly (CRT: ~15 signals/month; 5M_SWEEP: ~2-3 signals/month historically). Backtest fills the gap by simulating the strategy over a year of historical data in ~11 minutes. It gives you statistical power (n=80+ for CRT) for decisions that would otherwise wait many months of paper trading.</p>
     <p><strong>Important nuance:</strong> backtest WR is the <em>headline</em> number (easy to overfit). For LIVE-readiness, cross-check the <strong>Honest Metrics</strong> tab (CPCV + DSR).</p>
     <h3>Section-by-section</h3>
     <h4>Baseline pin banner</h4>
@@ -1950,7 +1978,7 @@ tr:hover td{background:rgba(37,37,56,.45)}
       <li>&#x26D4; <strong>Mismatch:</strong> latest differs from pin &mdash; investigate</li>
     </ul>
     <h4>Run Controls</h4>
-    <p>Click <strong>Run Backtest</strong> to execute. VPN required (Binance blocked in PH). Cached candle data makes re-runs ~3-5 min. Auto-saves to DB.</p>
+    <p>Click <strong>Run Backtest</strong> to execute. VPN required (Binance blocked in PH). Cached candle data makes re-runs ~11 min (vs ~30 min cold). Auto-saves to DB.</p>
     <h4>Meta bar</h4>
     <p>Run date, period, resolution, total signals, headline WR, avg R:R, cost model (slippage + fee).</p>
     <h4>Performance by Token</h4>
@@ -2021,13 +2049,20 @@ tr:hover td{background:rgba(37,37,56,.45)}
         <tr><td>Same Direction (BUY or SELL)</td><td>10</td><td>2</td></tr>
         <tr><td>Capital at Risk</td><td>100%</td><td>3%</td></tr>
         <tr><td>Drawdown Halt</td><td>20%</td><td>10%</td></tr>
+        <tr><td>Daily LIVE cap by tier</td><td>n/a</td><td>A=3, B=2, C=0 (per UTC day)</td></tr>
       </tbody>
     </table>
     <p>When a bar turns red, the bot skips new signals in that direction until a position closes.</p>
+    <p><strong>Phase 5A template safety</strong> adds three more silent gates in LIVE:
+      <strong>INSUFFICIENT_SAMPLE</strong> (n&lt;50 closed signals at the tier),
+      <strong>CIRCUIT_BREAKER</strong> (rolling WR&lt;55%),
+      <strong>DAILY_CAP</strong> (per-tier per-UTC-day). Blocked signals appear as fired-then-blocked
+      entries in Signal History.</p>
     <h4>Per-Token OGD Weight Matrix</h4>
     <p>For each token, 6 features have a weight summing to 100%:</p>
     <ul>
-      <li>FVG quality, MSS quality, session, confidence, trend strength, DR location</li>
+      <li>FVG quality, MSS quality, session, confidence, trend strength, DR location.
+          <small>(As of 2026-05-28: CRT signals now populate DR location and SMT correctly &mdash; both were stubbed pre-F-1 fix.)</small></li>
     </ul>
     <p>Dotted vertical line marks the default 16.7% (equal weight). Green = above default (stronger predictor for that token). Below = weaker. Weights update only on signal close. A token pinned to all-floor weights signals <em>degeneration</em> (flagged red).</p>
     <h4>Concept Drift Baselines</h4>
@@ -2180,6 +2215,8 @@ tr:hover td{background:rgba(37,37,56,.45)}
     <table>
       <thead><tr><th>Command</th><th>What it does</th></tr></thead>
       <tbody>
+        <tr><td><code>sudo systemctl start tradeai-explorer</code></td><td><strong>Preferred:</strong> starts via systemd, survives SSH disconnect, restart-on-crash up to 3&times;/10min</td></tr>
+        <tr><td><code>sudo systemctl stop tradeai-explorer</code></td><td>Clean SIGTERM &mdash; finishes current trial, persists state</td></tr>
         <tr><td><code>--trials 30</code></td><td>Run 30 trials (~5.5 hours)</td></tr>
         <tr><td><code>--study-name &lt;name&gt;</code></td><td>Optuna study label (same name = Bayesian continuity)</td></tr>
         <tr><td><code>--status</code></td><td>Print current session state + Pareto top-5</td></tr>
@@ -2192,7 +2229,7 @@ tr:hover td{background:rgba(37,37,56,.45)}
     <h3>Common scenarios</h3>
     <div class="faq-tip"><strong>Scenario A:</strong> Started 30-trial session before bed. Wake up: dashboard shows 28 trials done (2 ERROR from timeouts), 5 PASS, no auto-promotions. PASS trials match baseline closely (no Pareto improvement). Run <code>--digest 12</code> for summary. No action needed.</div>
     <div class="faq-warn"><strong>Scenario B:</strong> Dashboard shows AUTO_PROMOTED row from 03:14am. New baseline is Run-X. Check Backtest tab &mdash; pin banner shows OK status with new Run-X. Review trial details; if happy, do nothing. If concerned, rollback via CLI.</div>
-    <div class="faq-danger"><strong>Scenario C:</strong> Session paused with "code_drift" reason. You edited <code>ict_engine.py</code> or <code>backtest.py</code> while explorer was running. Restart the session after your edits are complete.</div>
+    <div class="faq-danger"><strong>Scenario C:</strong> Session paused with "code_drift" reason. You edited <code>ict_engine.py</code>, <code>crt_engine.py</code>, <code>backtest.py</code>, or another tracked source file while explorer was running. Restart the session after your edits are complete.</div>
     <h3>Glossary</h3>
     <ul>
       <li><strong>Optuna:</strong> Bayesian hyperparameter search library. TPE sampler learns from prior trials to pick smart next ones</li>
