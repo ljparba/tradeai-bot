@@ -1476,18 +1476,30 @@ def run_backtest_token_h4_crt(token, c5m, c4h, c1h=None, config=None):
         # booster per the article (raw 45-50% → 55-62% band).
         # Context is ALWAYS computed (regardless of filter mode) so the
         # entry_type field encodes it for retroactive per-context analysis.
-        # C-3 CRITICAL fix (audit 2026-05-27 cycle-8): pass `c4h_win` (the
-        # bounded H4 sub-window) instead of the full 365-day c4h dataset.
-        # Previously, `detect_wyckoff_context` ran on the full dataset and its
-        # internal `closes[-window_n:]` slice always read the FINAL 120 bars —
-        # so a January 2025 signal got a Wyckoff label computed from December
-        # 2025 future candles. That contaminated:
-        #   • Run #140 Test B's -5.22pp WR for WYCKOFF_PHASE_FILTER=strict
-        #   • All Wyckoff phase tags in `entry_type` on `backtest_signals`
-        #   • Any future explorer trial with `WYCKOFF_PHASE_FILTER=loose`
-        # c4h_win is bounded by [h4_start:h4_end] at line 1364-1370 (already
-        # excludes future bars) — passing it eliminates the lookahead.
-        wyckoff_context = detect_wyckoff_context(c4h_win)
+        #
+        # C-3 CRITICAL fix (audit 2026-05-27 cycle-8): pass a bounded H4
+        # sub-window instead of the full 365-day c4h dataset, otherwise the
+        # function's internal `closes[-window_n:]` slice reads the FINAL 120
+        # bars regardless of signal date → lookahead contamination.
+        #
+        # H-NEW-2 fix (audit 2026-05-28 cycle-9): the original C-3 patch passed
+        # `c4h_win` which is only ~12 bars wide (h4_window = H4_CRT_C2_LOOKBACK
+        # + buffer). That's below detect_wyckoff_context's min_bars=80
+        # requirement, so every backtest CRT signal got the defensive
+        # "TRANSITION" fallback — breaking per-phase OGD attribution and the
+        # explorer's `WYCKOFF_PHASE_FILTER=loose` search variant. Build a
+        # dedicated 200-bar slice ending at h4_end so we have enough history
+        # for an honest classification, while still respecting the
+        # no-lookahead invariant (only bars ≤ h4_end - 1 are visible).
+        _wyk_start = max(0, h4_end - 200)
+        c4h_for_wyckoff = {
+            "opens":  c4h["opens"][_wyk_start:h4_end],
+            "highs":  c4h["highs"][_wyk_start:h4_end],
+            "lows":   c4h["lows"][_wyk_start:h4_end],
+            "closes": c4h["closes"][_wyk_start:h4_end],
+            "times":  c4h["times"][_wyk_start:h4_end],
+        }
+        wyckoff_context = detect_wyckoff_context(c4h_for_wyckoff)
         if WYCKOFF_PHASE_FILTER != "off":
             if not is_crt_phase_aligned(wyckoff_context, direction):
                 rej[f"crt_wyckoff_{wyckoff_context.lower()}"] = (
@@ -3861,6 +3873,30 @@ def main():
             _candidate = max(_candidate, _cumulative_min_trials)
             if _candidate > 1:
                 _n_trials_dsr = int(_candidate)
+            # H-NEW-1 fix (audit 2026-05-28): persist the new max so future
+            # post-wipe reads recover the honest historic count. Pre-fix this
+            # key was only READ — never written — so after any DB wipe the
+            # seed stayed 0 and selection-bias correction silently dropped to
+            # the no-op level. Writes are idempotent (max preserves) and run
+            # regardless of WRITE_CPCV_VERDICT — the trial count is a real
+            # distinct-config observation, even for explorer runs.
+            try:
+                if _n_trials_dsr is not None and _n_trials_dsr > _cumulative_min_trials:
+                    _cm_conn = sqlite3.connect(BT_DB_PATH, timeout=10)
+                    _cm_conn.execute(
+                        "INSERT OR REPLACE INTO bot_state(key,value) VALUES(?,?)",
+                        ("cumulative_min_trials",
+                         json.dumps({"value": int(_n_trials_dsr),
+                                     "updated_at": datetime.now(timezone.utc)
+                                                  .strftime("%Y-%m-%d %H:%M:%S"),
+                                     "source": "backtest.cpcv_pool"})),
+                    )
+                    _cm_conn.commit(); _cm_conn.close()
+                    print(f"[CPCV] cumulative_min_trials persisted: "
+                          f"{_cumulative_min_trials} → {_n_trials_dsr}")
+            except Exception as _cm_exc:
+                print(f"[CPCV] cumulative_min_trials write skipped — "
+                      f"{type(_cm_exc).__name__}: {_cm_exc}")
         except Exception:
             _n_trials_dsr = None
         _cpcv = cpcv_summary(

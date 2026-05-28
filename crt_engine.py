@@ -37,6 +37,7 @@ from typing import Optional
 
 from ict_engine import (
     ICT_MSS_HORIZON,
+    ICT_MIN_RR_GATE,
     MAX_BREAKEVEN_WR,
     find_ict_swings,
     score_ict_mss,
@@ -44,6 +45,11 @@ from ict_engine import (
     detect_ict_order_block,
     order_block_overlaps_range,
 )
+# H-NEW-3 fix (audit 2026-05-28): import SL clamps so the CRT path enforces
+# the same structural floor/ceiling the 5M_SWEEP path applies in
+# compute_ict_trade_plan (ict_engine.py:759, 786). Pre-fix, CRT could emit
+# signals with sl_pct > MAX_SL_PCT (e.g. TON #2 SELL: sl_pct=-6.18% vs ceiling 3%).
+from config import MIN_SL_PCT, MAX_SL_PCT
 
 
 def _env_int(name: str, default: int) -> int:
@@ -583,6 +589,24 @@ def compute_crt_trade_economics(direction: str, entry_price: float,
         gross_tp3 = (entry_price - tp3_price) / entry_price * 100
         gross_sl  = (entry_price - sl_price)  / entry_price * 100
 
+    # H-NEW-3 fix (audit 2026-05-28): structural SL clamps matching the
+    # 5M_SWEEP path (ict_engine.py:759 BUY, :786 SELL). Pre-fix the CRT path
+    # could emit |sl_pct| > MAX_SL_PCT — live evidence: TON #2 SELL had
+    # sl_pct=-6.18% (>2× the 3% structural ceiling). Mitigated today only by
+    # `template_live_allowed=0` suppressing Telegram delivery in LIVE; flips
+    # to a real capital risk the moment that flag turns on.
+    sl_pct_abs = abs(gross_sl) / 100.0  # convert pct→fraction to compare with config
+    if sl_pct_abs > MAX_SL_PCT:
+        return None  # SL too wide — structural risk-management gate
+    if sl_pct_abs < MIN_SL_PCT:
+        return None  # SL too tight — likely noise-stop, will get stopped on slippage
+
+    # H-NEW-3 fix: minimum R:R gate mirrors ICT_MIN_RR_GATE = 1.5 used by the
+    # 5M_SWEEP path. A TP1 ≥ 1.5× SL distance is the floor for a setup to be
+    # economically worth taking once fees are baked in.
+    if gross_sl != 0 and (abs(gross_tp1) / abs(gross_sl)) < ICT_MIN_RR_GATE:
+        return None
+
     # 3-decimal rounding on net % — matches compute_ict_trade_plan (ict_engine.py:816)
     net_tp1 = round(gross_tp1 - rt_cost_pct, 3)
     net_tp2 = round(gross_tp2 - rt_cost_pct, 3)
@@ -669,6 +693,15 @@ def crt_trade_rejection_reason(direction: str, entry_price: float,
     else:
         gross_tp1 = (entry_price - tp1_price) / entry_price * 100
         gross_sl  = (entry_price - sl_price)  / entry_price * 100
+
+    # H-NEW-3 gates (matches the new clamps in compute_crt_trade_economics)
+    sl_pct_abs = abs(gross_sl) / 100.0
+    if sl_pct_abs > MAX_SL_PCT:
+        return "sl_too_wide"
+    if sl_pct_abs < MIN_SL_PCT:
+        return "sl_too_tight"
+    if gross_sl != 0 and (abs(gross_tp1) / abs(gross_sl)) < ICT_MIN_RR_GATE:
+        return "rr_below_floor"
 
     net_tp1 = round(gross_tp1 - rt_cost_pct, 3)
     if net_tp1 <= 0:

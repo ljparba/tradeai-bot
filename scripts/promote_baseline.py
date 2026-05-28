@@ -244,6 +244,21 @@ def _check_held_out_gate(run_id: int, held_out_days: int,
         candidate = max(candidate, cumulative)
         if candidate > 1:
             n_trials_for_dsr = int(candidate)
+        # H-NEW-1 fix (audit 2026-05-28): persist the new max so a future DB
+        # wipe can't reset the selection-bias correction. Idempotent.
+        try:
+            if candidate > cumulative:
+                con.execute(
+                    "INSERT OR REPLACE INTO bot_state(key,value) VALUES(?,?)",
+                    ("cumulative_min_trials",
+                     json.dumps({"value": int(candidate),
+                                 "updated_at": datetime.now(timezone.utc)
+                                              .strftime("%Y-%m-%d %H:%M:%S"),
+                                 "source": "promote_baseline"})),
+                )
+                con.commit()
+        except Exception:
+            pass
         row = con.execute(
             "SELECT value FROM bot_state WHERE key='cross_config_sr_trial_std'"
         ).fetchone()

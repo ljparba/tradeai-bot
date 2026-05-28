@@ -26,6 +26,7 @@ import json
 import os
 import sqlite3
 import sys
+from datetime import datetime, timezone
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
@@ -82,7 +83,23 @@ def _fetch_n_trials_for_dsr(con: sqlite3.Connection) -> int:
     except Exception:
         pass
     n = distinct + (1 if has_legacy else 0)
-    return max(n, cumulative, 2)
+    final_n = max(n, cumulative, 2)
+    # H-NEW-1 fix (audit 2026-05-28): persist the new max so a future DB wipe
+    # can't reset the selection-bias correction. Idempotent.
+    try:
+        if final_n > cumulative:
+            con.execute(
+                "INSERT OR REPLACE INTO bot_state(key,value) VALUES(?,?)",
+                ("cumulative_min_trials",
+                 json.dumps({"value": int(final_n),
+                             "updated_at": datetime.now(timezone.utc)
+                                          .strftime("%Y-%m-%d %H:%M:%S"),
+                             "source": "validate_baseline_held_out"})),
+            )
+            con.commit()
+    except Exception:
+        pass
+    return final_n
 
 
 def _fetch_sr_trial_std(con: sqlite3.Connection):
