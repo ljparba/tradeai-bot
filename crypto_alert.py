@@ -3742,11 +3742,10 @@ def main():
 
     _hr = "━" * 22  # divider line between sections
 
-    # Token list — vertical bullets (one per line). The earlier 2-column grid
-    # required <pre> which Telegram annotates with a "copy" affordance the
-    # operator doesn't want. Operator-approved trade-off (2026-05-28):
-    # drop the grid for a clean plain-text bullet list.
-    _tokens_grid = "\n".join(f"• {_h(t)}" for t in BINANCE_TOKENS.keys())
+    # Token list — single comma-separated line (matches the Adaptive Learning
+    # "Live (n): A, B, C" style). Drops both the <pre> copy affordance and
+    # the 10-line vertical bullet list per operator preference (2026-05-28).
+    _tokens_inline = ", ".join(BINANCE_TOKENS.keys())
 
     # Adaptive learning block — render as bullets under a section header
     _adaptive_block = ""
@@ -3805,8 +3804,8 @@ def main():
         f"\U0001F680 <b>BOT STARTED — {_h(_mode_title)}</b>\n"
         f"\n⚙️ <b>Mode:</b> {_h(EXECUTION_MODE)}"
         f"\n\U0001F300 <b>Strategy:</b> {_h(_strategy_line)}"
-        f"\n\n{_hr}\n\n\U0001F4D4 <b>Tokens Watched ({_h(len(BINANCE_TOKENS))})</b>\n\n"
-        + _tokens_grid
+        f"\n\n{_hr}\n\n\U0001F4D4 <b>Tokens Watched ({_h(len(BINANCE_TOKENS))}):</b> "
+        + _h(_tokens_inline)
         + _adaptive_block
         + _status_block
         + _crt_block
