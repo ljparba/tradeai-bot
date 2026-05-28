@@ -3616,9 +3616,18 @@ def main():
             logger.warning(f"[DRIFT-GATE] Could not read threshold for {_tok}: {_e}")
     _drift_note = ""
     if _drift_warnings:
-        _drift_note = ("\n\n⚠ DRIFT-GATE: ADX divergence from backtest baseline (25.0):\n"
-                       + "\n".join(f"  {w}" for w in _drift_warnings)
-                       + "\nRegime classification may differ from backtest.")
+        # 2026-05-28 — translate jargon into plain operator-readable English.
+        # ADX < baseline = markets calmer/less-trending than the historical
+        # period the strategy was tuned on. Not a block, just FYI.
+        _avg_delta = sum(float(w.split('(')[1].split(')')[0]) for w in _drift_warnings) / len(_drift_warnings)
+        if _avg_delta < 0:
+            _drift_note = (f"Markets are quieter than usual right now "
+                           f"(avg ADX {_avg_delta:+.1f} vs the historical baseline of 25). "
+                           f"Expect fewer/slower signals — not a problem, just heads-up.")
+        else:
+            _drift_note = (f"Markets are more volatile than usual right now "
+                           f"(avg ADX {_avg_delta:+.1f} vs the historical baseline of 25). "
+                           f"Expect more/faster signals — not a problem, just heads-up.")
 
     print("="*58)
     print("  CRYPTO SIGNAL BOT v13 — ICT MODE")
@@ -3656,29 +3665,90 @@ def main():
         _mode_title    = "ALL SCANNERS DISABLED"
         _strategy_line = "WARNING: ENABLE_5M_SWEEP=0 AND ENABLE_H4_CRT=0 — no signals will fire"
 
-    # CRT-specific param line — shown only when CRT is the active source so
-    # the operator sees TP1 mode + Wyckoff filter state at a glance.
-    _crt_line = ""
+    # ── 2026-05-28 STARTED-message redesign (operator request) ──
+    # Replace the dense <pre> table + raw DRIFT-GATE warnings with a clean,
+    # operator-readable status card. Keep only what's useful at startup:
+    # mode/scanner state, position + WR continuity, adaptive learning
+    # health, the most-tuned CRT knobs, and a plain-English market note.
+
+    # Adaptive learning health — count live-weighted vs bootstrap tokens
+    try:
+        _w_keys = list(weight_engine._weights.keys())
+        _w_live = sorted(t for t in _w_keys if weight_engine._n.get(t, 0) > 0)
+        _w_boot = sorted(t for t in _w_keys if weight_engine._n.get(t, 0) == 0)
+    except Exception:
+        _w_live, _w_boot = [], []
+
+    # State continuity at restart — open positions + WR resumed
+    try:
+        _port_st  = portfolio_layer.get_status()
+        _open_now = _port_st.get("total_open", 0)
+    except Exception:
+        _open_now = 0
+    try:
+        _wr_live = get_actual_win_rate()
+        _closed_n = _wr_live and 1  # placeholder for closed-count if we have it
+    except Exception:
+        _wr_live = 0.0
+    try:
+        import sqlite3 as _sql
+        _c = _sql.connect(DB_PATH); _c.row_factory = _sql.Row
+        _closed_n = _c.execute(
+            "SELECT COUNT(*) FROM results WHERE result IN "
+            "('WIN','LOSS','PARTIAL_TP1','PARTIAL_TP2','PARTIAL_TP3')"
+        ).fetchone()[0]
+        _c.close()
+    except Exception:
+        _closed_n = 0
+
+    # CRT key knobs — only when CRT is the active source
+    _crt_summary = ""
     if _crt_on:
-        from crt_engine import CRT_TP1_MODE as _ctm, WYCKOFF_PHASE_FILTER as _wpf
-        _crt_line = (
-            f"CRT params TP1={_h(_ctm)}  Wyckoff={_h(_wpf)}  "
-            f"bias_4h={_h(getattr(__import__('config'), 'LIVE_BIAS_4H_GATE', 'none'))}\n"
-        )
+        try:
+            from crt_engine import CRT_TP1_MODE as _ctm, WYCKOFF_PHASE_FILTER as _wpf
+            _bias = getattr(__import__('config'), 'LIVE_BIAS_4H_GATE', 'none')
+            _crt_summary = (
+                "\n\n⚙️ <b>Active CRT settings:</b>"
+                f"\n• TP1 mode: <b>{_h(_ctm)}</b>"
+                f"\n• Wyckoff filter: <b>{_h(_wpf)}</b>"
+                f"\n• 4H bias gate: <b>{_h(_bias)}</b>"
+            )
+        except Exception:
+            pass
+
+    _adaptive_line = ""
+    if _w_live or _w_boot:
+        if _w_live and _w_boot:
+            _adaptive_line = (
+                f"\n\U0001F9E0 <b>Adaptive learning:</b> {len(_w_live)} live "
+                f"({_h(', '.join(_w_live))}), {len(_w_boot)} warming up"
+            )
+        elif _w_live:
+            _adaptive_line = (f"\n\U0001F9E0 <b>Adaptive learning:</b> all {len(_w_live)} tokens "
+                              f"on live weights")
+        else:
+            _adaptive_line = (f"\n\U0001F9E0 <b>Adaptive learning:</b> {len(_w_boot)} tokens "
+                              f"warming up (no live data yet)")
+
+    _wr_line = (
+        f"\n\U0001F3AF <b>Win rate so far:</b> {_wr_live:.0%}  "
+        f"({_closed_n} closed signal{'s' if _closed_n != 1 else ''})"
+        if _closed_n > 0 else
+        "\n\U0001F3AF <b>Win rate so far:</b> waiting for first closed signal"
+    )
+
     send_telegram(
-        f"<b>TradeAI v13 STARTED  -  {_h(_mode_title)}</b>\n\n"
-        "<pre>"
-        f"Mode       {_h(EXECUTION_MODE)}\n"
-        f"Tokens     {_h(len(BINANCE_TOKENS))}  ({_h(_tokens_str)})\n"
-        f"Strategy   {_h(_strategy_line)}\n"
-        + _crt_line +
-        f"SL         0.3% beyond swept wick  (max {MAX_SL_PCT*100:.1f}%)\n"
-        f"TP         1H swing levels (5M_SWEEP) / 1.5R-2R cascade (CRT)\n"
-        f"Expiry     12h    Cooldown {_h(SIGNAL_COOLDOWN)} min\n"
-        f"BEW gate   {MAX_BREAKEVEN_WR:.0%}     RT cost {ROUND_TRIP_COST_PCT*100:.2f}%"
-        "</pre>"
-        + (f"\n<i>{_h(_drift_note_clean)}</i>" if _drift_note_clean else "")
-        + "\n\n<i>Analysis only. Your call.</i>"
+        f"\U0001F680 <b>BOT STARTED — {_h(_mode_title)}</b>\n"
+        f"\n⚙️ <b>Mode:</b> {_h(EXECUTION_MODE)}"
+        f"\n\U0001F4E1 <b>Strategy:</b> {_h(_strategy_line)}"
+        f"\n\U0001F4CB <b>Tokens watched:</b> {_h(len(BINANCE_TOKENS))}  "
+        f"({_h(_tokens_str)})"
+        + _adaptive_line
+        + f"\n\U0001F4CA <b>Open positions resumed:</b> {_h(_open_now)} / "
+          f"{_h(MAX_OPEN_POSITIONS)}"
+        + _wr_line
+        + _crt_summary
+        + (f"\n\n⚠️ <i>{_h(_drift_note_clean)}</i>" if _drift_note_clean else "")
     )
     load_performance_state()
     # M26: Pre-flight Binance connectivity check — abort before entering the main loop
@@ -4027,14 +4097,29 @@ def main():
             if _SHUTDOWN_REQUESTED:
                 print("[SHUTDOWN] SIGTERM received — exiting main loop cleanly.")
                 try:
-                    send_telegram("<b>TradeAI v13 STOPPED</b>\n\nSIGTERM received "
-                                  "(graceful shutdown — likely systemctl restart).")
+                    _now = datetime.now().strftime('%Y-%m-%d %H:%M')
+                    send_telegram(
+                        "\U0001F6D1 <b>BOT STOPPED</b>\n"
+                        f"\n⏰ <b>Time:</b> {_h(_now)}"
+                        "\n\U0001F4DD <b>Reason:</b> Graceful shutdown (likely a systemctl restart)"
+                        "\n\n<i>Watchdog will alert if the bot doesn't come back within 5 min.</i>"
+                    )
                 except Exception:
                     pass
                 break
             time.sleep(sleep_t)
         except KeyboardInterrupt:
-            print("\n[STOPPED]"); send_telegram("<b>TradeAI v13 STOPPED</b>\n\nKeyboard interrupt received."); break
+            print("\n[STOPPED]")
+            try:
+                _now = datetime.now().strftime('%Y-%m-%d %H:%M')
+                send_telegram(
+                    "\U0001F6D1 <b>BOT STOPPED</b>\n"
+                    f"\n⏰ <b>Time:</b> {_h(_now)}"
+                    "\n\U0001F4DD <b>Reason:</b> Keyboard interrupt (manual stop)"
+                )
+            except Exception:
+                pass
+            break
         except Exception as e:
             _consecutive_errors += 1
             print(f"[LOOP ERROR #{_consecutive_errors}] {e}")
