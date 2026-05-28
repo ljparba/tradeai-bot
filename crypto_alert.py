@@ -835,7 +835,8 @@ def save_signal(token, price, result, plan, regime):
 # (CRT signals carry their own confidence via crt_quality_to_confidence).
 # This matches the backtest's H6 isolation discipline.
 
-def scan_h4_crt_for_token(token, c5m, c4h, consumed, trend_1h="NEUTRAL"):
+def scan_h4_crt_for_token(token, c5m, c4h, consumed, trend_1h="NEUTRAL",
+                           btc_c5m=None):
     """Detect H4 CRT setup + build live signal result dict for the existing
     save_signal / send_signal_msg pipeline. Mirrors backtest.py's
     run_backtest_token_h4_crt economics + signal-dict construction.
@@ -844,6 +845,12 @@ def scan_h4_crt_for_token(token, c5m, c4h, consumed, trend_1h="NEUTRAL"):
         token: token symbol (uppercase)
         c5m, c4h: candle dicts (opens, highs, lows, closes, times in ms)
         consumed: per-token mitigation set (mutated on signal emit)
+        trend_1h: optional 1H trend label (NEUTRAL / BULL / BEAR / STRONG_*)
+        btc_c5m: optional BTC 5M candle dict for SMT divergence detection.
+            When None (or missing highs/lows), SMT defaults to "NONE/False"
+            with reason "no BTC reference" — same fallback as 5M_SWEEP path.
+            Added 2026-05-28 to close ict-logic-validator finding F-1 (SMT
+            was permanently dormant in CRT — hardcoded stub).
 
     Returns:
         (result, plan, rej_reason) tuple. `result` and `plan` are non-None
@@ -943,8 +950,16 @@ def scan_h4_crt_for_token(token, c5m, c4h, consumed, trend_1h="NEUTRAL"):
     raw_wick = setup["sl"]
     if direction == "BUY":
         sl_price = raw_wick * (1.0 - ICT_SL_BUFFER_PCT)
+        # F-4 fix (ict-logic-validator audit 2026-05-28): WIDEN too-tight SL
+        # to MIN_SL_PCT floor — mirrors compute_ict_trade_plan at
+        # ict_engine.py:768. Pre-F-4 the economics gate REJECTED setups
+        # with sub-floor SL while the 5M_SWEEP path admitted the same setup
+        # with a widened SL. H-NEW-3 commit comment claimed "Mirrors
+        # 5M_SWEEP" — that's now actually true.
+        sl_price = min(sl_price, entry_price * (1.0 - MIN_SL_PCT))
     else:
         sl_price = raw_wick * (1.0 + ICT_SL_BUFFER_PCT)
+        sl_price = max(sl_price, entry_price * (1.0 + MIN_SL_PCT))
     # CRT Pro TP1 override (2026-05-27): apply CRT_TP1_MODE policy.
     # mode=dynamic (default) preserves the original C1 opposite logic; this
     # call is a no-op then. fixed_1r and min_1r let us empirically test
@@ -997,6 +1012,44 @@ def scan_h4_crt_for_token(token, c5m, c4h, consumed, trend_1h="NEUTRAL"):
     from crt_engine import compute_crt_feature_scores
     from adaptive_engine import _utc_to_session
     _crt_session = _utc_to_session(ts.hour)
+
+    # ── F-1 fix (ict-logic-validator audit 2026-05-28): SMT divergence ──
+    # Pre-fix the CRT path hardcoded smt_result = {NONE, False} → the
+    # +0.10 SMT bonus in tier scoring was permanently dead code (95/95
+    # signals in Run #146 had smt_confirmed=0). Now compute real SMT
+    # from BTC 5M reference. setup["type"] is "SSL_CRT" or "BSL_CRT" —
+    # strip the suffix for detect_smt_divergence's "SSL"/"BSL" contract.
+    _sweep_for_smt = setup["type"].replace("_CRT", "")
+    _smt_result = {"smt_confirmed": False, "smt_type": "NONE",
+                   "reason": "no BTC reference"}
+    if btc_c5m and btc_c5m.get("highs") and btc_c5m.get("lows"):
+        _btc_h5 = btc_c5m["highs"][:-1]  # exclude forming bar
+        _btc_l5 = btc_c5m["lows"][:-1]
+        _Nbtc = min(len(_btc_h5), ICT_SMT_LOOKBACK + ICT_SMT_REF_HORIZON)
+        if _Nbtc >= ICT_SMT_LOOKBACK + 2:
+            _smt_result = detect_smt_divergence(
+                _sweep_for_smt,
+                ref_h=_btc_h5[-_Nbtc:], ref_l=_btc_l5[-_Nbtc:],
+                lookback=ICT_SMT_LOOKBACK, reference_horizon=ICT_SMT_REF_HORIZON,
+            )
+        else:
+            _smt_result = {"smt_confirmed": False, "smt_type": "NONE",
+                           "reason": "insufficient BTC data"}
+
+    # ── ict-logic-validator F-2 / dr_location wiring (2026-05-28) ──
+    # Pre-fix dr_4h was hardcoded {location: UNKNOWN}. CRT path already
+    # has full c4h cache; computing DR location is informational (no
+    # gate) and gives the OGD adaptive engine a 6th real feature back
+    # (was dead in CRT-only mode).
+    _dr_4h_full = {"location": "UNKNOWN", "midpoint": 0.0}
+    try:
+        _c4h_highs = c4h.get("highs", [])
+        _c4h_lows  = c4h.get("lows",  [])
+        if _c4h_highs and _c4h_lows and entry_price > 0:
+            _dr_4h_full = compute_dealing_range(_c4h_highs, _c4h_lows, entry_price)
+    except Exception as _dr_exc:
+        print(f"[CRT-DR] {token}: compute_dealing_range failed — {_dr_exc}")
+
     _crt_ogd_scores = compute_crt_feature_scores(
         direction=direction,
         mss_quality=_mss_q,
@@ -1004,7 +1057,7 @@ def scan_h4_crt_for_token(token, c5m, c4h, consumed, trend_1h="NEUTRAL"):
         confidence=confidence,
         session=_crt_session,
         trend_1h=trend_1h,
-        dr_location="UNKNOWN",  # CRT scanner doesn't compute dealing range
+        dr_location=_dr_4h_full.get("location", "UNKNOWN"),
     )
 
     plan = {
@@ -1065,10 +1118,14 @@ def scan_h4_crt_for_token(token, c5m, c4h, consumed, trend_1h="NEUTRAL"):
         # CRT-specific fields surfaced via existing schema
         "sr_type":          setup["type"],     # SSL_CRT / BSL_CRT
         "session":          _crt_session,      # was UNKNOWN — now proper KZ label
-        "dr_4h":            {"location": "UNKNOWN"},
+        # F-2 / DR wiring (2026-05-28): real 4H DR location replaces
+        # the hardcoded UNKNOWN stub. Informational, no gate.
+        "dr_4h":            _dr_4h_full,
         "mss_result":       {"quality": _mss_q},
         "ict_fvg":          {"quality": _fvg_q},
-        "smt_result":       {"smt_type": "NONE", "smt_confirmed": False},
+        # F-1 fix (2026-05-28): real SMT divergence replaces the dead stub.
+        # Enables the +0.10 SMT bonus in tier scoring + dashboard SMT column.
+        "smt_result":       _smt_result,
         # Encode Wyckoff context into entry_type — parity with backtest path
         "entry_type":       f"H4_CRT_{setup['confluence']['type']}_{wyckoff_context}",
         "ev_score":         None,
@@ -4221,10 +4278,20 @@ def main():
                             # (e.g. dashboard, Telegram render) see the real
                             # value too (was None / missing).
                             STATE[token]["trend_1h"] = _crt_trend_1h
+                            # F-1 (2026-05-28): pass BTC 5M cache so SMT
+                            # divergence is computed for CRT signals (was
+                            # hardcoded NONE/False pre-fix).
+                            _btc_c5m_for_smt = (
+                                STATE["BTC"]["candles"].get("5m", {})
+                                if "BTC" in STATE
+                                   and STATE["BTC"]["candles"].get("5m", {}).get("highs")
+                                else BTC_STATE.get("candles", {}).get("5m", {})
+                            )
                             _crt_result, _crt_plan, _crt_reason = scan_h4_crt_for_token(
                                 token, _c5m_closed, _c4h_closed,
                                 consumed=STATE[token]["consumed_h4_crt"],
                                 trend_1h=_crt_trend_1h,
+                                btc_c5m=_btc_c5m_for_smt,
                             )
                         if _crt_result is not None:
                             # GAP-CRT-2 fix (cycle-9 audit 2026-05-28):

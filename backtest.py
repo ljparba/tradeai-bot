@@ -1298,7 +1298,8 @@ def run_backtest_token(token, c5m, c1h, c4h, btc_c1h=None, btc_c5m=None, config=
 # ══════════════════════════════════════════════════════════
 # CRT v1 — PARALLEL H4 SCANNER (Session 2)
 # ══════════════════════════════════════════════════════════
-def run_backtest_token_h4_crt(token, c5m, c4h, c1h=None, config=None):
+def run_backtest_token_h4_crt(token, c5m, c4h, c1h=None, config=None,
+                               btc_c5m=None):
     """Simulate H4 CRT signals across the historical timeline (Session 2 + Option B fixes).
 
     Parallel to run_backtest_token() — uses the SAME 5M/4H candle cache,
@@ -1359,6 +1360,13 @@ def run_backtest_token_h4_crt(token, c5m, c4h, c1h=None, config=None):
     # the explorer's tuning propagates correctly. +buffer ensures detector
     # always has the C2_LOOKBACK bars it expects plus parent context.
     h4_window = H4_CRT_C2_LOOKBACK + CRT_H4_WINDOW_BUFFER
+
+    # F-1 fix (ict-logic-validator 2026-05-28): precompute BTC 5M indicators
+    # once for time-anchored SMT lookups per CRT setup (mirrors the 5M_SWEEP
+    # path at line 728). When btc_c5m=None (e.g. BTC token's own scan, or
+    # caller didn't pass it), SMT defaults to NONE/False with reason —
+    # same fallback semantics as the 5M_SWEEP path.
+    btc5m_ind_crt = precompute_tf(btc_c5m) if btc_c5m else None
 
     # Walk H4 candles forward, scanning a sliding window at each step.
     for h4_end in range(h4_window, n4):
@@ -1511,11 +1519,15 @@ def run_backtest_token_h4_crt(token, c5m, c4h, c1h=None, config=None):
 
         # SL = sweep wick + buffer (H-CRT2-1 fix: matches 5M-sweep behavior
         # at ict_engine.py:757,784 — 0.3% structural buffer beyond the wick).
+        # F-4 fix (ict-logic-validator 2026-05-28): also widen too-tight SL
+        # to MIN_SL_PCT floor — mirrors compute_ict_trade_plan exactly.
         raw_wick = setup["sl"]
         if direction == "BUY":
             sl_price = raw_wick * (1.0 - ICT_SL_BUFFER_PCT)
+            sl_price = min(sl_price, entry_price * (1.0 - MIN_SL_PCT))
         else:
             sl_price = raw_wick * (1.0 + ICT_SL_BUFFER_PCT)
+            sl_price = max(sl_price, entry_price * (1.0 + MIN_SL_PCT))
         # CRT Pro TP1 override (2026-05-27): apply CRT_TP1_MODE policy.
         # mode=dynamic (default) preserves the C1 opposite extreme behavior.
         # fixed_1r / min_1r empirically test if uncapping TP1 lifts avg_R.
@@ -1626,6 +1638,44 @@ def run_backtest_token_h4_crt(token, c5m, c4h, c1h=None, config=None):
             m.template_id: round(m.score, 4) for m in _crt_bt_matches
         })
 
+        # ── F-1 fix (ict-logic-validator 2026-05-28): SMT divergence ──
+        # Time-anchored lookup: at the entry bar's timestamp, take the
+        # BTC 5M sub-window of the last (lookback + reference_horizon)
+        # bars. Mirrors the 5M_SWEEP path at line 908-926. No-lookahead:
+        # bisect_right(times, ts_ms - 1) returns the index of the last
+        # BTC bar that closed at-or-before the entry bar's time.
+        _crt_smt_result = {"smt_confirmed": False, "smt_type": "NONE",
+                           "reason": "no BTC reference"}
+        if btc5m_ind_crt:
+            _ts_ms_entry = c5m["times"][entry_bar]
+            _idx_smt = bisect.bisect_right(btc5m_ind_crt["times"], _ts_ms_entry - 1) - 1
+            _n_smt   = min(_idx_smt + 1, ICT_SMT_LOOKBACK + ICT_SMT_REF_HORIZON)
+            if _n_smt >= ICT_SMT_LOOKBACK + ICT_SMT_REF_HORIZON:
+                _i0_smt = _idx_smt + 1 - _n_smt
+                _sweep_for_smt = setup["type"].replace("_CRT", "")  # SSL_CRT → SSL
+                _crt_smt_result = detect_smt_divergence(
+                    _sweep_for_smt,
+                    ref_h=btc5m_ind_crt["highs"][_i0_smt : _idx_smt + 1],
+                    ref_l=btc5m_ind_crt["lows"][_i0_smt  : _idx_smt + 1],
+                    lookback=ICT_SMT_LOOKBACK, reference_horizon=ICT_SMT_REF_HORIZON,
+                )
+            else:
+                _crt_smt_result = {"smt_confirmed": False, "smt_type": "NONE",
+                                   "reason": "insufficient BTC data"}
+
+        # ── F-2 / dr_location wiring (2026-05-28) ──
+        # Use h4_end as the no-lookahead upper bound: only bars ≤ h4_end-1
+        # are visible (matches the C-3 / H-NEW-2 invariant).
+        _crt_dr_4h = {"location": "UNKNOWN", "midpoint": 0.0}
+        try:
+            _c4h_for_dr_highs = c4h["highs"][:h4_end]
+            _c4h_for_dr_lows  = c4h["lows"][:h4_end]
+            if _c4h_for_dr_highs and _c4h_for_dr_lows and entry_price > 0:
+                _crt_dr_4h = compute_dealing_range(
+                    _c4h_for_dr_highs, _c4h_for_dr_lows, entry_price)
+        except Exception:
+            pass
+
         signals.append({
             "token":           token,
             "signal":          direction,
@@ -1662,15 +1712,20 @@ def run_backtest_token_h4_crt(token, c5m, c4h, c1h=None, config=None):
             "ifvg_direction":  "",
             "ifvg_age_bars":   0,
             "ifvg_5m_used":    0,
-            "dr4h_location":   "UNKNOWN",
+            # F-2 / DR wiring (2026-05-28): real 4H DR location replaces
+            # the hardcoded UNKNOWN stub. Informational, no gate.
+            "dr4h_location":   _crt_dr_4h.get("location", "UNKNOWN"),
             "mss_quality":     _mss_q,
             "fvg_quality":     _fvg_q,
             # entry_type encodes confluence + Wyckoff context for retroactive
             # per-context analysis via SQL (no schema migration needed).
             # Format: H4_CRT_<FVG|OB>_<ACCUMULATION|DISTRIBUTION|MARKUP|MARKDOWN|TRANSITION>
             "entry_type":      f"H4_CRT_{setup['confluence']['type']}_{wyckoff_context}",
-            "smt_confirmed":   0,
-            "smt_type":        "NONE",
+            # F-1 fix (2026-05-28): real SMT divergence replaces the dead
+            # 0/NONE stub. Enables the +0.10 SMT bonus in tier scoring +
+            # per-tier WR cross-analysis by smt_confirmed.
+            "smt_confirmed":   1 if _crt_smt_result.get("smt_confirmed") else 0,
+            "smt_type":        _crt_smt_result.get("smt_type", "NONE"),
             "tp1_target_type": "C1_OPPOSITE_EXTREME",
             "tp2_target_type": f"RR_{CRT_TP2_RR}",
             "session":         _utc_to_session(ts.hour),
@@ -3787,6 +3842,9 @@ def main():
             print(f"[{token}] Running H4-CRT scan...", end=" ", flush=True)
             crt_sigs, _crt_rej = run_backtest_token_h4_crt(
                 token, c5m, c4h, c1h=c1h, config=ACTIVE_CONFIG,
+                # F-1 fix (2026-05-28): pass BTC 5M for SMT divergence.
+                # None for BTC's own scan (cannot SMT against self).
+                btc_c5m=None if token == "BTC" else btc_c5m_ref,
             )
             print(f"{len(crt_sigs)} H4-CRT signals")
             all_signals.extend(crt_sigs)

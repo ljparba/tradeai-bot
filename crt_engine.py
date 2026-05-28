@@ -597,17 +597,22 @@ def compute_crt_trade_economics(direction: str, entry_price: float,
         gross_tp3 = (entry_price - tp3_price) / entry_price * 100
         gross_sl  = (entry_price - sl_price)  / entry_price * 100
 
-    # H-NEW-3 fix (audit 2026-05-28): structural SL clamps matching the
+    # H-NEW-3 fix (audit 2026-05-28): structural SL ceiling matching the
     # 5M_SWEEP path (ict_engine.py:759 BUY, :786 SELL). Pre-fix the CRT path
     # could emit |sl_pct| > MAX_SL_PCT — live evidence: TON #2 SELL had
-    # sl_pct=-6.18% (>2× the 3% structural ceiling). Mitigated today only by
-    # `template_live_allowed=0` suppressing Telegram delivery in LIVE; flips
-    # to a real capital risk the moment that flag turns on.
-    sl_pct_abs = abs(gross_sl) / 100.0  # convert pct→fraction to compare with config
+    # sl_pct=-6.18% (>2× the 3% structural ceiling).
+    #
+    # F-4 fix (ict-logic-validator 2026-05-28): MIN_SL_PCT enforcement moved
+    # UPSTREAM to the CRT scan paths (`crypto_alert.py:scan_h4_crt_for_token`
+    # and `backtest.py:run_backtest_token_h4_crt`) where the SL is computed
+    # — they now WIDEN a too-tight SL to the floor, exactly like
+    # compute_ict_trade_plan does for the 5M_SWEEP path. By the time SL
+    # reaches this function it's already at-or-above MIN_SL_PCT, so the
+    # rejection branch here is removed (it was the source of the
+    # asymmetric strictness flagged in F-4).
+    sl_pct_abs = abs(gross_sl) / 100.0
     if sl_pct_abs > MAX_SL_PCT:
-        return None  # SL too wide — structural risk-management gate
-    if sl_pct_abs < MIN_SL_PCT:
-        return None  # SL too tight — likely noise-stop, will get stopped on slippage
+        return None  # SL too wide — structural risk-management ceiling
 
     # H-NEW-3 fix: minimum R:R gate mirrors ICT_MIN_RR_GATE = 1.5 used by the
     # 5M_SWEEP path. A TP1 ≥ 1.5× SL distance is the floor for a setup to be
@@ -702,12 +707,16 @@ def crt_trade_rejection_reason(direction: str, entry_price: float,
         gross_tp1 = (entry_price - tp1_price) / entry_price * 100
         gross_sl  = (entry_price - sl_price)  / entry_price * 100
 
-    # H-NEW-3 gates (matches the new clamps in compute_crt_trade_economics)
+    # H-NEW-3 gates (matches the clamps in compute_crt_trade_economics).
+    # F-4 fix (2026-05-28): sl_too_tight no longer emitted from the main
+    # function (MIN_SL_PCT widening moved upstream to the CRT scan paths).
+    # Branch kept here for back-compat with any historical caller that
+    # passes a raw sub-floor SL directly into this rejection helper.
     sl_pct_abs = abs(gross_sl) / 100.0
     if sl_pct_abs > MAX_SL_PCT:
         return "sl_too_wide"
     if sl_pct_abs < MIN_SL_PCT:
-        return "sl_too_tight"
+        return "sl_too_tight"  # back-compat; unreachable from compute_crt_trade_economics post-F-4
     if gross_sl != 0 and (abs(gross_tp1) / abs(gross_sl)) < ICT_MIN_RR_GATE:
         return "rr_below_floor"
 
