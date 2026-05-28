@@ -934,6 +934,7 @@ tr:hover td{background:rgba(37,37,56,.45)}
           <th class="sortable" onclick="histSetSort('id')">ID <span class="sort-ico on" id="sh-id">&#9660;</span></th>
           <th class="sortable" onclick="histSetSort('token')">Token <span class="sort-ico" id="sh-token"></span></th>
           <th class="sortable" onclick="histSetSort('signal')">Signal <span class="sort-ico" id="sh-signal"></span></th>
+          <th class="sortable" onclick="histSetSort('matched_template_id')" title="Template tier (CRT_A/B/C or TIER_A/B/C; — for unclassified)">Tier <span class="sort-ico" id="sh-matched_template_id"></span></th>
           <th>Entry</th><th>SL</th><th>TP1</th><th>TP2</th><th>TP3</th>
           <th class="sortable" onclick="histSetSort('rr1')">R:R <span class="sort-ico" id="sh-rr1"></span></th>
           <th class="sortable" onclick="histSetSort('confidence')">Conf <span class="sort-ico" id="sh-confidence"></span></th>
@@ -2962,6 +2963,25 @@ function trendClass(t){
   return 'neutral';
 }
 
+// Phase B (2026-05-28) — Template tier cell. CRT_A_* / CRT_B_* / CRT_C_*
+// = CRT tier system; TIER_A/B/C = legacy 5M_SWEEP; otherwise muted dash.
+function _tierCell(r){
+  const t = r.matched_template_id || '';
+  if(!t || t === 'NONE') return '<td style="color:var(--muted);font-size:.72rem">—</td>';
+  let label = t, color = 'var(--muted)', bg = 'transparent';
+  if(t.startsWith('CRT_A_') || t === 'TIER_A'){
+    label = 'A'; color = '#0f0a02'; bg = 'rgba(212,175,55,.85)';   // gold pill
+  } else if(t.startsWith('CRT_B_') || t === 'TIER_B'){
+    label = 'B'; color = '#0a0a0a'; bg = 'rgba(192,192,192,.7)';   // silver pill
+  } else if(t.startsWith('CRT_C_') || t === 'TIER_C'){
+    label = 'C'; color = '#fff';    bg = 'rgba(176,141,87,.6)';    // bronze pill
+  }
+  return '<td><span title="'+t+'" style="display:inline-block;min-width:1.4rem;'
+    +'text-align:center;padding:.05rem .35rem;border-radius:4px;'
+    +'font-weight:700;font-size:.72rem;background:'+bg+';color:'+color+'">'
+    +label+'</span></td>';
+}
+
 // Phase A — Slippage cell. Colors based on CRT_SLIPPAGE_WARN/CRIT thresholds.
 // Pre-Phase-A signals have NULL slippage_pct → muted dash.
 function _slipCell(r){
@@ -3270,7 +3290,7 @@ function renderTable(){
   const body=document.getElementById('histBody');
   const pgBar=document.getElementById('histPgBar');
   if(!total){
-    body.innerHTML='<tr><td colspan="23" class="empty">'
+    body.innerHTML='<tr><td colspan="24" class="empty">'
       +(allSigs.length===0
         ?'No signals yet — bot will save signals here once running'
         :'No signals matching this filter')
@@ -3292,6 +3312,7 @@ function renderTable(){
       +'<td style="color:var(--muted);font-size:.75rem">'+r.id+'</td>'
       +'<td class="tok">'+r.token+'</td>'
       +'<td><span style="color:'+sigC+';font-weight:700;font-size:.82rem">'+r.signal+'</span></td>'
+      +_tierCell(r)
       +'<td class="mono">$'+Number(r.entry_price||0).toFixed(4)+'</td>'
       +'<td class="mono" style="color:var(--red)">$'+Number(r.sl||0).toFixed(4)+'</td>'
       +'<td class="mono" style="color:'+(r.tp1_hit?'var(--green)':'var(--text)')+'">$'+Number(r.tp1||0).toFixed(4)+'</td>'

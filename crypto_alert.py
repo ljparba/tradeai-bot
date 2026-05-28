@@ -74,7 +74,9 @@ from adaptive_engine import (
 )
 from strategy_engine import LIVE_CONFIG, evaluate_setup, meets_quality
 from strategy_templates import (evaluate_confluences_vs_templates, seed_templates_table,
-                                validate_tier_hierarchy)
+                                validate_tier_hierarchy,
+                                # Phase B (2026-05-28) — CRT tier classifier
+                                evaluate_crt_templates, CRT_TEMPLATE_IDS)
 from indicators import (
     ema, calculate_rsi, calculate_atr, calculate_roc,
     get_trend, get_macd, detect_regime,
@@ -1072,15 +1074,46 @@ def scan_h4_crt_for_token(token, c5m, c4h, consumed, trend_1h="NEUTRAL"):
         "ev_score":         None,
         "ev_sample_n":      None,
         "ev_status":        "OBSERVE",
-        # Template tagging defaults — CRT signals are not template-classified
-        "matched_template_id":  "NONE",
-        "template_status":      "UNKNOWN_TEMPLATE",
-        "template_live_allowed": 0,
-        "template_block_reason": "crt_v1_no_template",
-        "template_matches":     [],
+        # Template tagging — Phase B (2026-05-28) replaces the pre-existing
+        # "always NONE" stub with real CRT tier classification. Live behavior
+        # is still gated by EXECUTION_MODE — flipping to LIVE will Telegram
+        # only Tier A / Tier B CRT signals; Tier C is paper-only.
+        # Set below from evaluate_crt_templates() result.
         # KEY tag for per-source attribution (LBC-H-1 parity)
         "source":           "H4_CRT",
     }
+
+    # ── Phase B (2026-05-28): classify CRT signal into Tier A/B/C ─────────
+    _crt_tmpl_features = {
+        "direction":       direction,
+        "confluence_type": setup['confluence']['type'],   # "FVG" | "OB"
+        "mss_quality":     _mss_q,
+        "wyckoff_phase":   wyckoff_context,
+        "bias_4h":         bias_4h,
+        "session":         _crt_session,
+    }
+    _crt_matches = evaluate_crt_templates(_crt_tmpl_features)
+    _crt_best    = next((m for m in _crt_matches if m.is_match), None)
+    if _crt_best:
+        result["matched_template_id"]  = _crt_best.template_id
+        result["template_status"]      = "PROVISIONAL"  # Phase B = no historical WR yet
+        result["template_live_allowed"] = 1 if _crt_best.live_allowed else 0
+        result["template_block_reason"] = "" if _crt_best.live_allowed else "crt_tier_c_paper_only"
+        result["template_matches"]     = [
+            {"id": m.template_id, "score": m.score, "matched": m.is_match}
+            for m in _crt_matches
+        ]
+        result["template_scores_json"] = json.dumps(
+            {m.template_id: round(m.score, 4) for m in _crt_matches}
+        )
+    else:
+        # No tier matched — keep legacy "NONE" defaults so the renderer
+        # behaves identically to pre-Phase-B for unclassifiable setups.
+        result["matched_template_id"]  = "NONE"
+        result["template_status"]      = "UNKNOWN_TEMPLATE"
+        result["template_live_allowed"] = 0
+        result["template_block_reason"] = "crt_no_tier_match"
+        result["template_matches"]     = []
     # Mark mitigated AFTER constructing result so a downstream failure
     # doesn't leave a half-consumed zone. Caller commits via consumed.add().
     consumed.add(setup["key"])
@@ -1091,7 +1124,9 @@ def scan_h4_crt_for_token(token, c5m, c4h, consumed, trend_1h="NEUTRAL"):
 # PHASE 5A — TEMPLATE SAFETY CONTROLS
 # ══════════════════════════════════════════════════════════
 
-_KNOWN_TEMPLATES = {"TIER_A", "TIER_B", "TIER_C", "NONE"}
+# Phase B (2026-05-28): widened to include CRT-specific tier IDs from
+# strategy_templates.CRT_TEMPLATE_IDS so Phase 5A validation accepts them.
+_KNOWN_TEMPLATES = {"TIER_A", "TIER_B", "TIER_C", "NONE"} | CRT_TEMPLATE_IDS
 
 def _tmpl_closed_count(conn, template_id: str) -> int:
     """Count all closed results for signals matched to this template."""
@@ -3351,7 +3386,18 @@ def send_signal_msg(token,price,ch24,result,plan,sig_id,regime):
         _timeframe_lbl = "5M SWEEP"
 
     # ── Title ──
-    msg = f"\U0001F4E2 <b>POTENTIAL {_h(signal)} SIGNAL</b>  #{_h(sig_id)}\n"
+    # Phase B (2026-05-28): prefix CRT tier label so operator sees quality
+    # bucket at the top of every alert. Tier A/B = LIVE-eligible (subject to
+    # EXECUTION_MODE), Tier C = paper-only.
+    _tmpl_id = result.get("matched_template_id", "NONE")
+    _tier_badge = ""
+    if _tmpl_id.startswith("CRT_A_"):
+        _tier_badge = "  •  \U0001F947 <b>TIER A</b>"     # gold medal
+    elif _tmpl_id.startswith("CRT_B_"):
+        _tier_badge = "  •  \U0001F948 <b>TIER B</b>"     # silver medal
+    elif _tmpl_id.startswith("CRT_C_"):
+        _tier_badge = "  •  \U0001F949 <b>TIER C</b>  <i>(paper-only)</i>"  # bronze medal
+    msg = f"\U0001F4E2 <b>POTENTIAL {_h(signal)} SIGNAL</b>  #{_h(sig_id)}{_tier_badge}\n"
 
     # ── Header block ──
     msg += (
@@ -4233,21 +4279,27 @@ def main():
                                 # crypto_alert.py:~4180. Mirrors the
                                 # 5M_SWEEP write at line 3045.
                                 STATE[token]["last_signal_times"][_crt_dir] = datetime.now(timezone.utc)
-                                # LIVE mode template-block check applies to CRT too,
-                                # but CRT signals have template_live_allowed=0 by
-                                # design (no template classification). In LIVE
-                                # mode, CRT signals are saved-but-not-Telegrammed
-                                # until v2 introduces CRT-specific template tier.
-                                if EXECUTION_MODE == "LIVE":
-                                    print(f"[CRT-v1] LIVE BLOCK: {token} {_crt_result['signal']} "
-                                          f"— v1 paper-only, signal saved (sig_id={_crt_sig_id}), no Telegram")
+                                # Phase B (2026-05-28): CRT now has tier
+                                # classification, so the LIVE-block check
+                                # mirrors the 5M_SWEEP path's
+                                # template_live_allowed semantics. Tier A/B
+                                # carries live_allowed=1; Tier C is paper-only.
+                                # LIVE flip is still gated by EXECUTION_MODE
+                                # (operator's manual env switch) and N≥30
+                                # paper soak discipline.
+                                _tmpl_id  = _crt_result.get("matched_template_id", "NONE")
+                                _tmpl_ok  = bool(_crt_result.get("template_live_allowed", 0))
+                                if EXECUTION_MODE == "LIVE" and not _tmpl_ok:
+                                    print(f"[CRT-Phase-B] LIVE BLOCK: {token} {_crt_result['signal']} "
+                                          f"template={_tmpl_id} (paper-only) "
+                                          f"— signal saved (sig_id={_crt_sig_id}), no Telegram")
                                 else:
                                     send_signal_msg(token, price, ch24, _crt_result,
                                                     _crt_plan, _crt_sig_id,
                                                     {"regime": "UNKNOWN"})
-                                print(f"[CRT-v1] EMIT {token} {_crt_result['signal']} "
-                                      f"({_crt_result['sr_type']}, conf={_crt_result['confidence']}) "
-                                      f"sig_id={_crt_sig_id}")
+                                print(f"[CRT] EMIT {token} {_crt_result['signal']} "
+                                      f"tier={_tmpl_id} ({_crt_result['sr_type']}, "
+                                      f"conf={_crt_result['confidence']}) sig_id={_crt_sig_id}")
             elapsed=time.time()-start
             sleep_t=max(0,CHECK_INTERVAL-elapsed)
             save_scalar_state("last_cycle_ts", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))

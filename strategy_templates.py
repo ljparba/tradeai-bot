@@ -17,6 +17,8 @@ __all__ = [
     "TemplateMatch",
     "TEMPLATE_REGISTRY",
     "evaluate_confluences_vs_templates",
+    "evaluate_crt_templates",          # Phase B — CRT tier classifier (2026-05-28)
+    "CRT_TEMPLATE_IDS",                # Phase B — registered CRT template IDs
     "seed_templates_table",
     "validate_tier_hierarchy",
 ]
@@ -88,7 +90,56 @@ TEMPLATE_REGISTRY = [
                         "Paper/backtest only — not permitted in live trading."),
         "live_allowed": 0,
     },
+    # ── Phase B (2026-05-28) — CRT-specific tier templates ──────────────────
+    # CRT signals are H4 candle range theory: H4 sweep + 5M MSS confirmation +
+    # (FVG OR OB) confluence + Wyckoff phase tag. The 5M_SWEEP templates above
+    # don't apply (different feature semantics — CRT has no killzone constraint,
+    # no DR_LOCATION discipline, and uses confluence_type instead of FVG_QUALITY
+    # as the discriminator). The cycle-9 audit empirically identified FVG-vs-OB
+    # as the +14.6pp WR axis — these templates encode that axis.
+    {
+        "id":          "CRT_A_FVG_ALIGNED",
+        "name":        "CRT Tier A — FVG + Wyckoff aligned",
+        "tier":        "A",
+        "description": ("FVG confluence + MSS≥MEDIUM + Wyckoff phase aligned "
+                        "with direction (NOT TRANSITION). Highest-quality CRT setup."),
+        "live_allowed": 1,
+    },
+    {
+        "id":          "CRT_B_OB_HIGH_MSS",
+        "name":        "CRT Tier B — OB + HIGH MSS",
+        "tier":        "B",
+        "description": ("OB confluence with HIGH MSS quality + Wyckoff phase "
+                        "non-TRANSITION. OB without FVG accepted only when MSS is HIGH."),
+        "live_allowed": 1,
+    },
+    {
+        "id":          "CRT_B_FVG_RELAXED",
+        "name":        "CRT Tier B — FVG (any MSS, any phase)",
+        "tier":        "B",
+        "description": ("FVG confluence + any MSS quality + any Wyckoff phase. "
+                        "Captures FVG setups that didn't clear the Tier A alignment bar."),
+        "live_allowed": 1,
+    },
+    {
+        "id":          "CRT_C_OB_DEFAULT",
+        "name":        "CRT Tier C — OB default",
+        "tier":        "C",
+        "description": ("Catch-all for OB-only setups not meeting Tier B's HIGH-MSS "
+                        "bar. Paper/backtest only — not permitted in live trading."),
+        "live_allowed": 0,
+    },
 ]
+
+# Phase B (2026-05-28) — IDs that mark a signal as classified by the CRT
+# tier scheme. Used by callers that need to distinguish CRT-classified
+# signals from 5M_SWEEP-classified or unclassified ones.
+CRT_TEMPLATE_IDS = {
+    "CRT_A_FVG_ALIGNED",
+    "CRT_B_OB_HIGH_MSS",
+    "CRT_B_FVG_RELAXED",
+    "CRT_C_OB_DEFAULT",
+}
 
 
 # ── Scoring functions ─────────────────────────────────────────────────────────
@@ -338,6 +389,247 @@ def evaluate_confluences_vs_templates(
         return matches
     except Exception as e:
         print(f"[TEMPLATES] evaluate error: {e}")
+        return []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase B (2026-05-28) — CRT tier classifier
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# CRT signals carry a different feature set than 5M_SWEEP signals:
+#   confluence_type — "FVG" | "OB"           (NEW — primary discriminator)
+#   mss_quality     — "HIGH" | "MEDIUM" | "LOW" | "NONE"
+#   wyckoff_phase   — "ACCUMULATION" | "DISTRIBUTION" | "MARKUP" | "MARKDOWN"
+#                     | "TRANSITION" | "?"
+#   direction       — "BUY" | "SELL"
+#   session         — "LONDON_KZ" | "NY_AM_KZ" | "ASIA_KZ" | "OVERNIGHT" | "UNKNOWN"
+#   bias_4h         — "BULLISH" | "BEARISH" | "NEUTRAL"
+#
+# Empirical justification for these tier definitions:
+#   - FVG vs OB axis = +14.6pp WR (cycle-9 audit, n=246 FVG vs n=2195 OB)
+#   - Wyckoff TRANSITION = no edge by definition (phase undecidable)
+#   - MSS=HIGH compensates for OB-only confluence (strong displacement
+#     supplies what FVG would otherwise contribute)
+
+
+def _crt_wyckoff_aligned(direction: str, phase: str) -> bool:
+    """Phase B helper — True when Wyckoff phase supports the trade direction.
+
+    BUY  is aligned with ACCUMULATION (basing) or MARKUP   (uptrend).
+    SELL is aligned with DISTRIBUTION (topping) or MARKDOWN (downtrend).
+    """
+    if direction == "BUY":
+        return phase in ("ACCUMULATION", "MARKUP")
+    if direction == "SELL":
+        return phase in ("DISTRIBUTION", "MARKDOWN")
+    return False
+
+
+def _score_crt_a(f: Dict[str, Any]) -> TemplateMatch:
+    """
+    CRT Tier A — FVG confluence + MSS≥MEDIUM + Wyckoff phase aligned.
+
+    Required (3/3):
+      1. confluence_type == FVG
+      2. mss_quality ≥ MEDIUM
+      3. wyckoff_phase aligned with direction (NOT TRANSITION)
+
+    Bonuses (max +0.20 total):
+      +0.10  4H bias aligned with direction
+      +0.05  Active killzone session (LONDON/NY/ASIA)
+      +0.05  Session in {LONDON_KZ, NY_AM_KZ} specifically (top killzones)
+    """
+    direction      = f.get("direction",      "BUY")
+    confluence     = f.get("confluence_type", "")
+    mss_quality    = f.get("mss_quality",    "NONE")
+    wyckoff_phase  = f.get("wyckoff_phase",  "?")
+    bias_4h        = f.get("bias_4h",        "NEUTRAL")
+    session        = f.get("session",        "UNKNOWN")
+
+    matched = []
+    hit = 0
+
+    if confluence == "FVG":
+        hit += 1; matched.append("confluence=FVG")
+    if QUALITY_RANK.get(mss_quality, 0) >= QUALITY_RANK["MEDIUM"]:
+        hit += 1; matched.append(f"MSS={mss_quality}")
+    if _crt_wyckoff_aligned(direction, wyckoff_phase):
+        hit += 1; matched.append(f"wyckoff={wyckoff_phase}")
+
+    bonus = 0.0
+    if (direction == "BUY"  and bias_4h == "BULLISH") or \
+       (direction == "SELL" and bias_4h == "BEARISH"):
+        bonus += 0.10; matched.append("4H_bias_bonus")
+    if session in ("LONDON_KZ", "NY_AM_KZ", "ASIA_KZ"):
+        bonus += 0.05; matched.append(f"session_bonus={session}")
+    if session in ("LONDON_KZ", "NY_AM_KZ"):
+        bonus += 0.05; matched.append("top_killzone_bonus")
+
+    base  = hit / 3.0
+    score = min(base + bonus * base, 1.0)
+    return TemplateMatch(
+        template_id="CRT_A_FVG_ALIGNED",
+        template_name="CRT Tier A — FVG + Wyckoff aligned",
+        tier="A",
+        score=round(score, 4),
+        required_hit=hit, required_need=3,
+        confluences_matched=matched, live_allowed=True,
+    )
+
+
+def _score_crt_b_ob_high(f: Dict[str, Any]) -> TemplateMatch:
+    """
+    CRT Tier B (OB variant) — OB confluence + HIGH MSS + non-TRANSITION phase.
+
+    Required (3/3):
+      1. confluence_type == OB
+      2. mss_quality == HIGH       (must compensate for OB-only confluence)
+      3. wyckoff_phase != TRANSITION (any decidable phase, no alignment required)
+    """
+    confluence    = f.get("confluence_type", "")
+    mss_quality   = f.get("mss_quality",   "NONE")
+    wyckoff_phase = f.get("wyckoff_phase", "?")
+    bias_4h       = f.get("bias_4h",       "NEUTRAL")
+    direction     = f.get("direction",     "BUY")
+    session       = f.get("session",       "UNKNOWN")
+
+    matched = []
+    hit = 0
+
+    if confluence == "OB":
+        hit += 1; matched.append("confluence=OB")
+    if mss_quality == "HIGH":
+        hit += 1; matched.append("MSS=HIGH")
+    if wyckoff_phase not in ("TRANSITION", "?", ""):
+        hit += 1; matched.append(f"wyckoff={wyckoff_phase}")
+
+    bonus = 0.0
+    if (direction == "BUY"  and bias_4h == "BULLISH") or \
+       (direction == "SELL" and bias_4h == "BEARISH"):
+        bonus += 0.10; matched.append("4H_bias_bonus")
+    if session in ("LONDON_KZ", "NY_AM_KZ", "ASIA_KZ"):
+        bonus += 0.05; matched.append(f"session_bonus={session}")
+
+    base  = hit / 3.0
+    score = min(base + bonus * base, 1.0)
+    return TemplateMatch(
+        template_id="CRT_B_OB_HIGH_MSS",
+        template_name="CRT Tier B — OB + HIGH MSS",
+        tier="B",
+        score=round(score, 4),
+        required_hit=hit, required_need=3,
+        confluences_matched=matched, live_allowed=True,
+    )
+
+
+def _score_crt_b_fvg_relaxed(f: Dict[str, Any]) -> TemplateMatch:
+    """
+    CRT Tier B (FVG variant) — FVG confluence + any MSS + any Wyckoff phase.
+
+    Required (2/2):
+      1. confluence_type == FVG
+      2. mss_quality ≥ LOW    (any valid MSS — relaxed vs Tier A's MEDIUM bar)
+
+    Catches FVG setups that miss Tier A's Wyckoff-alignment requirement.
+    The FVG axis on its own already carries +14.6pp WR, so even without phase
+    alignment the setup is worth live consideration.
+    """
+    confluence  = f.get("confluence_type", "")
+    mss_quality = f.get("mss_quality",   "NONE")
+    bias_4h     = f.get("bias_4h",       "NEUTRAL")
+    direction   = f.get("direction",     "BUY")
+    session     = f.get("session",       "UNKNOWN")
+
+    matched = []
+    hit = 0
+
+    if confluence == "FVG":
+        hit += 1; matched.append("confluence=FVG")
+    if QUALITY_RANK.get(mss_quality, 0) >= QUALITY_RANK["LOW"]:
+        hit += 1; matched.append(f"MSS={mss_quality}")
+
+    bonus = 0.0
+    if (direction == "BUY"  and bias_4h == "BULLISH") or \
+       (direction == "SELL" and bias_4h == "BEARISH"):
+        bonus += 0.10; matched.append("4H_bias_bonus")
+    if session in ("LONDON_KZ", "NY_AM_KZ", "ASIA_KZ"):
+        bonus += 0.05; matched.append(f"session_bonus={session}")
+
+    base  = hit / 2.0
+    score = min(base + bonus * base, 1.0)
+    return TemplateMatch(
+        template_id="CRT_B_FVG_RELAXED",
+        template_name="CRT Tier B — FVG (any MSS, any phase)",
+        tier="B",
+        score=round(score, 4),
+        required_hit=hit, required_need=2,
+        confluences_matched=matched, live_allowed=True,
+    )
+
+
+def _score_crt_c(f: Dict[str, Any]) -> TemplateMatch:
+    """
+    CRT Tier C — Catch-all. live_allowed=0 (paper/backtest only).
+
+    Required (1/1):
+      1. confluence_type in {FVG, OB}    (any valid CRT confluence)
+    """
+    confluence = f.get("confluence_type", "")
+    matched = []
+    hit = 0
+    if confluence in ("FVG", "OB"):
+        hit += 1; matched.append(f"confluence={confluence}")
+
+    base  = hit / 1.0
+    score = round(base, 4)
+    return TemplateMatch(
+        template_id="CRT_C_OB_DEFAULT",
+        template_name="CRT Tier C — OB default",
+        tier="C",
+        score=score,
+        required_hit=hit, required_need=1,
+        confluences_matched=matched, live_allowed=False,
+    )
+
+
+def evaluate_crt_templates(features: Dict[str, Any]) -> List[TemplateMatch]:
+    """Evaluate a CRT signal against all 4 CRT-specific tier templates.
+
+    Returns matches sorted: matched-first, then A→B→C, then by score desc.
+    The caller picks `next((m for m in matches if m.is_match), None)` as the
+    single best match (same pattern as evaluate_confluences_vs_templates).
+
+    Parameters
+    ----------
+    features : dict with keys
+        direction       — "BUY" | "SELL"
+        confluence_type — "FVG" | "OB"
+        mss_quality     — "HIGH" | "MEDIUM" | "LOW" | "NONE"
+        wyckoff_phase   — "ACCUMULATION" | "DISTRIBUTION" | "MARKUP"
+                          | "MARKDOWN" | "TRANSITION" | "?"
+        bias_4h         — "BULLISH" | "BEARISH" | "NEUTRAL"
+        session         — "LONDON_KZ" | "NY_AM_KZ" | "ASIA_KZ"
+                          | "OVERNIGHT" | "UNKNOWN"
+
+    Returns
+    -------
+    List[TemplateMatch] — sorted; empty list on exception (never raises).
+    """
+    try:
+        matches = [
+            _score_crt_a(features),
+            _score_crt_b_ob_high(features),
+            _score_crt_b_fvg_relaxed(features),
+            _score_crt_c(features),
+        ]
+        matches.sort(key=lambda m: (
+            not m.is_match,
+            _TIER_RANK.get(m.tier, 9),
+            -m.score,
+        ))
+        return matches
+    except Exception as e:
+        print(f"[TEMPLATES] CRT evaluate error: {e}")
         return []
 
 
