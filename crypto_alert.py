@@ -3511,12 +3511,39 @@ def monitor_open_signals(prices):
                 print(f"[STALE-MONITOR] {token}: candles {_tok_age:.0f}s old — using live price only for TP/SL")
                 candle_high = candle_low = None
             else:
-                # 15m candle extremes for TP/SL touch detection (matches signal entry TF)
+                # 15m candle extremes for TP/SL touch detection (matches signal entry TF).
+                #
+                # 2026-05-28 latency fix (operator-flagged LINK#1 case): pre-fix
+                # the monitor read ONLY the last closed 15M candle (`[-2]`) — so
+                # a TP hit in the first minute of the forming 15M candle wasn't
+                # detected until that candle closed (~14 min later) plus the
+                # next bot cycle (~70s). Worst-case detection latency: ~16 min.
+                #
+                # Fix: take the most extreme of three sources — closed 15M
+                # extreme, forming 15M extreme, and the live tick price. Lows
+                # don't unpaint within a forming bar (a printed low can only
+                # go lower or stay the same), so this is SAFE: it only
+                # accelerates detection of TPs that price genuinely touched;
+                # it never invents fake hits.
+                #
+                # SL detection is C6-protected: `if ns and not t1: LOSS` uses
+                # the PRIOR tp1_hit state, so a forming-bar dip through SL
+                # after TP1 was already booked correctly preserves the WIN.
                 candles_15m = STATE.get(token, {}).get("candles", {}).get("15m", {})
                 highs       = candles_15m.get("highs", [])
                 lows        = candles_15m.get("lows",  [])
-                candle_high = highs[-2] if len(highs) >= 2 else None  # skip forming candle
-                candle_low  = lows[-2]  if len(lows)  >= 2 else None
+                _hi_candidates = [price]
+                _lo_candidates = [price]
+                if len(highs) >= 2:
+                    _hi_candidates.append(highs[-2])  # last closed
+                    if highs[-1] is not None:
+                        _hi_candidates.append(highs[-1])  # forming (running high)
+                if len(lows) >= 2:
+                    _lo_candidates.append(lows[-2])
+                    if lows[-1] is not None:
+                        _lo_candidates.append(lows[-1])
+                candle_high = max(_hi_candidates) if _hi_candidates else None
+                candle_low  = min(_lo_candidates) if _lo_candidates else None
             update_signal_result(sig["id"], price,
                 sig["tp1"], sig["tp2"], sig["tp3"], sig["sl"], sig["signal"],
                 candle_high=candle_high, candle_low=candle_low)
