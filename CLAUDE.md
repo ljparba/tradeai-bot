@@ -201,10 +201,10 @@ Operator's current `.env` overrides `LIVE_BIAS_4H_GATE=strict` + `BACKTEST_BIAS_
 ### H4_CRT scanner params (CRT shipping config — currently ACTIVE)
 ```python
 # crt_engine.py — all env-overridable
-H4_CRT_C2_LOOKBACK = _env_int("H4_CRT_C2_LOOKBACK", 6)         # 6 H4 bars = ~24h
+H4_CRT_C2_LOOKBACK = _env_int("H4_CRT_C2_LOOKBACK", 10)        # 10 H4 bars = ~40h (M10-13 fix 2026-05-28: doc-vs-code drift corrected; operator's .env may override)
 H4_CRT_MSS_HORIZON = _env_int("H4_CRT_MSS_HORIZON", 30)        # 5M bars to detect MSS in C2 window
 H4_CRT_OB_SCAN_LOOKBACK = _env_int("H4_CRT_OB_SCAN_LOOKBACK", 20)
-H4_CRT_VALIDATION_SCHOOL = "flexible"  # only "flexible" implemented; "strict" dormant
+H4_CRT_VALIDATION_SCHOOL = "flexible"  # default; "strict" branch wired 2026-05-28 (A/B verdict: equivalent, keep flexible — see commit 5fbddd7)
 H4_CRT_DISABLED_TOKENS = ""            # blacklist (none currently)
 
 CRT_TP1_MODE = "min_1r"   # operator override; default "dynamic"

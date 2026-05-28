@@ -67,7 +67,7 @@ def _current_settings() -> dict:
         "crt_fvg_min_quality":       os.environ.get("CRT_FVG_MIN_QUALITY", "HIGH"),
         "crt_mss_min_quality":       os.environ.get("CRT_MSS_MIN_QUALITY", "MEDIUM"),
         "crt_require_1h_trend":      os.environ.get("CRT_REQUIRE_1H_TREND", "0"),
-        "h4_crt_c2_lookback":        os.environ.get("H4_CRT_C2_LOOKBACK", "6"),
+        "h4_crt_c2_lookback":        os.environ.get("H4_CRT_C2_LOOKBACK", "10"),  # M10-13 fix 2026-05-28: match crt_engine.py default (was "6")
         "h4_crt_mss_horizon":        os.environ.get("H4_CRT_MSS_HORIZON", "30"),
         "h4_crt_ob_scan_lookback":   os.environ.get("H4_CRT_OB_SCAN_LOOKBACK", "20"),
         "h4_crt_validation_school":  os.environ.get("H4_CRT_VALIDATION_SCHOOL", "flexible"),

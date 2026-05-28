@@ -102,8 +102,20 @@ class TestDefaults:
         assert cfg.CIRCUIT_BREAKER_LOOKBACK == 20
         assert cfg.CIRCUIT_BREAKER_MIN_WR == 0.55
         assert cfg.BLOCK_RANGING_LIVE is True
-        assert cfg.TIER_DAILY_LIVE_CAPS == {"TIER_A": 3, "TIER_B": 2, "TIER_C": 0, "NONE": 1}
-        assert cfg.BLOCK_RANGING_TEMPLATES == {"TIER_B", "NONE"}
+        # RISK-GAP-NEW-1 update (cycle-10 audit 2026-05-28): TIER_DAILY_LIVE_CAPS
+        # extended with 4 CRT-tier IDs (CRT_A_FVG_ALIGNED / CRT_B_OB_HIGH_MSS /
+        # CRT_B_FVG_RELAXED / CRT_C_OB_DEFAULT) so evaluate_template_status()
+        # finds a cap for CRT signals instead of defaulting to 0 (silently
+        # marking every CRT signal PAPER_ONLY). BLOCK_RANGING_TEMPLATES also
+        # adds CRT mid-tier IDs for parity with 5M_SWEEP TIER_B.
+        assert cfg.TIER_DAILY_LIVE_CAPS == {
+            "TIER_A": 3, "TIER_B": 2, "TIER_C": 0, "NONE": 1,
+            "CRT_A_FVG_ALIGNED": 3, "CRT_B_OB_HIGH_MSS": 2,
+            "CRT_B_FVG_RELAXED": 2, "CRT_C_OB_DEFAULT": 0,
+        }
+        assert cfg.BLOCK_RANGING_TEMPLATES == {
+            "TIER_B", "NONE", "CRT_B_OB_HIGH_MSS", "CRT_B_FVG_RELAXED",
+        }
 
     def test_signal_threshold_default(self):
         cfg = _reload_config(env_unset=("SIGNAL_THRESHOLD",))

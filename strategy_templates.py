@@ -99,27 +99,30 @@ TEMPLATE_REGISTRY = [
     # as the +14.6pp WR axis — these templates encode that axis.
     {
         "id":          "CRT_A_FVG_ALIGNED",
-        "name":        "CRT Tier A — FVG + MSS≥MEDIUM",
+        "name":        "CRT Tier A — FVG + MSS=HIGH",
         "tier":        "A",
-        # A1/A2 redefinition (2026-05-28, post-Run #146 validation):
-        # Wyckoff requirement DROPPED. Empirical evidence: 9 FVG-Wyckoff-
-        # aligned signals scored 44.4% WR (the worst tier) while 19 FVG-
-        # non-aligned scored 60.5%. Tier A now keys on FVG confluence +
-        # MSS≥MEDIUM only. Template ID retained for back-compat.
-        "description": ("FVG confluence + MSS≥MEDIUM. Highest-quality CRT setup. "
-                        "(A1/A2: Wyckoff alignment empirically removed as a "
-                        "tier discriminator after Run #146.)"),
+        # T-1 fix (cycle-10 audit 2026-05-28): tightened MSS bar from
+        # ≥MEDIUM to ==HIGH after full-population analysis (n=1945)
+        # showed Tier A under ≥MEDIUM produced 63.9% WR while ==HIGH
+        # yields 72.5% WR (n=80, Wilson CI [61.9%, 81.1%]) — statistically
+        # separated top tier.
+        "description": ("FVG confluence + MSS=HIGH. Highest-quality CRT setup, "
+                        "Wilson-CI-separated from B/C at full-population n=1945."),
         "live_allowed": 1,
     },
     {
         "id":          "CRT_B_OB_HIGH_MSS",
-        "name":        "CRT Tier B — OB + MSS=HIGH",
+        "name":        "CRT Tier B — OB + MSS≥MEDIUM",
         "tier":        "B",
-        # A1/A2 (2026-05-28): Wyckoff requirement DROPPED here too.
-        # Description simplified to "OB requires HIGH MSS to compensate
-        # for the missing FVG axis discriminator."
-        "description": ("OB confluence + MSS=HIGH. Strong displacement "
-                        "compensates for the missing FVG axis discriminator."),
+        # T-2 fix (cycle-10 audit 2026-05-28): flipped MSS bar from HIGH
+        # to ≥MEDIUM after full-population analysis (n=1945) showed
+        # OB+MSS=HIGH produced 51.0% WR — the WORST tier, inverting the
+        # expected A>B>C ordering — while OB+MSS=MEDIUM produced 56.9% WR.
+        # Template ID retained for back-compat with historical signals.
+        "description": ("OB confluence + MSS≥MEDIUM. Mid-tier CRT setup. "
+                        "(T-2: MSS=HIGH on OB-only signals empirically selects "
+                        "a worse sub-population — likely exhaustion-sweep "
+                        "regime changes.)"),
         "live_allowed": 1,
     },
     {
@@ -475,8 +478,15 @@ def _score_crt_a(f: Dict[str, Any]) -> TemplateMatch:
 
     if confluence == "FVG":
         hit += 1; matched.append("confluence=FVG")
-    if QUALITY_RANK.get(mss_quality, 0) >= QUALITY_RANK["MEDIUM"]:
-        hit += 1; matched.append(f"MSS={mss_quality}")
+    # T-1 fix (cycle-10 audit 2026-05-28): tighten MSS bar from ≥MEDIUM to
+    # ==HIGH. Full-population analysis (n=1945) showed Tier A under the
+    # ≥MEDIUM definition produced 63.9% WR (n=180). Tightening to MSS=HIGH
+    # yields 72.5% WR (n=80) with Wilson 95% CI [61.9%, 81.1%] — a
+    # statistically separated top tier. The looser definition admitted
+    # ~100 MSS=MEDIUM FVG signals at lower WR, diluting Tier A's
+    # discriminating power.
+    if mss_quality == "HIGH":
+        hit += 1; matched.append("MSS=HIGH")
 
     bonus = 0.0
     if (direction == "BUY"  and bias_4h == "BULLISH") or \
@@ -491,7 +501,7 @@ def _score_crt_a(f: Dict[str, Any]) -> TemplateMatch:
     score = min(base + bonus * base, 1.0)
     return TemplateMatch(
         template_id="CRT_A_FVG_ALIGNED",
-        template_name="CRT Tier A — FVG + MSS≥MEDIUM",
+        template_name="CRT Tier A — FVG + MSS=HIGH",
         tier="A",
         score=round(score, 4),
         required_hit=hit, required_need=2,
@@ -524,8 +534,15 @@ def _score_crt_b_ob_high(f: Dict[str, Any]) -> TemplateMatch:
 
     if confluence == "OB":
         hit += 1; matched.append("confluence=OB")
-    if mss_quality == "HIGH":
-        hit += 1; matched.append("MSS=HIGH")
+    # T-2 fix (cycle-10 audit 2026-05-28): flip OB's MSS bar from HIGH to
+    # MEDIUM. Full-population analysis (n=1945) showed OB+MSS=HIGH
+    # produced 51.0% WR (n=776) — the WORST tier — while OB+MSS=MEDIUM
+    # produced 56.9% WR (n=902). MSS=HIGH on OB-only signals selects a
+    # worse sub-population (hypothesis: exhaustion-sweep regime changes).
+    # After flip Tier B rises to ~57% WR territory and empirical
+    # ordering A > B > C is recovered.
+    if QUALITY_RANK.get(mss_quality, 0) >= QUALITY_RANK["MEDIUM"]:
+        hit += 1; matched.append(f"MSS={mss_quality}")
 
     bonus = 0.0
     if (direction == "BUY"  and bias_4h == "BULLISH") or \
@@ -538,7 +555,7 @@ def _score_crt_b_ob_high(f: Dict[str, Any]) -> TemplateMatch:
     score = min(base + bonus * base, 1.0)
     return TemplateMatch(
         template_id="CRT_B_OB_HIGH_MSS",
-        template_name="CRT Tier B — OB + MSS=HIGH",
+        template_name="CRT Tier B — OB + MSS≥MEDIUM",
         tier="B",
         score=round(score, 4),
         required_hit=hit, required_need=2,

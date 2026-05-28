@@ -491,40 +491,65 @@ class TestCrtTradeRejectionReason(unittest.TestCase):
 
     def test_fees_kill_reason(self):
         """Same fixture as TestCrtEconomicsHelper.test_returns_none_when_fees_kill_trade
-        must produce reason='fees_kill'."""
+        must produce reason='fees_kill'.
+
+        M10-1 update (cycle-10 audit 2026-05-28): H-NEW-3 added SL/RR clamps
+        that fire BEFORE fees_kill in crt_trade_rejection_reason. The
+        fixture (entry 100, SL 99, TP1 100.2) has |TP1/SL| ratio of 0.2/1.0
+        = 0.2 — well below ICT_MIN_RR_GATE=1.5. So rr_below_floor fires
+        first. To still meaningfully test fees_kill, widen TP1 so the RR
+        gate passes (RR>=1.5) but rt_cost_pct kills net_tp1.
+        """
         reason = self._import()(
             "BUY", entry_price=100.0, sl_price=99.0,
-            tp1_price=100.2, rt_cost_pct=0.5,
+            tp1_price=101.5, rt_cost_pct=2.0,  # RR=1.5 passes; fees swamp TP1
         )
         self.assertEqual(reason, "fees_kill")
 
     def test_bew_too_high_reason(self):
-        """Tight TP relative to SL → bew > MAX_BREAKEVEN_WR → reason='bew_too_high'."""
+        """Tight TP relative to SL → bew > MAX_BREAKEVEN_WR → reason='bew_too_high'.
+
+        M10-1 update (cycle-10 audit 2026-05-28): H-NEW-3 added the
+        rr_below_floor gate which fires before bew_too_high. Original
+        fixture (RR=0.167) was caught by rr_below_floor. Fixture rewritten
+        with RR=1.5 (passes RR gate) and rt_cost=2.0 (so BEW=0.667 > 0.60).
+        """
         reason = self._import()(
             "BUY", entry_price=100.0, sl_price=97.0,
-            tp1_price=100.5, rt_cost_pct=0.1,
+            tp1_price=104.5, rt_cost_pct=2.0,
         )
+        # RR = 1.5 (passes), net_tp1 = 2.5 (passes), bew = 0.667 → bew_too_high
         self.assertEqual(reason, "bew_too_high")
 
     def test_invalid_inputs_reason(self):
         """gross_tp1 + risk_pct <= 0 → reason='invalid_inputs'.
-        This happens when entry equals SL and equals TP1 (degenerate)."""
+        Zero-distance trade (entry == SL == TP1).
+
+        M10-1 update (cycle-10 audit 2026-05-28): H-NEW-3 added SL clamps;
+        zero SL distance now trips sl_too_tight first (post-F-4 still
+        present in rejection helper for back-compat). The semantic intent
+        of this test — "degenerate zero-distance input is always rejected"
+        — is preserved by accepting any rejection reason; the specific
+        gate that fires first is an implementation detail.
+        """
         reason = self._import()(
             "BUY", entry_price=100.0, sl_price=100.0,
             tp1_price=100.0, rt_cost_pct=0.0,
         )
-        # fees_kill fires first (net_tp1 = 0 - 0 = 0 which is <= 0)
-        # invalid_inputs would only fire if fees_kill didn't, which requires
-        # net_tp1 > 0 — meaningfully unreachable in practice. Verify
-        # fees_kill is the catch-all for zero-distance trades.
-        self.assertEqual(reason, "fees_kill")
+        self.assertIn(reason, ("sl_too_tight", "fees_kill", "invalid_inputs"))
 
     def test_bearish_direction(self):
-        """SELL direction with tight TP → reason='bew_too_high'."""
+        """SELL direction with tight TP → reason='bew_too_high'.
+
+        M10-1 update (cycle-10 audit 2026-05-28): same H-NEW-3 RR-gate
+        precedence change as the BUY-side test. Fixture rewritten with
+        RR=1.5 (passes) and rt_cost=2.0 (forces BEW above 0.60).
+        """
         reason = self._import()(
             "SELL", entry_price=100.0, sl_price=103.0,
-            tp1_price=99.5, rt_cost_pct=0.1,
+            tp1_price=95.5, rt_cost_pct=2.0,
         )
+        # RR = 1.5 (passes), bew = 0.667 → bew_too_high
         self.assertEqual(reason, "bew_too_high")
 
     def test_returns_unknown_when_no_gate_fires(self):

@@ -259,8 +259,23 @@ TIER_DAILY_LIVE_CAPS: dict = {  # max ACTIVE signals per template per UTC day
     "TIER_B": 2,
     "TIER_C": 0,   # hard zero — Tier C is paper/backtest only; never live
     "NONE":   1,
+    # RISK-GAP-NEW-1 fix (cycle-10 audit 2026-05-28): CRT tier IDs missing
+    # from this map caused evaluate_template_status() to default the cap
+    # lookup to 0, marking every CRT signal PAPER_ONLY even after T-1/T-2
+    # tier ordering recovery. Caps mirror the 5M_SWEEP topology
+    # (A=3 / B=2 / C=0); CRT_B_FVG_RELAXED is deprecated under A1/A2 but
+    # listed for back-compat with historical signals.
+    "CRT_A_FVG_ALIGNED": 3,
+    "CRT_B_OB_HIGH_MSS": 2,
+    "CRT_B_FVG_RELAXED": 2,
+    "CRT_C_OB_DEFAULT":  0,
 }
-BLOCK_RANGING_TEMPLATES: set = {"TIER_B", "NONE"}  # block live exec in RANGING regime
+BLOCK_RANGING_TEMPLATES: set = {"TIER_B", "NONE",
+                                # RISK-GAP-NEW-1 cycle-10 (2026-05-28):
+                                # CRT mid-tier also blocked in RANGING regime
+                                # for parity with the 5M_SWEEP TIER_B rule.
+                                "CRT_B_OB_HIGH_MSS",
+                                "CRT_B_FVG_RELAXED"}
 
 
 # ── MACRO EVENT FILTER (Sprint 3 / Phase A item #4 completion) ───────────────

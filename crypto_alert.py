@@ -1171,6 +1171,19 @@ def scan_h4_crt_for_token(token, c5m, c4h, consumed, trend_1h="NEUTRAL",
         result["template_live_allowed"] = 0
         result["template_block_reason"] = "crt_no_tier_match"
         result["template_matches"]     = []
+    # RISK-GAP-NEW-2 fix (cycle-10 audit 2026-05-28): attach position-sizing
+    # recommendation to the CRT result dict — was empty pre-fix, causing
+    # the dashboard to show $0 notional for CRT signals and leaving the
+    # operator without a system-recommended size at LIVE flip time. Mirrors
+    # the 5M_SWEEP call at line 3013 exactly.
+    try:
+        _sl_pct_abs_crt = abs(entry_price - sl_price) / entry_price
+        result["sizing"] = compute_position_size(
+            YOUR_CAPITAL, RISK_PER_TRADE_PCT, _sl_pct_abs_crt, token=token,
+        )
+    except Exception as _sz_exc:
+        print(f"[CRT-SIZING] {token}: compute_position_size failed — {_sz_exc}")
+        result["sizing"] = {}
     # Mark mitigated AFTER constructing result so a downstream failure
     # doesn't leave a half-consumed zone. Caller commits via consumed.add().
     consumed.add(setup["key"])
@@ -1529,29 +1542,34 @@ def _check_limit_fill(sig: dict, live_price: float,
            retouched=False, age<window  → leave NULL (still ⏳ WAITING)
            retouched=False, age>=window → limit_fillable=0, set fillable_check_at
     """
+    # M10-12 fix (cycle-10 audit 2026-05-28): wrap all SQLite work in
+    # try/finally so an exception between _connect() and conn.close()
+    # cannot leak a file descriptor. Pre-fix each early-return path
+    # called conn.close() manually but raised exceptions on the UPDATE
+    # path or anywhere mid-function would leak. Single guard, deterministic.
+    sig_id     = sig.get("id")
+    entry      = sig.get("entry_price")
+    signal_dir = sig.get("signal", "")
+    ts_str     = sig.get("timestamp")
+    if entry is None or not ts_str or not signal_dir:
+        return
+    conn = None
     try:
-        sig_id     = sig["id"]
-        entry      = sig.get("entry_price")
-        signal_dir = sig.get("signal", "")
-        ts_str     = sig.get("timestamp")
-        if entry is None or not ts_str or not signal_dir:
-            return
-        # Connect + check current state — bail if already evaluated
         conn = _connect()
         row = conn.execute(
             "SELECT limit_fillable FROM signals WHERE id=?", (sig_id,)
         ).fetchone()
         if not row:
-            conn.close(); return
+            return
         if row[0] is not None:
-            conn.close(); return  # already FILLED (1) or MISSED (0) — done
+            return  # already FILLED (1) or MISSED (0) — done
 
         # Signal age in minutes
         now = datetime.now(timezone.utc)
         try:
             ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
         except Exception:
-            conn.close(); return
+            return
         age_min = (now - ts).total_seconds() / 60.0
 
         # The live monitor only inspects this cycle's candle extremes, so it
@@ -1564,7 +1582,7 @@ def _check_limit_fill(sig: dict, live_price: float,
         # using historical klines that cover the real window.
         _grace = 15  # one extra 15M bar of slack for cycle timing / cold-starts
         if age_min > (CRT_LIMIT_FILL_WINDOW_MIN + _grace):
-            conn.close(); return
+            return
 
         # Detect retouch
         hi = candle_high if (candle_high and candle_high > 0) else live_price
@@ -1592,9 +1610,12 @@ def _check_limit_fill(sig: dict, live_price: float,
             print(f"[FILL] #{sig_id} {sig.get('token','?')} {signal_dir} "
                   f"@ ${entry:.4f} → MISSED ({age_min:.1f}min elapsed, never retraced)")
         # else: still WAITING — leave NULL, will re-check next cycle
-        conn.close()
     except Exception as e:
-        print(f"[FILL] _check_limit_fill #{sig.get('id','?')}: {e}")
+        print(f"[FILL] _check_limit_fill #{sig_id or '?'}: {e}")
+    finally:
+        if conn is not None:
+            try: conn.close()
+            except Exception: pass
 
 
 def mark_expired(sig_id, token):
@@ -4213,6 +4234,17 @@ def main():
                         print(f"[STALE-4H] {token}: 4h candles {_4h_age:.0f}s old "
                               f"(>{STALE_CANDLE_THRESHOLD}s) — skipping CRT scan")
                         continue
+                    # M10-8 fix (cycle-10 audit 2026-05-28): 4H candle gap
+                    # guard. The 5M_SWEEP path has this at line 2663; CRT
+                    # did not. Without it, a 4H fetch that returned with
+                    # gaps (e.g. Binance partial response) would feed CRT
+                    # detection a discontinuous H4 stream → false C1/C2
+                    # relationships. ≥1 bar gap is enough to corrupt the
+                    # 2-bar CRT pattern.
+                    if STATE[token].get("data_gap_bars_4h", 0) >= 1:
+                        print(f"[SKIP-GAP-4H] {token}: 4H data gap "
+                              f"{STATE[token]['data_gap_bars_4h']} bars — skipping CRT scan")
+                        continue
                     _c5m = STATE[token]["candles"]["5m"]
                     _c4h = STATE[token]["candles"]["4h"]
                     _c1h_live = STATE[token]["candles"].get("1h", {})
@@ -4281,12 +4313,21 @@ def main():
                             # F-1 (2026-05-28): pass BTC 5M cache so SMT
                             # divergence is computed for CRT signals (was
                             # hardcoded NONE/False pre-fix).
-                            _btc_c5m_for_smt = (
-                                STATE["BTC"]["candles"].get("5m", {})
-                                if "BTC" in STATE
-                                   and STATE["BTC"]["candles"].get("5m", {}).get("highs")
-                                else BTC_STATE.get("candles", {}).get("5m", {})
-                            )
+                            #
+                            # M10-2 fix (cycle-10 audit 2026-05-28): when
+                            # `token == 'BTC'` pass None — SMT divergence
+                            # against self is meaningless and produces
+                            # spurious confirmations. Mirrors the backtest
+                            # guard at backtest.py:3788.
+                            if token == "BTC":
+                                _btc_c5m_for_smt = None
+                            else:
+                                _btc_c5m_for_smt = (
+                                    STATE["BTC"]["candles"].get("5m", {})
+                                    if "BTC" in STATE
+                                       and STATE["BTC"]["candles"].get("5m", {}).get("highs")
+                                    else BTC_STATE.get("candles", {}).get("5m", {})
+                                )
                             _crt_result, _crt_plan, _crt_reason = scan_h4_crt_for_token(
                                 token, _c5m_closed, _c4h_closed,
                                 consumed=STATE[token]["consumed_h4_crt"],
@@ -4381,11 +4422,33 @@ def main():
                                 # LIVE flip is still gated by EXECUTION_MODE
                                 # (operator's manual env switch) and N≥30
                                 # paper soak discipline.
+                                #
+                                # RISK-GAP-NEW-1 fix (cycle-10 audit
+                                # 2026-05-28): pre-fix CRT only read the
+                                # static template_live_allowed bit, BYPASSING
+                                # Phase 5A's INSUFFICIENT_SAMPLE /
+                                # CIRCUIT_BREAKER / DAILY_CAP gates that the
+                                # 5M_SWEEP path enforces at line 3238. Now
+                                # call evaluate_template_status() for CRT too
+                                # so a LIVE flip with 0 closed CRT trades
+                                # can't fire untested-tier signals.
                                 _tmpl_id  = _crt_result.get("matched_template_id", "NONE")
-                                _tmpl_ok  = bool(_crt_result.get("template_live_allowed", 0))
-                                if EXECUTION_MODE == "LIVE" and not _tmpl_ok:
+                                try:
+                                    _conn_5a_crt = _connect()
+                                    _crt_tmpl_status, _crt_tmpl_live_ok, _crt_tmpl_block_reason = \
+                                        evaluate_template_status(_conn_5a_crt, _tmpl_id, "UNKNOWN")
+                                    _conn_5a_crt.close()
+                                except Exception as _e_5a_crt:
+                                    _crt_tmpl_status       = "UNKNOWN_TEMPLATE"
+                                    _crt_tmpl_live_ok      = False
+                                    _crt_tmpl_block_reason = f"Phase 5A eval exception: {_e_5a_crt}"
+                                print(f"[CRT-Phase5A] {token} {_crt_result['signal']} → {_tmpl_id} "
+                                      f"status={_crt_tmpl_status} live_ok={_crt_tmpl_live_ok}"
+                                      + (f" | {_crt_tmpl_block_reason}" if _crt_tmpl_block_reason else ""))
+                                if EXECUTION_MODE == "LIVE" and not _crt_tmpl_live_ok:
                                     print(f"[CRT-Phase-B] LIVE BLOCK: {token} {_crt_result['signal']} "
-                                          f"template={_tmpl_id} (paper-only) "
+                                          f"template={_tmpl_id} status={_crt_tmpl_status} "
+                                          f"({_crt_tmpl_block_reason or 'paper-only'}) "
                                           f"— signal saved (sig_id={_crt_sig_id}), no Telegram")
                                 else:
                                     send_signal_msg(token, price, ch24, _crt_result,
