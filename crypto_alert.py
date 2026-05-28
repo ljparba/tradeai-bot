@@ -3742,15 +3742,11 @@ def main():
 
     _hr = "━" * 22  # divider line between sections
 
-    # Token grid: 2 columns, row-major, left-aligned to width 6 (longest
-    # token name in our 10-token list is "HBAR" = 4 chars + bullet spacing)
-    _tk_list = list(BINANCE_TOKENS.keys())
-    _rows = []
-    for i in range(0, len(_tk_list), 2):
-        _left  = f"• {_tk_list[i]:<5}"
-        _right = f"• {_tk_list[i+1]}" if i + 1 < len(_tk_list) else ""
-        _rows.append(f"  {_left}  {_right}".rstrip())
-    _tokens_grid = "<pre>" + "\n".join(_rows) + "</pre>"
+    # Token list — vertical bullets (one per line). The earlier 2-column grid
+    # required <pre> which Telegram annotates with a "copy" affordance the
+    # operator doesn't want. Operator-approved trade-off (2026-05-28):
+    # drop the grid for a clean plain-text bullet list.
+    _tokens_grid = "\n".join(f"• {_h(t)}" for t in BINANCE_TOKENS.keys())
 
     # Adaptive learning block — render as bullets under a section header
     _adaptive_block = ""
