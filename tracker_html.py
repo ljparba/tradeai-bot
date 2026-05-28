@@ -937,6 +937,8 @@ tr:hover td{background:rgba(37,37,56,.45)}
           <th class="sortable" onclick="histSetSort('confidence')">Conf <span class="sort-ico" id="sh-confidence"></span></th>
           <th>MTF</th><th>RSI</th><th>4H</th><th>1H</th><th>5M</th>
           <th>Session</th><th>Sweep</th><th>EV</th>
+          <th title="Slippage between fired signal price and live tick">Slip</th>
+          <th title="Did price retouch the entry within the limit-order fill window">Fill</th>
           <th class="sortable" onclick="histSetSort('outcome')">Result <span class="sort-ico" id="sh-outcome"></span></th>
           <th class="sortable" onclick="histSetSort('profit_pct')">P&amp;L <span class="sort-ico" id="sh-profit_pct"></span></th>
           <th class="sortable" onclick="histSetSort('timestamp')">Time <span class="sort-ico" id="sh-timestamp"></span></th>
@@ -1460,6 +1462,47 @@ tr:hover td{background:rgba(37,37,56,.45)}
           <span><span class="honest-legend-dot marginal"></span> <b>MARGINAL</b> = CPCV &ge;55% AND DSR &ge;95%. Acceptable, but not ideal.</span>
           <span><span class="honest-legend-dot fail"></span> <b>FAIL</b> = below either threshold. NOT ready for LIVE.</span>
         </div>
+      </div>
+
+      <!-- Phase A — Limit-Order Discipline (2026-05-28) -->
+      <div class="honest-section">
+        <div class="honest-section-title">&#127919; Limit-Order Discipline (Phase A)</div>
+        <div class="honest-section-intro">
+          The bot publishes a <b>theoretical entry price</b> at signal time. Real fills happen
+          only if you actually post a limit order and price retouches that level within the fill
+          window. This panel measures both gaps that decide whether the backtest WR carries to
+          real money: <b>slippage</b> (how far live tick has drifted from the published entry)
+          and <b>fillability</b> (did price actually retouch within the limit window).
+          Restricting your scorecard to <em>filled-only</em> signals is the honest read &mdash;
+          the "limit-only WR" is what you can realistically earn at the desk.
+        </div>
+        <div class="honest-grid">
+          <div class="honest-cell">
+            <div class="honest-cell-label">Fill Rate</div>
+            <div class="honest-cell-value" id="hmFillRate">—</div>
+            <div class="honest-cell-sub" id="hmFillRateSub">— filled / — evaluated</div>
+            <div class="honest-cell-desc">% of evaluated signals where price retouched the entry within the fill window. Higher = fewer missed limits.</div>
+          </div>
+          <div class="honest-cell">
+            <div class="honest-cell-label">Avg |Slippage|</div>
+            <div class="honest-cell-value" id="hmAvgSlip">—</div>
+            <div class="honest-cell-sub" id="hmAvgSlipSub">Across tracked signals</div>
+            <div class="honest-cell-desc">Mean absolute gap between published entry and live tick at signal save. Lower = telegram price is closer to executable.</div>
+          </div>
+          <div class="honest-cell honest-highlight">
+            <div class="honest-cell-label">Limit-Only WR &#11088;</div>
+            <div class="honest-cell-value" id="hmLimitWr">—</div>
+            <div class="honest-cell-sub" id="hmLimitWrSub">— wins / — closed &amp; filled</div>
+            <div class="honest-cell-desc">WR restricted to closed signals that actually filled. This is the realistic limit-order edge &mdash; what live execution would book.</div>
+          </div>
+          <div class="honest-cell">
+            <div class="honest-cell-label">Waiting</div>
+            <div class="honest-cell-value" id="hmWaitCount">—</div>
+            <div class="honest-cell-sub">Still inside fill window</div>
+            <div class="honest-cell-desc">Signals fired in the last fill-window minutes &mdash; outcome pending until the window closes.</div>
+          </div>
+        </div>
+        <div class="honest-sub" style="margin-top:8px" id="hmLimitNote">—</div>
       </div>
 
       <!-- Cross-config sr_trial_std -->
@@ -2917,6 +2960,99 @@ function trendClass(t){
   return 'neutral';
 }
 
+// Phase A — Slippage cell. Colors based on CRT_SLIPPAGE_WARN/CRIT thresholds.
+// Pre-Phase-A signals have NULL slippage_pct → muted dash.
+function _slipCell(r){
+  const sp = r.slippage_pct;
+  if(sp==null) return '<td style="color:var(--muted);font-size:.72rem">—</td>';
+  const a = Math.abs(Number(sp));
+  const warn = (window._slipWarnPct!=null)?window._slipWarnPct:0.5;
+  const crit = (window._slipCritPct!=null)?window._slipCritPct:2.0;
+  const c = a>crit?'var(--red)':(a>warn?'var(--yellow)':'var(--green)');
+  const sign = Number(sp)>0?'+':'';
+  return '<td class="mono" style="color:'+c+';font-size:.74rem" title="signal price vs live tick at save">'
+    +sign+Number(sp).toFixed(3)+'%</td>';
+}
+
+// Phase A — Honest Metrics tab: limit-order discipline summary. Computed from
+// allSigs (already loaded by loadSignals → renderTable). If allSigs is empty
+// (Honest tab loaded before Signals tab in this session), fetch /api/signals
+// once and reuse.
+async function _renderLimitDiscipline(){
+  let sigs = (typeof allSigs !== 'undefined' && Array.isArray(allSigs)) ? allSigs : [];
+  if(!sigs.length){
+    try {
+      const r = await fetch('/api/signals');
+      if(r.ok) sigs = await r.json();
+    } catch(e) { sigs = []; }
+  }
+  // Only count signals that actually carry Phase-A tracking
+  const tracked = sigs.filter(r => r.slippage_pct != null);
+  const evaluated = tracked.filter(r => r.limit_fillable != null);
+  const filled    = tracked.filter(r => Number(r.limit_fillable) === 1);
+  const missed    = tracked.filter(r => Number(r.limit_fillable) === 0);
+  const waiting   = tracked.filter(r => r.limit_fillable == null);
+
+  const fillRate = evaluated.length ? (filled.length / evaluated.length * 100) : null;
+  const avgSlip  = tracked.length ?
+    (tracked.reduce((a,r)=>a+Math.abs(Number(r.slippage_pct)||0), 0) / tracked.length) : null;
+
+  // Limit-only WR — only filled signals that have closed with a result
+  const closedFilled = filled.filter(r => {
+    const o = (r.outcome || '').toUpperCase();
+    return o === 'WIN' || o === 'LOSS' || o.startsWith('PARTIAL');
+  });
+  const wins = closedFilled.filter(r => {
+    const o = (r.outcome || '').toUpperCase();
+    return o === 'WIN' || o.startsWith('PARTIAL_TP');  // C6 rule: TP1 hit = WIN
+  });
+  const limitWr = closedFilled.length ? (wins.length / closedFilled.length * 100) : null;
+
+  const setText = (id, txt) => { const el = document.getElementById(id); if(el) el.textContent = txt; };
+
+  setText('hmFillRate',    fillRate != null ? fillRate.toFixed(1) + '%' : '—');
+  setText('hmFillRateSub', filled.length + ' filled / ' + evaluated.length + ' evaluated'
+                           + (missed.length ? '  ·  ' + missed.length + ' missed' : ''));
+  setText('hmAvgSlip',     avgSlip != null ? avgSlip.toFixed(3) + '%' : '—');
+  setText('hmAvgSlipSub',  'n=' + tracked.length + ' tracked signals');
+  setText('hmLimitWr',     limitWr != null ? limitWr.toFixed(1) + '%' : '—');
+  setText('hmLimitWrSub',  wins.length + ' wins / ' + closedFilled.length + ' closed & filled');
+  setText('hmWaitCount',   waiting.length);
+
+  const note = document.getElementById('hmLimitNote');
+  if(note){
+    if(!tracked.length){
+      note.textContent = 'No Phase-A-tracked signals yet — restart bot after the Phase A '
+        + 'migration and the next fired signal will populate this panel.';
+    } else if(!evaluated.length){
+      note.textContent = 'All ' + tracked.length + ' tracked signals are still inside the limit-fill window. '
+        + 'Re-check after the window expires.';
+    } else if(closedFilled.length < 5){
+      note.textContent = 'Only ' + closedFilled.length + ' filled signal(s) have closed — '
+        + 'limit-only WR is not yet statistically meaningful (need ≥10 closed for a stable read).';
+    } else {
+      note.textContent = 'Limit-only WR reflects what real money would have booked. '
+        + 'Compare to headline WR above — large gaps reveal fillability drag.';
+    }
+  }
+}
+
+// Phase A — Limit-order fillability cell. NULL = WAITING (within fill window),
+// 1 = FILLED, 0 = MISSED. Pre-Phase-A signals (no slippage tracked) show "—".
+function _fillCell(r){
+  const sp = r.slippage_pct;
+  if(sp==null) return '<td style="color:var(--muted);font-size:.72rem">—</td>';
+  const lf = r.limit_fillable;
+  if(lf==null)
+    return '<td style="color:var(--yellow);font-size:.74rem" title="Still within '
+      +'limit-order fill window">⏳ WAIT</td>';
+  if(Number(lf)===1)
+    return '<td style="color:var(--green);font-size:.74rem;font-weight:600" '
+      +'title="Limit order would have filled">✓ FILL</td>';
+  return '<td style="color:var(--red);font-size:.74rem;font-weight:600" '
+    +'title="Price never retouched entry — limit order missed">✗ MISS</td>';
+}
+
 function _expiryLabel(expiresAt){
   if(!expiresAt) return '<span style="color:var(--muted);font-size:.75rem">No expiry</span>';
   const exp=new Date(expiresAt.replace(' ','T')+'Z');
@@ -3132,7 +3268,7 @@ function renderTable(){
   const body=document.getElementById('histBody');
   const pgBar=document.getElementById('histPgBar');
   if(!total){
-    body.innerHTML='<tr><td colspan="21" class="empty">'
+    body.innerHTML='<tr><td colspan="23" class="empty">'
       +(allSigs.length===0
         ?'No signals yet — bot will save signals here once running'
         :'No signals matching this filter')
@@ -3169,6 +3305,8 @@ function renderTable(){
       +'<td style="font-size:.72rem;color:var(--muted)">'+(r.session||'—').replace('_KZ','')+'</td>'
       +'<td style="font-size:.72rem;color:var(--muted)">'+(r.sweep_type||'—')+'</td>'
       +'<td style="font-size:.72rem;color:'+(r.ev_status==='POSITIVE'?'var(--green)':r.ev_status==='NEGATIVE'?'var(--red)':r.ev_status?'var(--yellow)':'var(--muted)')+'">'+(r.ev_status||'—')+(r.ev_score!=null?' '+Number(r.ev_score).toFixed(0)+'%':'')+'</td>'
+      +_slipCell(r)
+      +_fillCell(r)
       +'<td><span class="out '+out+'">'+out+'</span></td>'
       +'<td>'+pnlHtml+'</td>'
       +'<td style="color:var(--muted);white-space:nowrap;font-size:.78rem">'+ts+'</td>'
@@ -4081,6 +4219,9 @@ async function loadHonestMetrics(){
       cs.mean_oos_sharpe !== null ? cs.mean_oos_sharpe.toFixed(4) : '—';
     document.getElementById('hmStdComputed').textContent = cs.computed_at || '—';
     document.getElementById('hmStdNote').textContent = cs.note || '—';
+
+    // ─── Phase A — Limit-order discipline (computed client-side from /api/signals)
+    _renderLimitDiscipline();
 
     // ─── Update tab pill with alert level ───────────────────
     const pill = document.getElementById('honestPill');

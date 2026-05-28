@@ -147,6 +147,8 @@ from config import (
     EXECUTION_MODE,
     # per-scanner kill switches (2026-05-27)
     ENABLE_5M_SWEEP,
+    # Phase A — Limit-order fill window + slippage thresholds (2026-05-28)
+    CRT_LIMIT_FILL_WINDOW_MIN, CRT_SLIPPAGE_WARN_PCT, CRT_SLIPPAGE_CRIT_PCT,
     TEMPLATE_MIN_SAMPLE, CIRCUIT_BREAKER_LOOKBACK, CIRCUIT_BREAKER_MIN_WR,
     TIER_DAILY_LIVE_CAPS, BLOCK_RANGING_LIVE, BLOCK_RANGING_TEMPLATES,
     # exit intelligence
@@ -381,7 +383,23 @@ def init_db():
                      # historical signals back-fill correctly. H4-CRT signals
                      # from crt_engine.detect_h4_crt carry source='H4_CRT'
                      # for independent per-source attribution. LBC-H-1 close.
-                     ("source",                "TEXT DEFAULT '5M_SWEEP'")]:
+                     ("source",                "TEXT DEFAULT '5M_SWEEP'"),
+                     # Phase A — Slippage + Fillability tracking (2026-05-28)
+                     # Operator chose Option 1 (limit orders at entry_price) as
+                     # the live execution discipline. These columns measure:
+                     #   actual_entry_price   — live market tick at save_signal time
+                     #                          (vs `entry_price` which is the bot's
+                     #                          theoretical entry from MSS-bar open)
+                     #   slippage_pct         — (entry - actual_entry) / actual_entry * 100
+                     #                          NEGATIVE = market filled WORSE than bot's ref
+                     #   limit_fillable       — NULL=⏳WAITING, 1=✅FILLED, 0=❌MISSED
+                     #                          1 = price retouched entry within window
+                     #                          0 = window closed without retrace
+                     #   fillable_check_at    — UTC timestamp when window evaluated
+                     ("actual_entry_price",    "REAL"),
+                     ("slippage_pct",          "REAL"),
+                     ("limit_fillable",        "INTEGER"),
+                     ("fillable_check_at",     "TEXT")]:
 
         if col not in existing:
             try:
@@ -665,6 +683,18 @@ def save_signal(token, price, result, plan, regime):
     try:
         conn = _connect()
         _now = datetime.now(timezone.utc)
+        # Phase A (2026-05-28) — capture live market tick + compute slippage.
+        # For CRT signals, `price` is the theoretical entry from a 5M bar that
+        # closed 5-15 min before this call. The live current market may be
+        # significantly different. Compare to STATE[token]'s freshest tick
+        # (set by update_token_state each scan cycle).
+        # Fallback: if STATE missing, slippage_pct=0 (treat `price` as the
+        # live tick — preserves 5M_SWEEP-era behavior where `price` IS live).
+        _live_tick = STATE.get(token, {}).get("last_24h", {}).get("price", price) or price
+        try:
+            _slippage_pct = round((price - _live_tick) / _live_tick * 100, 4) if _live_tick else 0.0
+        except (TypeError, ZeroDivisionError):
+            _slippage_pct = 0.0
         cur  = conn.execute("""INSERT INTO signals
             (token,signal,entry_price,sl,tp1,tp2,tp3,
              sl_pct,tp1_pct,tp2_pct,tp3_pct,rr1,rr2,rr3,
@@ -679,8 +709,9 @@ def save_signal(token, price, result, plan, regime):
              day_of_week,hour_utc,dist_daily_open_pct,dist_weekly_open_pct,
              strategy_version,matched_template_id,template_scores_json,
              template_status,template_live_allowed,template_block_reason,
-             source)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+             source,
+             actual_entry_price,slippage_pct,limit_fillable,fillable_check_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (token,result["signal"],price,
              plan["sl"],plan["tp1"],plan["tp2"],plan["tp3"],
              plan["sl_pct"],plan["tp1_pct"],plan["tp2_pct"],plan["tp3_pct"],
@@ -735,7 +766,19 @@ def save_signal(token, price, result, plan, regime):
              # CRT v1 Session 3 (audit cycle-7 2026-05-27): source tag. Default
              # '5M_SWEEP' for back-compat — pre-Session-3 callers don't set this
              # key and must still write the canonical signal source.
-             result.get("source", "5M_SWEEP")))
+             result.get("source", "5M_SWEEP"),
+             # Phase A (2026-05-28) — Slippage + Fillability tracking.
+             # For CRT signals: `price` arg is the THEORETICAL entry (5M-bar
+             # open from MSS confirmation), which can be 5-15 min stale vs
+             # live market. _live_tick captures the actual current market
+             # price at save_signal time, so slippage_pct exposes the gap
+             # between bot's claimed entry and what would actually fill.
+             # For 5M_SWEEP signals: `price` IS the live tick (passed by main
+             # loop from current_prices), so slippage is naturally 0%.
+             _live_tick,
+             _slippage_pct,
+             None,   # limit_fillable: NULL = ⏳ WAITING (set by monitor cycle)
+             None))  # fillable_check_at: NULL until 30-min window evaluated
         sig_id   = cur.lastrowid
         exp_h    = EXPIRY_BY_REGIME.get(regime.get("regime","UNKNOWN"), 12)
         conn.execute("INSERT INTO results (signal_id) VALUES (?)", (sig_id,))
@@ -1358,6 +1401,93 @@ def update_signal_result(sig_id, price, tp1, tp2, tp3, sl, signal,
         if res in ("WIN", "LOSS", "PARTIAL_TP1", "PARTIAL_TP2") and res != prev_res:
             _trigger_weight_update(sig_id, res)
     except Exception as e: print(f"[DB ERROR] update: {e}")
+
+
+def _check_limit_fill(sig: dict, live_price: float,
+                       candle_high=None, candle_low=None) -> None:
+    """Phase A (2026-05-28) — Check whether a limit order at the bot's
+    entry_price would have filled within CRT_LIMIT_FILL_WINDOW_MIN.
+
+    Called once per scan cycle for each open signal. Logic:
+      1. Skip if limit_fillable IS NOT NULL (already evaluated).
+      2. Compute signal age in minutes.
+      3. Detect retouch — check live_price + this cycle's 15M candle extremes:
+           SELL signal: any high  >= entry_price → filled
+           BUY signal:  any low   <= entry_price → filled
+         (Cached 15M extremes mirror the same logic update_signal_result uses
+          for TP/SL detection — same source of truth.)
+      4. State transition:
+           retouched=True               → limit_fillable=1, set fillable_check_at
+           retouched=False, age<window  → leave NULL (still ⏳ WAITING)
+           retouched=False, age>=window → limit_fillable=0, set fillable_check_at
+    """
+    try:
+        sig_id     = sig["id"]
+        entry      = sig.get("entry_price")
+        signal_dir = sig.get("signal", "")
+        ts_str     = sig.get("timestamp")
+        if entry is None or not ts_str or not signal_dir:
+            return
+        # Connect + check current state — bail if already evaluated
+        conn = _connect()
+        row = conn.execute(
+            "SELECT limit_fillable FROM signals WHERE id=?", (sig_id,)
+        ).fetchone()
+        if not row:
+            conn.close(); return
+        if row[0] is not None:
+            conn.close(); return  # already FILLED (1) or MISSED (0) — done
+
+        # Signal age in minutes
+        now = datetime.now(timezone.utc)
+        try:
+            ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        except Exception:
+            conn.close(); return
+        age_min = (now - ts).total_seconds() / 60.0
+
+        # The live monitor only inspects this cycle's candle extremes, so it
+        # can only honestly judge retouch while the signal's fill window is
+        # still recent. Beyond `window + grace`, the actual fill window has
+        # long since rolled past — checking current high/low at that point
+        # would produce a garbage verdict (we'd be measuring "did price
+        # retouch entry hours later," not "in the 30 min after the signal").
+        # Leave such rows NULL and let scripts/backfill_phase_a.py handle them
+        # using historical klines that cover the real window.
+        _grace = 15  # one extra 15M bar of slack for cycle timing / cold-starts
+        if age_min > (CRT_LIMIT_FILL_WINDOW_MIN + _grace):
+            conn.close(); return
+
+        # Detect retouch
+        hi = candle_high if (candle_high and candle_high > 0) else live_price
+        lo = candle_low  if (candle_low  and candle_low  > 0) else live_price
+        if signal_dir == "SELL":
+            retouched = hi >= entry  # price came back UP to entry → limit SELL fills
+        else:  # BUY
+            retouched = lo <= entry  # price came back DOWN to entry → limit BUY fills
+
+        # State transition
+        if retouched:
+            conn.execute(
+                "UPDATE signals SET limit_fillable=1, fillable_check_at=? WHERE id=?",
+                (now.strftime("%Y-%m-%d %H:%M:%S"), sig_id)
+            )
+            conn.commit()
+            print(f"[FILL] #{sig_id} {sig.get('token','?')} {signal_dir} "
+                  f"@ ${entry:.4f} → LIMIT FILLED (age {age_min:.1f} min)")
+        elif age_min >= CRT_LIMIT_FILL_WINDOW_MIN:
+            conn.execute(
+                "UPDATE signals SET limit_fillable=0, fillable_check_at=? WHERE id=?",
+                (now.strftime("%Y-%m-%d %H:%M:%S"), sig_id)
+            )
+            conn.commit()
+            print(f"[FILL] #{sig_id} {sig.get('token','?')} {signal_dir} "
+                  f"@ ${entry:.4f} → MISSED ({age_min:.1f}min elapsed, never retraced)")
+        # else: still WAITING — leave NULL, will re-check next cycle
+        conn.close()
+    except Exception as e:
+        print(f"[FILL] _check_limit_fill #{sig.get('id','?')}: {e}")
+
 
 def mark_expired(sig_id, token):
     """Close an open signal that has passed its expiry time.
@@ -3333,6 +3463,14 @@ def monitor_open_signals(prices):
             update_signal_result(sig["id"], price,
                 sig["tp1"], sig["tp2"], sig["tp3"], sig["sl"], sig["signal"],
                 candle_high=candle_high, candle_low=candle_low)
+
+            # Phase A (2026-05-28) — Limit-order fillability check.
+            # For signals with limit_fillable=NULL (still in the 30-min waiting
+            # window), determine if the bot's entry_price has been retouched.
+            # If yes → mark FILLED (1). If 30+ min elapsed without retouch →
+            # mark MISSED (0). This measures the empirical fill rate of the
+            # operator's chosen limit-order discipline (Option 1).
+            _check_limit_fill(sig, price, candle_high, candle_low)
 
             # Exit intelligence — closed 5m bars only ([:-1] excludes the forming candle,
             # matching the convention used in the entry path at lines 2056-2060).

@@ -128,6 +128,28 @@ EXECUTION_MODE: str = _env_choice("EXECUTION_MODE", "PAPER", ("PAPER", "LIVE"))
 ENABLE_5M_SWEEP: bool = _env_bool("ENABLE_5M_SWEEP", True)
 
 
+# ── LIMIT-ORDER DISCIPLINE TRACKING (Phase A, 2026-05-28) ────────────────────
+# Operator chose Option 1 (limit orders at bot's entry_price) as the live
+# execution discipline. These knobs control the empirical measurement layer.
+#
+# CRT_LIMIT_FILL_WINDOW_MIN — how long to wait for price to retouch the bot's
+#                              entry_price after the signal fires. If retouch
+#                              happens within this window → limit order would
+#                              have filled. If not → signal marked MISSED and
+#                              the operator's discipline says skip it.
+#                              Default 30 min: balance between giving price
+#                              time to retrace (H4 strategy, moves develop over
+#                              hours) AND avoiding stale entries (after 30 min
+#                              the move has typically fully played out).
+CRT_LIMIT_FILL_WINDOW_MIN: int = _env_int("CRT_LIMIT_FILL_WINDOW_MIN", 30)
+
+# Slippage thresholds for dashboard color-coding (UX only — no behavior gate)
+# Slippage = how much the live market price at alert time differed from the
+# bot's recorded entry_price. Negative = market filled worse than bot ref.
+CRT_SLIPPAGE_WARN_PCT: float = _env_float("CRT_SLIPPAGE_WARN_PCT", 0.5)  # yellow above this
+CRT_SLIPPAGE_CRIT_PCT: float = _env_float("CRT_SLIPPAGE_CRIT_PCT", 2.0)  # red above this
+
+
 # ── BINANCE / DATA SOURCE INFRASTRUCTURE ──────────────────────────────────────
 BINANCE_BASE: str    = "https://api.binance.com/api/v3"
 COINGECKO_GLOBAL: str = "https://api.coingecko.com/api/v3/global"

@@ -2788,7 +2788,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def send_html(self):
         try:
-            html = HTML.encode()
+            # Phase A — inject slippage thresholds so the dashboard color codes
+            # the Slip column using the same env values the bot uses live.
+            try:
+                from config import CRT_SLIPPAGE_WARN_PCT, CRT_SLIPPAGE_CRIT_PCT
+                _inject = (f"<script>window._slipWarnPct={float(CRT_SLIPPAGE_WARN_PCT)};"
+                           f"window._slipCritPct={float(CRT_SLIPPAGE_CRIT_PCT)};</script>")
+            except Exception:
+                _inject = ""
+            page = HTML.replace("</head>", _inject + "</head>", 1) if _inject else HTML
+            html = page.encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", len(html))
