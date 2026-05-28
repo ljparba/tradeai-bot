@@ -184,6 +184,14 @@ def new_state():
         "last_24h":          {},     # cached 24h price/volume data from last fetch
         "last_fetched_at":    0.0,   # unix timestamp of last successful candle refresh (any TF)
         "last_5m_fetched_at": 0.0,  # unix timestamp of last successful 5m candle refresh
+        # M-NEW-5 fix (cycle-9 audit 2026-05-28): per-TF stale tracking. The
+        # CRT scanner consumes 4H candles directly — without this tracker, a
+        # silent stale-4H scenario (5M fetches succeed, 4H fetches fail) would
+        # let the bot generate CRT signals from a frozen H4 candle range. The
+        # generic last_fetched_at is updated when ANY TF succeeds, masking
+        # per-TF failure modes.
+        "last_4h_fetched_at": 0.0,  # unix timestamp of last successful 4h candle refresh
+        "last_1h_fetched_at": 0.0,  # unix timestamp of last successful 1h candle refresh
         "consumed_sweeps":   set(),  # (bar_idx, round(level,6)) pairs already used for signals
         # CRT v1 Session 3 (LBC-H-2 close): one-shot mitigation set for H4 CRT.
         # Keyed on (c1_time, round(c1_high, 6), round(c1_low, 6)) — c1_time is
@@ -1595,8 +1603,16 @@ def _trigger_weight_update(sig_id: int, outcome: str):
         # regime is observation-only — NOT used to condition learning — and
         # is persisted to weight_history via update(snapshot=True) for future
         # regime-aware analysis.
+        #
+        # M-NEW-1 fix (cycle-9 audit 2026-05-28): also fetch limit_fillable to
+        # gate OGD learning on real-money fillability. Pre-fix, a signal that
+        # never retraced to entry within the LIMIT window (limit_fillable=0)
+        # would still feed its outcome into OGD — but the outcome belongs to a
+        # phantom trade that no operator could have actually entered. Trains
+        # the weights on a fictional signal stream and biases learning.
         row  = conn.execute(
-            "SELECT s.token, s.feature_scores_json, r.profit_pct, s.market_regime "
+            "SELECT s.token, s.feature_scores_json, r.profit_pct, "
+            "s.market_regime, s.limit_fillable "
             "FROM signals s LEFT JOIN results r ON r.signal_id = s.id "
             "WHERE s.id=?",
             (sig_id,)
@@ -1604,7 +1620,17 @@ def _trigger_weight_update(sig_id: int, outcome: str):
         conn.close()
         if not row:
             return
-        token, fs_json, profit_pct, regime = row
+        token, fs_json, profit_pct, regime, limit_fillable = row
+
+        # M-NEW-1: skip OGD learning when the LIMIT order would have missed.
+        # NULL = pre-Phase-A signal OR still inside fill window — both OK to
+        # train on (legacy signals have no fillability data; in-window signals
+        # haven't been evaluated yet but didn't miss). Only an explicit 0
+        # ("missed") suppresses learning.
+        if limit_fillable == 0:
+            print(f"[ADAPTIVE] #{sig_id} {token} — LIMIT order missed "
+                  f"(limit_fillable=0); skipping OGD update (phantom-trade gate)")
+            return
 
         if not fs_json:
             print(f"[ADAPTIVE] #{sig_id} — no feature_scores_json stored; skipping OGD update")
@@ -1864,6 +1890,19 @@ def fetch_binance_candles(symbol, interval, limit):
                 headers=HEADERS, timeout=10)
             r.raise_for_status(); raw=r.json()
             if not raw: return {}
+            # M-NEW-6 fix (cycle-9 audit 2026-05-28): Binance can return HTTP
+            # 200 OK with a JSON error body (e.g. {"code": -1121, "msg":
+            # "Invalid symbol."}). raise_for_status() only catches 4xx/5xx
+            # so the error body slips past, the for-loop below silently
+            # skips every "candle" (each "c" is a dict key string), and we
+            # return {} with no diagnostic. Log the error code/message so
+            # the operator can see WHICH symbol/interval Binance rejected.
+            if isinstance(raw, dict):
+                _code = raw.get("code", "?")
+                _msg  = raw.get("msg", str(raw))[:200]
+                print(f"[BINANCE-ERR] {symbol} {interval}: HTTP 200 with error "
+                      f"body code={_code} msg={_msg!r} — treating as no-data")
+                return {}
             # OHLCV field validation — reject candles with zero or invalid prices
             validated = []
             for c in raw:
@@ -1980,8 +2019,10 @@ def update_token_state(token):
                 state["last_5m_fetched_at"] = time.time()
             elif tf=="1h":
                 state["data_gap_bars_1h"] = data.get("max_gap_bars", 0)
+                state["last_1h_fetched_at"] = time.time()  # M-NEW-5
             elif tf=="4h":
                 state["data_gap_bars_4h"] = data.get("max_gap_bars", 0)
+                state["last_4h_fetched_at"] = time.time()  # M-NEW-5
         time.sleep(0.3)
     if any_ok:
         state["last_fetched_at"] = time.time()
@@ -4027,6 +4068,17 @@ def main():
                 # Uses STATE[token]["consumed_h4_crt"] (persisted across
                 # restarts via state_store) for one-shot mitigation.
                 if ENABLE_H4_CRT:
+                    # M-NEW-5 fix (cycle-9 audit 2026-05-28): per-TF stale
+                    # guard for the CRT path. The 5M scanner already has its
+                    # stale gate at line 3996; the CRT path consumes 4H +
+                    # 1H directly so it needs its own. Without this, a frozen
+                    # 4H candle stream (5M fetches succeed, 4H fails) would
+                    # still let CRT signals fire from stale H4 data.
+                    _4h_age = time.time() - STATE[token].get("last_4h_fetched_at", 0.0)
+                    if STATE[token].get("last_4h_fetched_at", 0.0) > 0 and _4h_age > STALE_CANDLE_THRESHOLD:
+                        print(f"[STALE-4H] {token}: 4h candles {_4h_age:.0f}s old "
+                              f"(>{STALE_CANDLE_THRESHOLD}s) — skipping CRT scan")
+                        continue
                     _c5m = STATE[token]["candles"]["5m"]
                     _c4h = STATE[token]["candles"]["4h"]
                     _c1h_live = STATE[token]["candles"].get("1h", {})
@@ -4104,6 +4156,27 @@ def main():
                             # before returning result — so if these gates
                             # reject, the zone is ALREADY mitigated and won't
                             # re-fire on subsequent cycles.
+                            #
+                            # M-NEW-4 fix (cycle-9 audit 2026-05-28): also apply
+                            # the macro event gate. Pre-fix, the CRT path
+                            # never consulted MACRO_FILTER_ENABLED while the
+                            # 5M_SWEEP path did at crypto_alert.py:2578 —
+                            # FOMC/CPI/NFP windows would silently allow CRT
+                            # signals through. Backtest asymmetry is
+                            # intentional: backtest has no macro calendar
+                            # lookup yet — see docs/LIVE_BACKTEST_PARITY_ROADMAP.md.
+                            if MACRO_FILTER_ENABLED:
+                                _macro_in, _macro_name = _is_macro_window(
+                                    datetime.now(timezone.utc),
+                                    pre_hours=MACRO_PRE_WINDOW_H,
+                                    post_hours=MACRO_POST_WINDOW_H,
+                                )
+                                if _macro_in:
+                                    if MACRO_ADVISORY_ONLY:
+                                        print(f"[MACRO-ADVISORY] {token} CRT: near {_macro_name} — signal allowed (advisory mode)")
+                                    else:
+                                        print(f"[MACRO-BLOCK] {token} CRT: blocked near {_macro_name}")
+                                        continue
                             _crt_ks_ok, _crt_ks_reason = check_kill_switches(token)
                             if not _crt_ks_ok:
                                 print(f"[{datetime.now().strftime('%H:%M')}] {token} CRT KILL SWITCH — {_crt_ks_reason}")

@@ -724,7 +724,16 @@ class AdaptiveWeightEngine:
         # caller's contract is `profit_pct as fraction` per the comment
         # above; this alert catches contract violations silently corrupting
         # the gradient signal.
-        if abs(reward) > 1.2:
+        # M-NEW-2 fix (cycle-9 audit 2026-05-28): conjunction gate. Pre-fix
+        # this warned on every legitimate large CRT win — e.g. a clean
+        # PARTIAL_TP2 with profit_pct=0.06 (fraction = 6% P&L) and reward=1.5
+        # would spam the misleading "verify profit_pct is a fraction" message
+        # even though the units were correct. Real contract-violation
+        # (profit_pct passed as percentage instead of fraction) only triggers
+        # outsized reward when the underlying profit_pct also exceeds the
+        # plausible range — adding `|profit_pct| > 0.5` (= 50% P&L) suppresses
+        # the false-alarm path without losing the genuine-contract-bug signal.
+        if abs(reward) > 1.2 and profit_pct is not None and abs(profit_pct) > 0.5:
             print(f"[ADAPTIVE] WARN reward magnitude {reward:+.3f} on {token} "
                   f"outcome={outcome} profit_pct={profit_pct} — verify "
                   f"profit_pct is a fraction (e.g. -0.0085 for -0.85% P&L), "
@@ -746,6 +755,18 @@ class AdaptiveWeightEngine:
             self._n[token] = n + 1
             if persist:
                 self._persist_token(token)
+                # M-NEW-7 fix (cycle-9 audit 2026-05-28): record a forensic
+                # snapshot row even when the gradient step is suppressed.
+                # Pre-fix, the first OGD_WARMUP_FLOOR-1 closes per token never
+                # appeared in weight_history → dashboard "OGD updates over
+                # time" chart had silent gaps and operator couldn't see "this
+                # token received closes but didn't learn yet." Sparse row
+                # (gradient_l1 = 0, weight_before == weight_after) keeps the
+                # timeline honest.
+                self._snapshot_weights(
+                    trigger="warmup_skip", token_filter=token,
+                    reward=reward, profit_pct=profit_pct, regime=regime,
+                )
                 print(f"[ADAPTIVE] {token} — accumulating samples ({n+1}/{OGD_WARMUP_FLOOR}) "
                       f"before OGD warmup activates")
             return
@@ -1235,8 +1256,29 @@ class AdaptiveWeightEngine:
         import time as _time
         now = _time.time()
 
-        # Protect freshly learned weights (M-I)
-        if now - self._last_update_time.get(token, 0.0) < 7 * 86400:
+        # Protect freshly learned weights (M-I).
+        # M-NEW-8 investigation outcome (cycle-9 audit 2026-05-28): TON's
+        # `last_decay_times = 0.0` was flagged as a potential anomaly because
+        # TON had 5+ OGD updates yet no decay timestamp. The investigation
+        # confirmed this is CORRECT BEHAVIOR — the M-I 7-day guard below
+        # suppresses decay for any token with a recent OGD update. The
+        # last_decay_time stays at its init value until 7 days pass without
+        # learning. We add a one-shot debug log here so the suppression is
+        # visible in the bot.log instead of silently invisible.
+        _last_upd = self._last_update_time.get(token, 0.0)
+        if now - _last_upd < 7 * 86400:
+            if _last_upd > 0:
+                # Only log when we actually have a recent update — not the
+                # cold-start case where _last_upd is 0 and decay correctly
+                # passes through.
+                _hours_since = (now - _last_upd) / 3600.0
+                _hours_left  = (7 * 86400 - (now - _last_upd)) / 3600.0
+                # Single-line FYI (rate-limited indirectly via min_interval_sec
+                # gate up-stream — apply_decay_if_due is only invoked from the
+                # main loop every PERF_CHECK_INTERVAL anyway).
+                print(f"[ADAPTIVE] {token} decay suppressed — M-I 7-day guard "
+                      f"({_hours_since:.1f}h since last OGD update, "
+                      f"{_hours_left:.1f}h until decay re-enables)")
             return False
 
         # Rate-limit between decay applications

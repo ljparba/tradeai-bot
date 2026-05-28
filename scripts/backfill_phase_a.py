@@ -38,7 +38,17 @@ import requests
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(_ROOT, "data", "signals.db")
 BINANCE_KLINES = "https://api.binance.com/api/v3/klines"
-DEFAULT_WINDOW_MIN = 30  # mirrors config.CRT_LIMIT_FILL_WINDOW_MIN default
+
+# M-NEW-3 fix (cycle-9 audit 2026-05-28): import the canonical window from
+# config so the backfill script can never drift from the live monitor's
+# evaluation window. Pre-fix this was hardcoded to 30 — would silently
+# disagree with config.CRT_LIMIT_FILL_WINDOW_MIN if the operator tuned it.
+sys.path.insert(0, _ROOT)
+try:
+    from config import CRT_LIMIT_FILL_WINDOW_MIN as _CFG_WINDOW
+    DEFAULT_WINDOW_MIN = int(_CFG_WINDOW)
+except Exception:
+    DEFAULT_WINDOW_MIN = 30  # last-resort fallback if config import fails
 
 
 def _binance_5m_klines(token: str, start_ms: int, end_ms: int) -> list:
