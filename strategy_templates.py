@@ -99,26 +99,39 @@ TEMPLATE_REGISTRY = [
     # as the +14.6pp WR axis — these templates encode that axis.
     {
         "id":          "CRT_A_FVG_ALIGNED",
-        "name":        "CRT Tier A — FVG + Wyckoff aligned",
+        "name":        "CRT Tier A — FVG + MSS≥MEDIUM",
         "tier":        "A",
-        "description": ("FVG confluence + MSS≥MEDIUM + Wyckoff phase aligned "
-                        "with direction (NOT TRANSITION). Highest-quality CRT setup."),
+        # A1/A2 redefinition (2026-05-28, post-Run #146 validation):
+        # Wyckoff requirement DROPPED. Empirical evidence: 9 FVG-Wyckoff-
+        # aligned signals scored 44.4% WR (the worst tier) while 19 FVG-
+        # non-aligned scored 60.5%. Tier A now keys on FVG confluence +
+        # MSS≥MEDIUM only. Template ID retained for back-compat.
+        "description": ("FVG confluence + MSS≥MEDIUM. Highest-quality CRT setup. "
+                        "(A1/A2: Wyckoff alignment empirically removed as a "
+                        "tier discriminator after Run #146.)"),
         "live_allowed": 1,
     },
     {
         "id":          "CRT_B_OB_HIGH_MSS",
-        "name":        "CRT Tier B — OB + HIGH MSS",
+        "name":        "CRT Tier B — OB + MSS=HIGH",
         "tier":        "B",
-        "description": ("OB confluence with HIGH MSS quality + Wyckoff phase "
-                        "non-TRANSITION. OB without FVG accepted only when MSS is HIGH."),
+        # A1/A2 (2026-05-28): Wyckoff requirement DROPPED here too.
+        # Description simplified to "OB requires HIGH MSS to compensate
+        # for the missing FVG axis discriminator."
+        "description": ("OB confluence + MSS=HIGH. Strong displacement "
+                        "compensates for the missing FVG axis discriminator."),
         "live_allowed": 1,
     },
     {
         "id":          "CRT_B_FVG_RELAXED",
-        "name":        "CRT Tier B — FVG (any MSS, any phase)",
+        "name":        "CRT Tier B — FVG (DEPRECATED A1/A2)",
         "tier":        "B",
-        "description": ("FVG confluence + any MSS quality + any Wyckoff phase. "
-                        "Captures FVG setups that didn't clear the Tier A alignment bar."),
+        # A1/A2 (2026-05-28): retired from active classifier. Kept in
+        # registry so historical signals (DB rows pre-redefinition) still
+        # validate. evaluate_crt_templates no longer emits this template.
+        "description": ("DEPRECATED post-A1/A2. Historical-only template ID. "
+                        "Tier A's revised FVG+MSS≥MEDIUM definition absorbs the "
+                        "entire former scope of this template."),
         "live_allowed": 1,
     },
     {
@@ -427,12 +440,24 @@ def _crt_wyckoff_aligned(direction: str, phase: str) -> bool:
 
 def _score_crt_a(f: Dict[str, Any]) -> TemplateMatch:
     """
-    CRT Tier A — FVG confluence + MSS≥MEDIUM + Wyckoff phase aligned.
+    CRT Tier A — FVG confluence + MSS≥MEDIUM (no Wyckoff requirement).
 
-    Required (3/3):
+    A1/A2 revision (2026-05-28, post-B-6 backtest validation on Run #146,
+    n=95): the original 3/3 definition that REQUIRED Wyckoff phase
+    alignment empirically produced the WORST tier (44.4% WR vs 56-60% for
+    B/C). Cross-tab showed FVG signals with phase-aligned Wyckoff under-
+    performed FVG signals with COUNTER (56%) or TRANSITION (64%) phase by
+    ~15-20pp WR. Confirms the broader CLAUDE.md finding that Wyckoff phase
+    as currently detected lacks predictive power on CRT setups (a sweep-
+    reversal pattern fundamentally conflicts with "trade in phase
+    direction"). Wyckoff stays as informational metadata in entry_type but
+    is no longer used as a tier discriminator. Template ID name retained
+    for back-compat with historical signals; semantic meaning is now
+    "high-quality FVG CRT setup."
+
+    Required (2/2):
       1. confluence_type == FVG
       2. mss_quality ≥ MEDIUM
-      3. wyckoff_phase aligned with direction (NOT TRANSITION)
 
     Bonuses (max +0.20 total):
       +0.10  4H bias aligned with direction
@@ -442,7 +467,6 @@ def _score_crt_a(f: Dict[str, Any]) -> TemplateMatch:
     direction      = f.get("direction",      "BUY")
     confluence     = f.get("confluence_type", "")
     mss_quality    = f.get("mss_quality",    "NONE")
-    wyckoff_phase  = f.get("wyckoff_phase",  "?")
     bias_4h        = f.get("bias_4h",        "NEUTRAL")
     session        = f.get("session",        "UNKNOWN")
 
@@ -453,8 +477,6 @@ def _score_crt_a(f: Dict[str, Any]) -> TemplateMatch:
         hit += 1; matched.append("confluence=FVG")
     if QUALITY_RANK.get(mss_quality, 0) >= QUALITY_RANK["MEDIUM"]:
         hit += 1; matched.append(f"MSS={mss_quality}")
-    if _crt_wyckoff_aligned(direction, wyckoff_phase):
-        hit += 1; matched.append(f"wyckoff={wyckoff_phase}")
 
     bonus = 0.0
     if (direction == "BUY"  and bias_4h == "BULLISH") or \
@@ -465,30 +487,34 @@ def _score_crt_a(f: Dict[str, Any]) -> TemplateMatch:
     if session in ("LONDON_KZ", "NY_AM_KZ"):
         bonus += 0.05; matched.append("top_killzone_bonus")
 
-    base  = hit / 3.0
+    base  = hit / 2.0
     score = min(base + bonus * base, 1.0)
     return TemplateMatch(
         template_id="CRT_A_FVG_ALIGNED",
-        template_name="CRT Tier A — FVG + Wyckoff aligned",
+        template_name="CRT Tier A — FVG + MSS≥MEDIUM",
         tier="A",
         score=round(score, 4),
-        required_hit=hit, required_need=3,
+        required_hit=hit, required_need=2,
         confluences_matched=matched, live_allowed=True,
     )
 
 
 def _score_crt_b_ob_high(f: Dict[str, Any]) -> TemplateMatch:
     """
-    CRT Tier B (OB variant) — OB confluence + HIGH MSS + non-TRANSITION phase.
+    CRT Tier B — OB confluence + MSS=HIGH (no Wyckoff requirement).
 
-    Required (3/3):
+    A1/A2 revision (2026-05-28): non-TRANSITION Wyckoff requirement dropped
+    in lockstep with Tier A. Population-level cross-tab showed alignment
+    has near-zero independent discriminating power once confluence+MSS are
+    controlled. Strong MSS displacement supplies the quality that FVG would
+    otherwise contribute on its own.
+
+    Required (2/2):
       1. confluence_type == OB
-      2. mss_quality == HIGH       (must compensate for OB-only confluence)
-      3. wyckoff_phase != TRANSITION (any decidable phase, no alignment required)
+      2. mss_quality == HIGH
     """
     confluence    = f.get("confluence_type", "")
     mss_quality   = f.get("mss_quality",   "NONE")
-    wyckoff_phase = f.get("wyckoff_phase", "?")
     bias_4h       = f.get("bias_4h",       "NEUTRAL")
     direction     = f.get("direction",     "BUY")
     session       = f.get("session",       "UNKNOWN")
@@ -500,8 +526,6 @@ def _score_crt_b_ob_high(f: Dict[str, Any]) -> TemplateMatch:
         hit += 1; matched.append("confluence=OB")
     if mss_quality == "HIGH":
         hit += 1; matched.append("MSS=HIGH")
-    if wyckoff_phase not in ("TRANSITION", "?", ""):
-        hit += 1; matched.append(f"wyckoff={wyckoff_phase}")
 
     bonus = 0.0
     if (direction == "BUY"  and bias_4h == "BULLISH") or \
@@ -510,29 +534,42 @@ def _score_crt_b_ob_high(f: Dict[str, Any]) -> TemplateMatch:
     if session in ("LONDON_KZ", "NY_AM_KZ", "ASIA_KZ"):
         bonus += 0.05; matched.append(f"session_bonus={session}")
 
-    base  = hit / 3.0
+    base  = hit / 2.0
     score = min(base + bonus * base, 1.0)
     return TemplateMatch(
         template_id="CRT_B_OB_HIGH_MSS",
-        template_name="CRT Tier B — OB + HIGH MSS",
+        template_name="CRT Tier B — OB + MSS=HIGH",
         tier="B",
         score=round(score, 4),
-        required_hit=hit, required_need=3,
+        required_hit=hit, required_need=2,
         confluences_matched=matched, live_allowed=True,
     )
 
 
 def _score_crt_b_fvg_relaxed(f: Dict[str, Any]) -> TemplateMatch:
     """
-    CRT Tier B (FVG variant) — FVG confluence + any MSS + any Wyckoff phase.
+    DEPRECATED 2026-05-28 (A1/A2 redefinition).
+
+    Pre-redefinition this template caught "FVG-confluence setups that missed
+    Tier A's Wyckoff-alignment requirement." Under A1/A2 the Wyckoff gate
+    was dropped from Tier A — Tier A is now FVG + MSS≥MEDIUM and absorbs
+    this template's entire historical scope (in Run #146 every FVG signal
+    carried MSS≥MEDIUM, so this template produced zero unique matches under
+    A1/A2 anyway).
+
+    Function retained:
+      - The template ID stays in CRT_TEMPLATE_IDS / TEMPLATE_REGISTRY so
+        historical signals with matched_template_id='CRT_B_FVG_RELAXED' on
+        the live DB and backtest_signals tables still validate against
+        Phase 5A _KNOWN_TEMPLATES and render correctly on the dashboard.
+      - The scoring function stays defined so any out-of-tree consumer that
+        imports it doesn't break.
+      - It is REMOVED from evaluate_crt_templates() so NEW signals never
+        receive this classification going forward.
 
     Required (2/2):
       1. confluence_type == FVG
       2. mss_quality ≥ LOW    (any valid MSS — relaxed vs Tier A's MEDIUM bar)
-
-    Catches FVG setups that miss Tier A's Wyckoff-alignment requirement.
-    The FVG axis on its own already carries +14.6pp WR, so even without phase
-    alignment the setup is worth live consideration.
     """
     confluence  = f.get("confluence_type", "")
     mss_quality = f.get("mss_quality",   "NONE")
@@ -616,10 +653,12 @@ def evaluate_crt_templates(features: Dict[str, Any]) -> List[TemplateMatch]:
     List[TemplateMatch] — sorted; empty list on exception (never raises).
     """
     try:
+        # A1/A2 redefinition (2026-05-28): _score_crt_b_fvg_relaxed retired
+        # from active classification (see its docstring). Tier A's revised
+        # 2/2 (FVG + MSS≥MEDIUM) absorbs its entire scope.
         matches = [
             _score_crt_a(features),
             _score_crt_b_ob_high(features),
-            _score_crt_b_fvg_relaxed(features),
             _score_crt_c(features),
         ]
         matches.sort(key=lambda m: (

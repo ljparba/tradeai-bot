@@ -141,7 +141,9 @@ from crt_engine import (
 # directly from ict_engine (crypto_alert.py doesn't re-export it).
 from ict_engine import ICT_SL_BUFFER_PCT
 from strategy_engine import BACKTEST_CONFIG, LIVE_CONFIG, StrategyConfig, evaluate_setup, meets_quality, QUALITY_RANK
-from strategy_templates import evaluate_confluences_vs_templates
+from strategy_templates import (evaluate_confluences_vs_templates,
+                                # Phase B (2026-05-28) — CRT tier classifier
+                                evaluate_crt_templates)
 from adaptive_engine import (
     _utc_to_session, label_sample_size, SAMPLE_N_OBSERVE, weight_engine,
     _QUALITY_SCORE, _SESSION_SCORE, DEFAULT_WEIGHTS as AE_DEFAULT_WEIGHTS,
@@ -1606,6 +1608,24 @@ def run_backtest_token_h4_crt(token, c5m, c4h, c1h=None, config=None):
         # NEW-4 fix (Option H 2026-05-27): use moved helper
         _crt_conf = crt_quality_to_confidence(_mss_q, _fvg_q)
 
+        # Phase B (2026-05-28): CRT tier classification (hoisted from the
+        # signal-append below to avoid double-evaluating). See live path at
+        # crypto_alert.py for the symmetric call.
+        _crt_bt_features = {
+            "direction":       direction,
+            "confluence_type": setup['confluence']['type'],
+            "mss_quality":     _mss_q,
+            "wyckoff_phase":   wyckoff_context,
+            "bias_4h":         bias_4h,
+            "session":         _utc_to_session(ts.hour),
+        }
+        _crt_bt_matches = evaluate_crt_templates(_crt_bt_features)
+        _crt_bt_best    = next((m for m in _crt_bt_matches if m.is_match), None)
+        _crt_bt_tmpl_id     = _crt_bt_best.template_id if _crt_bt_best else "NONE"
+        _crt_bt_tmpl_scores = json.dumps({
+            m.template_id: round(m.score, 4) for m in _crt_bt_matches
+        })
+
         signals.append({
             "token":           token,
             "signal":          direction,
@@ -1656,8 +1676,15 @@ def run_backtest_token_h4_crt(token, c5m, c4h, c1h=None, config=None):
             "session":         _utc_to_session(ts.hour),
             "day_of_week":     ts.weekday(),
             "hour_utc":        ts.hour,
-            "matched_template_id":  "NONE",
-            "template_scores_json": None,
+            # Phase B (2026-05-28): classify CRT signal into Tier A/B/C
+            # using evaluate_crt_templates (same classifier as live path at
+            # crypto_alert.py:scan_h4_crt_for_token). Without this, backtest
+            # CRT signals would all carry matched_template_id=NONE →
+            # tier-calibrator agent would have nothing to validate.
+            # The actual call is hoisted above to _crt_bt_tmpl_id /
+            # _crt_bt_tmpl_scores to avoid double-evaluating.
+            "matched_template_id":  _crt_bt_tmpl_id,
+            "template_scores_json": _crt_bt_tmpl_scores,
             "mfe_pct":         _mfe_pct,
             "mae_pct":         _mae_pct,
             "realized_r":      _real_r,
