@@ -161,7 +161,12 @@ N_BONUS_ALPHA = _env_float("EXPLORER_N_BONUS_ALPHA", 2.0)
 
 ANTI_PATTERN_LOCKS = {
     "ICT_SWING_N":      2,    # 3+ proven net-negative (Cycle 1b P-1 + 1c TP-5c')
-    "ICT_MIN_RR_GATE":  1.5,  # >=2.0 catastrophic per Cycle 1b
+    # 2026-05-28 — lowered from 1.5 to 1.3 by operator decision after cycle-9
+    # H-NEW-3 fix cut CRT signal output -77%. Anti-pattern threshold remains
+    # ≥ 2.0 (catastrophic per Cycle 1b); 1.3 is below the anti-pattern band
+    # but defensibly above net-negative-EV territory (BEW = 47.8% at SL=2%,
+    # fees=0.20% — still below operator's MAX_BREAKEVEN_WR=0.60).
+    "ICT_MIN_RR_GATE":  1.3,
 }
 
 # Fix G-1 (explorer audit 2026-05-27): CRT-side anti-pattern locks. These are
