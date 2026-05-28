@@ -1790,46 +1790,46 @@ def send_exit_suggestion(sig, assessment, price):
     dir_arrow = "UP" if direction == "BUY" else "DOWN"
     pnl_sign  = "+" if pnl >= 0 else ""
 
+    # 2026-05-28 redesign — match the clean signal-alert visual style.
+    # Drop Conf/Regime (on dashboard), drop <pre> tables, use emoji bullets.
     if verdict == "TAKE_PROFIT":
-        header = "TAKE PROFIT"
-        note   = (f"Price reached {coverage:.0f}% of TP1 target - strong exit zone. "
-                  f"Consider closing full position or majority here.")
+        header_emoji = "\U0001F4B0"  # 💰
+        header_text  = "TAKE PROFIT"
+        note   = (f"Price reached <b>{coverage:.0f}%</b> of TP1 — strong exit zone. "
+                  f"Consider closing the full position or majority here.")
     elif verdict == "CONSIDER_PARTIAL":
-        header = "PARTIAL CLOSE"
-        note   = (f"Take 30-50% off the table here. "
-                  f"Let remainder run toward TP1 (${tp1:.4f}).")
+        header_emoji = "✂️"  # ✂️
+        header_text  = "PARTIAL CLOSE"
+        note   = (f"Take <b>30-50%</b> off the table here. "
+                  f"Let the remainder run toward TP1 (${tp1:.4f}).")
     else:
-        header = "WATCH CLOSELY"
-        note   = "No action required yet - conditions shifting. Monitor next few candles."
+        header_emoji = "\U0001F440"  # 👀
+        header_text  = "WATCH CLOSELY"
+        note   = "No action required yet — conditions shifting. Monitor the next few candles."
 
-    _time_str = f"{time_rem}h left" if time_rem is not None else ""
     msg = (
-        f"<b>{_h(header)}  -  {_h(token)} {_h(direction)} #{_h(sig_id)}</b>\n"
-        "\n<pre>"
-        f"Entry      ${entry:>11.4f}\n"
-        f"Now        ${price:>11.4f}\n"
-        f"TP1 cov    {coverage:>4.0f}%\n"
-        f"Float PnL  {pnl_sign}{pnl:.2f}%\n"
-        f"Conf       {_h(conf)}/10\n"
-        f"Regime     {_h(regime)}"
-        + (f"\nExpires    {_h(_time_str)}" if _time_str else "")
-        + "</pre>\n"
+        f"{header_emoji} <b>{_h(header_text)} — {_h(token)} "
+        f"{_h(direction)} #{_h(sig_id)}</b>\n"
+        f"\n\U0001F3AF <b>Entry:</b> ${entry:.4f}"
+        f"\n\U0001F4CA <b>Now:</b> ${price:.4f}"
+        f"\n\U0001F4C8 <b>Floating P&amp;L:</b> {pnl_sign}{pnl:.2f}%"
+        f"\n\U0001F4CD <b>TP1 coverage:</b> {coverage:.0f}%"
     )
+    if time_rem is not None:
+        msg += f"\n⏰ <b>Expires in:</b> {_h(time_rem)}h"
 
     if signals:
-        msg += f"\n<b>Exit signals firing ({_h(len(signals))}):</b>\n"
+        msg += f"\n\n⚠️ <b>Exit signals firing ({_h(len(signals))}):</b>"
         for s in signals:
-            msg += f"  - {_h(s)}\n"
+            msg += f"\n• {_h(s)}"
     else:
-        msg += "\n<i>No reversal signals - purely coverage-based.</i>\n"
+        msg += "\n\n<i>No reversal signals — purely coverage-based.</i>"
 
     msg += (
-        f"\n<b>Verdict</b>\n{_h(note)}\n"
-        "\n<pre>"
-        f"TP1   ${tp1:.4f}\n"
-        f"TP2   ${tp2:.4f}"
-        "</pre>\n"
-        "\n<i>Analysis only. Your call.</i>"
+        f"\n\n✅ <b>Verdict:</b>\n{note}"
+        f"\n\n\U0001F3AF <b>TP1:</b> ${tp1:.4f}"
+        f"\n\U0001F3AF <b>TP2:</b> ${tp2:.4f}"
+        "\n\n<i>Analysis only. Your call.</i>"
     )
 
     if len(msg) > 4000:
