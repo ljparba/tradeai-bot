@@ -631,9 +631,10 @@ def compute_crt_trade_economics(direction: str, entry_price: float,
     if sl_pct_abs > MAX_SL_PCT:
         return None  # SL too wide — structural risk-management ceiling
 
-    # H-NEW-3 fix: minimum R:R gate mirrors ICT_MIN_RR_GATE = 1.5 used by the
-    # 5M_SWEEP path. A TP1 ≥ 1.5× SL distance is the floor for a setup to be
-    # economically worth taking once fees are baked in.
+    # H-NEW-3 fix: minimum R:R gate mirrors ICT_MIN_RR_GATE (env-overridable,
+    # default 1.3 as of 2026-05-28 — lowered from 1.5 after the post-cycle-9
+    # signal-count drop). A TP1 ≥ 1.3× SL distance is the floor for a setup
+    # to be economically worth taking once fees are baked in.
     if gross_sl != 0 and (abs(gross_tp1) / abs(gross_sl)) < ICT_MIN_RR_GATE:
         return None
 

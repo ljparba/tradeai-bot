@@ -71,7 +71,15 @@ ICT_SL_BUFFER_PCT          = 0.003  # SL placed 0.3% beyond swept wick (structur
 ICT_FVG_SIZE_BONUS_THRESHOLD = 0.003  # FVG must be ≥0.3% of price to earn confidence bonus
 ICT_SMT_LOOKBACK           = 8   # bars to scan backward for SMT sweep confirmation
 ICT_SMT_REF_HORIZON        = 40  # reference window (bars) to check BTC did not sweep
-ICT_MIN_RR_GATE            = 1.5 # minimum TP1 R:R gate — matches MIN_TP1_MULT floor
+# 2026-05-28 — env-overridable + lowered default 1.5 → 1.3 per operator decision
+# after cycle-9 H-NEW-3 fix cut CRT signal output from ~416 to ~95 (−77%).
+# Rationale: 1.5 was calibrated for 5M_SWEEP era (sparse signals, high per-signal
+# Sharpe). CRT is a higher-frequency scanner (~10-20× more candidate setups);
+# the 1.5 floor was rejecting marginal-but-defensible setups. Lowering to 1.3
+# admits setups where TP1 is 1.3× SL distance (still net-positive after fees
+# at MAX_BREAKEVEN_WR=0.60). Tuneable via env in case operator wants to push
+# back up. Anti-pattern: ≥ 2.0 catastrophic per CLAUDE.md §7.
+ICT_MIN_RR_GATE            = _env_float("ICT_MIN_RR_GATE", 1.3)
 
 def find_ict_swings(highs, lows, n=ICT_SWING_N):
     """Confirmed swing highs/lows with n-bar confirmation lag (non-repainting).
