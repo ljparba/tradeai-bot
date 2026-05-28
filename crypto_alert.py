@@ -3675,26 +3675,53 @@ def maybe_send_daily_summary(prices):
         conn2.close()
     except: pass
 
+    # 2026-05-28 redesign — match the clean Telegram style used across the
+    # rest of the bot (signal alert, exit suggestion, heartbeat, watchdog,
+    # explorer). Drops <pre> blocks (no copy button), uses emoji-bulleted
+    # fields with ━━━ section dividers.
     token_rows = []
     for token in BINANCE_TOKENS:
-        price=prices.get(token,0.0)
-        if price<=0: continue
-        closes=STATE[token]["candles"]["15m"].get("closes",[])[:-1]  # exclude forming bar
-        rsi_v=calculate_rsi(closes) if closes else 50.0
-        mtf=get_mtf_bias(token)
-        reg=STATE[token]["last_regime"]
-        # Fall back to last DB regime if in-memory is still UNKNOWN
+        price = prices.get(token, 0.0)
+        if price <= 0:
+            continue
+        closes = STATE[token]["candles"]["15m"].get("closes", [])[:-1]  # exclude forming bar
+        rsi_v  = calculate_rsi(closes) if closes else 50.0
+        mtf    = get_mtf_bias(token)
+        reg    = STATE[token]["last_regime"]
         if reg == "UNKNOWN":
             reg = db_regimes.get(token, "UNKNOWN")
+        # Emoji prefix per MTF bias for at-a-glance scan
+        _mtf_b = mtf['bias']
+        _mtf_emoji = ("\U0001F4C8" if _mtf_b == "BULLISH"
+                      else "\U0001F4C9" if _mtf_b == "BEARISH"
+                      else "↔️")  # NEUTRAL or other
         token_rows.append(
-            f"{_h(token):<5} ${price:>10.4f}   RSI {_h(int(rsi_v)):>2}   "
-            f"MTF {_h(mtf['bias']):<10}   {_h(reg)}"
+            f"• <b>{_h(token)}</b>  ${price:.4f}  ·  RSI {_h(int(rsi_v))}  ·  "
+            f"{_mtf_emoji} {_h(_mtf_b)}  ·  {_h(reg)}"
         )
+
+    # Parse db_line into structured fields for the header card.
+    # Format: "{total} signals | {W}W/{P}P/{L}L/{E}E ({WR}% WR) | {opens} open"
+    try:
+        _stats_summary = (
+            f"\U0001F4CA <b>Signals:</b> {_h(total)} total · "
+            f"{_h(wins)}W / {_h(partial)}P / {_h(losses)}L / {_h(expired)}E"
+            f"\n\U0001F3AF <b>Win rate:</b> {_h(wr)}%"
+            f"\n\U0001F4CD <b>Open:</b> {_h(opens)}"
+        )
+    except Exception:
+        # Fallback to the parsed db_line if individual fields are missing
+        _stats_summary = f"\U0001F4CA {_h(db_line)}"
+
     msg = (
-        f"<b>Daily Summary  -  {_h(now.strftime('%Y-%m-%d'))}</b>\n\n"
-        f"<pre>{_h(db_line)}</pre>\n"
-        "<pre>" + "\n".join(token_rows) + "</pre>\n"
-        "<i>Analysis only. Your call.</i>"
+        f"\U0001F4C5 <b>Daily Summary — {_h(now.strftime('%Y-%m-%d'))}</b>\n"
+        f"\n{_TG_HR}\n"
+        f"\n{_stats_summary}"
+        f"\n\n{_TG_HR}\n"
+        f"\n\U0001F4CB <b>Per-Token Snapshot:</b>\n"
+        + "\n".join(token_rows)
+        + f"\n\n{_TG_HR}\n"
+        + "\n<i>Analysis only. Your call.</i>"
     )
     send_telegram(msg); print("[DAILY SUMMARY SENT]")
 
