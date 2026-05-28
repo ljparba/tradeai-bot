@@ -1153,15 +1153,15 @@ def _objective_factory(study_name: str, guard: _GuardState, sess: dict):
                     promoted = True
                     print(f"[promote] AUTO_PROMOTED trial #{trial.number} -> new baseline pin "
                           f"CPCV={m.get('cpcv_mean')} DSR={m.get('dsr')} Sharpe={m.get('sharpe')}")
+                    _exp_hr_p = "━" * 22
                     _telegram(
-                        "<b>Explorer AUTO-PROMOTED</b>\n\n"
-                        f"Trial #{_h(trial.number)} is the new baseline pin.\n\n"
-                        "<pre>"
-                        f"CPCV     {_h(m.get('cpcv_mean'))}%\n"
-                        f"DSR      {_h(m.get('dsr'))}%\n"
-                        f"Sharpe   {_h(m.get('sharpe'))}\n"
-                        f"n        {_h(m.get('n'))}"
-                        "</pre>"
+                        "\U0001F389 <b>Explorer AUTO-PROMOTED</b>\n"
+                        f"\n{_exp_hr_p}\n"
+                        f"\n\U0001F947 <b>Trial #{_h(trial.number)}</b> is the new baseline pin"
+                        f"\n\n\U0001F4CA <b>CPCV:</b> {_h(m.get('cpcv_mean'))}%"
+                        f"\n\U0001F4CC <b>DSR:</b> {_h(m.get('dsr'))}%"
+                        f"\n\U0001F4C8 <b>Sharpe:</b> {_h(m.get('sharpe'))}"
+                        f"\n\U0001F9EA <b>n:</b> {_h(m.get('n'))}"
                     )
                     guard.pin_dsr = _read_pin_dsr()
                     guard.pin_run = _read_pin_run()
@@ -1185,12 +1185,13 @@ def _objective_factory(study_name: str, guard: _GuardState, sess: dict):
                     # spam if a persistent issue (e.g., promote_baseline.py
                     # subprocess crash) hits every PASS trial.
                     if not sess.get("promote_failure_telegram_sent"):
+                        _exp_hr_pf = "━" * 22
                         _telegram(
-                            "<b>Explorer AUTO-PROMOTE FAILED</b>\n\n"
-                            "<pre>"
-                            f"{_h(promo_result)}"
-                            "</pre>\n"
-                            "Further failures this session will be console-only."
+                            "❌ <b>Explorer AUTO-PROMOTE FAILED</b>\n"
+                            f"\n{_exp_hr_pf}\n"
+                            f"\n\U0001F4DD <b>Reason:</b> {_h(promo_result)}"
+                            f"\n\n{_exp_hr_pf}\n"
+                            "\n<i>Further failures this session will be console-only.</i>"
                         )
                         sess["promote_failure_telegram_sent"] = True
                         _write_session(sess)
@@ -1207,15 +1208,17 @@ def _objective_factory(study_name: str, guard: _GuardState, sess: dict):
             print(f"\n[explorer] GUARD TRIPPED: {guard_msg}")
             print(f"[explorer] No more trials this session. Optuna study preserved.")
             sys.stdout.flush()
+            _exp_hr_g = "━" * 22
             _telegram(
-                "<b>Explorer PAUSED  -  anti-overfit guard tripped</b>\n\n"
-                "<pre>"
-                f"Reason    {_h(guard_msg)}\n"
-                f"Trials    {_h(sess.get('trials_completed'))} done this session\n"
-                f"Best      CPCV {_h(sess.get('best_cpcv'))}%  DSR {_h(sess.get('best_dsr'))}%"
-                "</pre>\n"
-                "Optuna study preserved. Investigate cause, then resume with:\n"
-                "<code>sudo systemctl start tradeai-explorer</code>"
+                "\U0001F6A7 <b>Explorer PAUSED — anti-overfit guard tripped</b>\n"
+                f"\n{_exp_hr_g}\n"
+                f"\n⚠️ <b>Reason:</b> {_h(guard_msg)}"
+                f"\n\U0001F9EA <b>Trials:</b> {_h(sess.get('trials_completed'))} done this session"
+                f"\n\U0001F947 <b>Best:</b> CPCV {_h(sess.get('best_cpcv'))}% · "
+                f"DSR {_h(sess.get('best_dsr'))}%"
+                f"\n\n{_exp_hr_g}\n"
+                "\n<i>Optuna study preserved. Investigate cause, then resume with:</i>"
+                "\n<code>sudo systemctl start tradeai-explorer</code>"
             )
             raise optuna.exceptions.TrialPruned()
 
@@ -1295,13 +1298,17 @@ def run_study(study_name: str, n_trials: int, skip_precache: bool = False):
         print()
         sys.stdout.flush()
 
+        # 2026-05-28 redesign — match the clean Telegram style used across the
+        # rest of the bot (signal, exit, heartbeat, watchdog). Drops <pre>
+        # tables (no copy button) in favor of emoji-bullet fields + ━━━
+        # divider, and adds explicit emoji prefixes to the title.
+        _exp_hr = "━" * 22
         _telegram(
-            "<b>Explorer STARTED</b>\n\n"
-            "<pre>"
-            f"Study     {_h(study_name)}\n"
-            f"Trials    {_h(n_trials)}\n"
-            f"Baseline  Run-{_h(_read_pin_run())}  (DSR {_h(guard.pin_dsr)})"
-            "</pre>"
+            "\U0001F916 <b>Explorer STARTED</b>\n"
+            f"\n{_exp_hr}\n"
+            f"\n\U0001F50D <b>Study:</b> {_h(study_name)}"
+            f"\n\U0001F9EA <b>Trials:</b> {_h(n_trials)}"
+            f"\n\U0001F4CC <b>Baseline:</b> Run-{_h(_read_pin_run())} (DSR {_h(guard.pin_dsr)}%)"
         )
 
         # SIGTERM handler — systemctl stop sends SIGTERM. Calls study.stop()
@@ -1332,14 +1339,14 @@ def run_study(study_name: str, n_trials: int, skip_precache: bool = False):
             sess["pause_reason"] = "keyboard_interrupt"
             _write_session(sess)
             _telegram(
-                "<b>Explorer INTERRUPTED</b>\n\n"
-                "<pre>"
-                f"Reason    Ctrl+C from operator\n"
-                f"Trials    {_h(sess.get('trials_completed'))} / {_h(sess.get('trials_planned'))}\n"
-                f"Best      CPCV {_h(sess.get('best_cpcv'))}%"
-                "</pre>\n"
-                "Optuna study preserved. Resume with:\n"
-                "<code>sudo systemctl start tradeai-explorer</code>"
+                "\U0001F6D1 <b>Explorer INTERRUPTED</b>\n"
+                f"\n{_exp_hr}\n"
+                f"\n\U0001F4DD <b>Reason:</b> Ctrl+C from operator"
+                f"\n\U0001F9EA <b>Trials:</b> {_h(sess.get('trials_completed'))} / {_h(sess.get('trials_planned'))}"
+                f"\n\U0001F947 <b>Best:</b> CPCV {_h(sess.get('best_cpcv'))}%"
+                f"\n\n{_exp_hr}\n"
+                "\n<i>Optuna study preserved. Resume with:</i>"
+                "\n<code>sudo systemctl start tradeai-explorer</code>"
             )
             return
 
@@ -1349,17 +1356,18 @@ def run_study(study_name: str, n_trials: int, skip_precache: bool = False):
             _write_session(sess)
             _counts = sess.get("counts", {})
             _telegram(
-                "<b>Explorer STOPPED  -  guard tripped</b>\n\n"
-                "<pre>"
-                f"Reason    {_h(guard.pause_reason)}\n"
-                f"Trials    {_h(sess.get('trials_completed'))} / {_h(sess.get('trials_planned'))}\n"
-                f"Results   {_h(_counts.get('PASS',0))} PASS  "
-                f"{_h(_counts.get('FAIL',0))} FAIL  "
-                f"{_h(_counts.get('ERROR',0))} ERROR\n"
-                f"Best      CPCV {_h(sess.get('best_cpcv'))}%  DSR {_h(sess.get('best_dsr'))}%"
-                "</pre>\n"
-                "Optuna study preserved. Resume with:\n"
-                "<code>sudo systemctl start tradeai-explorer</code>"
+                "\U0001F6A7 <b>Explorer STOPPED — guard tripped</b>\n"
+                f"\n{_exp_hr}\n"
+                f"\n⚠️ <b>Reason:</b> {_h(guard.pause_reason)}"
+                f"\n\U0001F9EA <b>Trials:</b> {_h(sess.get('trials_completed'))} / {_h(sess.get('trials_planned'))}"
+                f"\n\U0001F4CA <b>Results:</b> {_h(_counts.get('PASS',0))} PASS · "
+                f"{_h(_counts.get('FAIL',0))} FAIL · "
+                f"{_h(_counts.get('ERROR',0))} ERROR"
+                f"\n\U0001F947 <b>Best:</b> CPCV {_h(sess.get('best_cpcv'))}% · "
+                f"DSR {_h(sess.get('best_dsr'))}%"
+                f"\n\n{_exp_hr}\n"
+                "\n<i>Optuna study preserved. Resume with:</i>"
+                "\n<code>sudo systemctl start tradeai-explorer</code>"
             )
         else:
             sess["ended_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1374,15 +1382,16 @@ def run_study(study_name: str, n_trials: int, skip_precache: bool = False):
                 print(f"[explorer] best params: {sess['best_params']}")
             _counts = sess.get("counts", {})
             _telegram(
-                "<b>Explorer DONE</b>\n\n"
-                "<pre>"
-                f"Trials    {_h(sess.get('trials_completed'))} / {_h(sess.get('trials_planned'))}\n"
-                f"Results   {_h(_counts.get('PASS',0))} PASS  "
-                f"{_h(_counts.get('FAIL',0))} FAIL  "
-                f"{_h(_counts.get('ERROR',0))} ERROR\n"
-                f"Best      CPCV {_h(sess.get('best_cpcv'))}%  DSR {_h(sess.get('best_dsr'))}%\n"
-                f"Baseline  Run-{_h(sess.get('pin_run'))}  (CPCV {_h(sess.get('pin_dsr'))}%)"
-                "</pre>"
+                "\U0001F3C1 <b>Explorer DONE</b>\n"
+                f"\n{_exp_hr}\n"
+                f"\n\U0001F9EA <b>Trials:</b> {_h(sess.get('trials_completed'))} / {_h(sess.get('trials_planned'))}"
+                f"\n\U0001F4CA <b>Results:</b> {_h(_counts.get('PASS',0))} PASS · "
+                f"{_h(_counts.get('FAIL',0))} FAIL · "
+                f"{_h(_counts.get('ERROR',0))} ERROR"
+                f"\n\U0001F947 <b>Best:</b> CPCV {_h(sess.get('best_cpcv'))}% · "
+                f"DSR {_h(sess.get('best_dsr'))}%"
+                f"\n\U0001F4CC <b>Baseline:</b> Run-{_h(sess.get('pin_run'))} "
+                f"(DSR {_h(sess.get('pin_dsr'))}%)"
             )
     finally:
         pid.release()

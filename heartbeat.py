@@ -248,7 +248,7 @@ class Heartbeat:
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         _hr = "━" * 22  # mirrors crypto_alert._TG_HR — same visual width
         body = (
-            "\U0001FA7A <b>ALERT PATH CHECK</b>\n"
+            "\U0001FA7A <b>Selftest ALERT PATH CHECK</b>\n"
             f"\n{_hr}\n"
             f"\n⏰ <b>Time:</b> {_html.escape(ts)} UTC"
             f"\n\U0001F522 <b>PID:</b> {_html.escape(str(os.getpid()))}"

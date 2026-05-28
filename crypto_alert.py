@@ -4170,7 +4170,7 @@ def main():
                 ) or "DISABLED"
                 _hb_alerter.send(
                     "Heartbeat",
-                    "\U0001F49A <b>BOT ALIVE</b>\n"
+                    "\U0001F49A <b>Heartbeat BOT ALIVE</b>\n"
                     f"\n{_TG_HR}\n"
                     f"\n⏰ <b>Time:</b> {_h(datetime.now().strftime('%Y-%m-%d %H:%M'))}"
                     f"\n\U0001F501 <b>Cycle:</b> {_h(cycle)}"
