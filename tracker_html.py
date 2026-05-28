@@ -637,20 +637,25 @@ tr:hover td{background:rgba(37,37,56,.45)}
 
   <!-- MAIN TABS -->
   <div class="main-tabs">
+    <!-- 2026-05-28 operator ordering: Open → History → Backtest → AI Intelligence
+         → Adaptive → Auto-Explorer → Honest Metrics. QuantStats stays hidden. -->
     <button class="main-tab active" id="tabBtnOpen" onclick="showTab('open',this)">
       Open Positions <span class="tab-count" id="openCount">0</span>
     </button>
     <button class="main-tab" id="tabBtnHistory" onclick="showTab('history',this)">
       Signal History <span class="tab-count" id="histCount">0</span>
     </button>
-    <button class="main-tab" id="tabBtnIntelligence" onclick="showTab('intelligence',this)">
-      AI Intelligence <span class="tab-count">&#9889;</span>
-    </button>
     <button class="main-tab" id="tabBtnBacktest" onclick="showTab('backtest',this);loadBacktest();loadBaselinePin()">
       &#128202; Backtest <span class="tab-count" id="btRunCount">—</span>
     </button>
+    <button class="main-tab" id="tabBtnIntelligence" onclick="showTab('intelligence',this)">
+      AI Intelligence <span class="tab-count">&#9889;</span>
+    </button>
     <button class="main-tab" id="tabBtnAdaptive" onclick="showTab('adaptive',this);loadAdaptive()">
       &#129504; Adaptive <span class="tab-count" id="adaptCount">&#9679;</span>
+    </button>
+    <button class="main-tab" id="tabBtnExplorer" onclick="showTab('explorer',this);loadExplorer()">
+      &#129302; Auto-Explorer <span class="tab-count" id="explorerPill">&middot;</span>
     </button>
     <button class="main-tab" id="tabBtnHonest" onclick="showTab('honest',this);loadHonestMetrics()">
       &#128205; Honest Metrics <span class="tab-count" id="honestPill">&middot;</span>
@@ -665,9 +670,6 @@ tr:hover td{background:rgba(37,37,56,.45)}
     <button class="main-tab" id="tabBtnQuantStats" style="display:none"
             onclick="showTab('quantstats',this);loadQuantStats()">
       &#128201; QuantStats <span class="tab-count" id="qsPill">&middot;</span>
-    </button>
-    <button class="main-tab" id="tabBtnExplorer" onclick="showTab('explorer',this);loadExplorer()">
-      &#129302; Auto-Explorer <span class="tab-count" id="explorerPill">&middot;</span>
     </button>
   </div>
 
