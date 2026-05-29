@@ -482,11 +482,37 @@ def _score_crt_a(f: Dict[str, Any]) -> TemplateMatch:
     # ==HIGH. Full-population analysis (n=1945) showed Tier A under the
     # ≥MEDIUM definition produced 63.9% WR (n=180). Tightening to MSS=HIGH
     # yields 72.5% WR (n=80) with Wilson 95% CI [61.9%, 81.1%] — a
-    # statistically separated top tier. The looser definition admitted
-    # ~100 MSS=MEDIUM FVG signals at lower WR, diluting Tier A's
-    # discriminating power.
-    if mss_quality == "HIGH":
-        hit += 1; matched.append("MSS=HIGH")
+    # statistically separated top tier.
+    #
+    # H-CY14-T1 fix (cycle-14 audit 2026-05-29) — TIER A IS SELL-ONLY.
+    # ---------------------------------------------------------------------
+    # Cycle-13 cumulative data (Runs 1854-2007, n=79 across Tier A):
+    #     Tier A SELL (BSL_CRT, MSS=HIGH):  n=44, WR=72.7%, avg_R=+0.673  ✓
+    #     Tier A BUY  (SSL_CRT, post-relax): n=35, WR=31.4%, avg_R=-0.207  ✗
+    # The BUY-side FVG-confluence cohort destroys capital — even after
+    # H-CY13-T2 relaxed the MSS gate to ≥MEDIUM (which moved BUY WR from
+    # 20% → 31.4%, still well below break-even). Tier B BUY at 68.2%
+    # (n=110, avg_R=+0.635) handles BUY setups correctly with the SAME
+    # FVG-or-OB structural shape; the issue is specifically the Tier A
+    # "FVG-aligned premium" classification on the BUY side. Per Tier-B
+    # symmetric performance, the FVG confluence is fine for SELL but
+    # systematically anti-selects on BUY (likely picking up gap-down
+    # FVGs in retracements that re-attract sellers — needs ICT-level
+    # investigation, not template-level patching).
+    #
+    # Until root cause identified, Tier A is SELL-only. BUY signals fall
+    # to Tier B (where they perform at canonical 68.2% WR) or Tier C
+    # (paper-only catchall). This trades ~35 lost "Tier A" BUY classifications
+    # per 365d for honesty about which setups are premium quality.
+    if direction != "SELL":
+        # BUY signals never qualify for Tier A under current TP geometry.
+        # Drops to Tier B (FVG + MSS=HIGH OR OB + MSS=HIGH) where they
+        # perform well per cumulative data.
+        pass
+    elif mss_quality == "HIGH":
+        # SELL + MSS=HIGH is the canonical Tier A premium tier (72.7% WR
+        # cumulative, working as designed).
+        hit += 1; matched.append("MSS=HIGH(SELL_only)")
 
     bonus = 0.0
     if (direction == "BUY"  and bias_4h == "BULLISH") or \
@@ -636,9 +662,18 @@ def _score_crt_c(f: Dict[str, Any]) -> TemplateMatch:
 
     base  = hit / 1.0
     score = round(base, 4)
+    # M-CY13-T3 fix (audit cycle-13 2026-05-29): the template_id stays
+    # CRT_C_OB_DEFAULT for DB back-compat (legacy signals'
+    # matched_template_id rows must keep matching), but the human-readable
+    # name now reflects the empirical reality. Cycle-13 fresh-data
+    # tabulation showed Tier C caught 18 FVG signals vs only 4 OB signals
+    # in round-2 (Run-1854 n=22) — i.e. it serves as the catchall bucket
+    # for FVG setups that miss Tier A's MSS=HIGH bar, NOT just OB setups.
+    # The "OB default" label confused dashboard readers analyzing
+    # template attribution.
     return TemplateMatch(
         template_id="CRT_C_OB_DEFAULT",
-        template_name="CRT Tier C — OB default",
+        template_name="CRT Tier C — catchall (FVG or OB, MSS<HIGH)",
         tier="C",
         score=score,
         required_hit=hit, required_need=1,

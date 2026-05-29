@@ -40,10 +40,12 @@ from ict_engine import (
     ICT_MIN_RR_GATE,
     MAX_BREAKEVEN_WR,
     find_ict_swings,
+    find_eqh_eql_clusters,
     score_ict_mss,
     score_ict_fvg,
     detect_ict_order_block,
     order_block_overlaps_range,
+    ICT_EQH_TOLERANCE,
 )
 # H-NEW-3 fix (audit 2026-05-28): import SL clamps so the CRT path enforces
 # the same structural floor/ceiling the 5M_SWEEP path applies in
@@ -161,6 +163,94 @@ if CRT_MSS_MIN_QUALITY not in ("LOW", "MEDIUM", "HIGH"):
 # applied in the caller because crt_engine.py doesn't ingest 1H data.
 CRT_REQUIRE_1H_TREND = _env_int("CRT_REQUIRE_1H_TREND", 0) == 1
 
+# ── Cycle-12 exploration knobs (2026-05-29) ─────────────────────────────────
+# These two knobs were identified by the live diagnostic walk-through as the
+# remaining UNEXPLORED axes of the CRT detection surface. Defaults preserve
+# Run-1749 baseline behavior EXACTLY so promotion safety isn't disturbed; the
+# explorer can sweep them to find higher signal frequency at acceptable WR.
+#
+# H4_CRT_FVG_PROBE_WIDTH — number of 5M bars probed for FVG confluence at the
+# MSS confirmation site. The probe window is [mss_bar - (W-1) ... mss_bar]
+# inclusive (W bars). The FVG-creating displacement bar usually fires 1-5
+# bars before the MSS confirmation; the legacy [mss-1, mss] probe (W=2)
+# preserves H-3 fix parity but mathematically can't catch displacement-style
+# FVGs that landed earlier. Width 3-5 progressively wider.
+#   W=1 → [mss]                  (narrowest, almost-never-fires)
+#   W=2 → [mss-1, mss]           (DEFAULT — preserves Run-1749 baseline)
+#   W=3 → [mss-2, mss-1, mss]    (catches 1-bar-early displacements)
+#   W=4 → [mss-3, mss-2, mss-1, mss]
+#   W=5 → [mss-4, mss-3, mss-2, mss-1, mss]
+# Live/BT parity: the same constant is read by both crt_engine._check_confluence
+# and the backtest CRT path through this module import.
+H4_CRT_FVG_PROBE_WIDTH = _env_int("H4_CRT_FVG_PROBE_WIDTH", 2)
+if H4_CRT_FVG_PROBE_WIDTH < 1:
+    H4_CRT_FVG_PROBE_WIDTH = 1
+if H4_CRT_FVG_PROBE_WIDTH > 10:
+    H4_CRT_FVG_PROBE_WIDTH = 10  # safety cap — no benefit beyond MSS_HORIZON anyway
+
+# H4_CRT_MITIGATION_TTL_H — time-to-live (in hours) for consumed CRT zones.
+# 0 = never expire (DEFAULT — preserves Run-1749 baseline behavior). Any
+# positive value re-eligibles a previously-consumed C1 zone after N hours
+# have elapsed since the C1 candle's close time. Rationale: in long bear
+# markets, the C2_LOOKBACK=4 window slides forward only ~1 H4 bar per scan
+# but consumed zones accumulate indefinitely; eventually every recent C1
+# can be in the "already used" set. Adding a TTL re-eligibles old zones
+# that re-test (e.g. the H4 range becomes a defensive zone in the next
+# trend phase). Suggested non-zero values: 24h (1 day), 72h (3 days),
+# 168h (1 week).
+#
+# Live/BT parity: pruning is applied in the SAME logical position in both
+# paths (before detect_h4_crt is called). The "now_ms" reference is wall-
+# clock time in live and the current-bar timestamp in backtest — the helper
+# `prune_consumed_zones` takes now_ms as a parameter so neither path embeds
+# a hidden time reference.
+H4_CRT_MITIGATION_TTL_H = _env_int("H4_CRT_MITIGATION_TTL_H", 0)
+if H4_CRT_MITIGATION_TTL_H < 0:
+    H4_CRT_MITIGATION_TTL_H = 0
+
+
+def prune_consumed_zones(consumed: set, now_ms: float,
+                          ttl_h: int = None) -> int:
+    """Re-eligible CRT zones whose C1 candle closed > ttl_h hours ago.
+
+    Mutates `consumed` in place by removing expired entries. Returns the
+    count of entries pruned (for caller observability — typically logged
+    only when nonzero).
+
+    Args:
+        consumed: set of (c1_time_ms, c1_high, c1_low) tuples as produced
+            by `detect_h4_crt`. c1_time_ms is the Binance candle openTime
+            in milliseconds since epoch. Mutated in place.
+        now_ms: reference "now" timestamp in milliseconds. Caller supplies
+            wall-clock time for live (time.time() * 1000) or current-bar
+            time for backtest — same reference both paths for live/BT parity.
+        ttl_h: hours after which a zone is re-eligible. None → use module
+            default H4_CRT_MITIGATION_TTL_H. 0 → no-op (preserves baseline).
+
+    No-op when ttl_h <= 0 (DEFAULT). Pure live↔BT-parity helper — the same
+    logic runs in both paths to keep the consumed-set populations identical
+    across the same simulated wall-clock progression.
+    """
+    if ttl_h is None:
+        ttl_h = H4_CRT_MITIGATION_TTL_H
+    if ttl_h <= 0 or not consumed:
+        return 0
+    cutoff = now_ms - (float(ttl_h) * 3600.0 * 1000.0)
+    # Defensive shape check: a valid consumed-zone key is the 3-tuple
+    # (c1_time_ms, c1_high, c1_low) produced by detect_h4_crt. Anything
+    # else (different length, non-numeric time, plain string) is left
+    # untouched — pruning silently skips malformed entries instead of
+    # raising. Matches the "fail-open" philosophy used elsewhere in the
+    # CRT path so a corrupted state file can't kill the scan loop.
+    stale = {
+        k for k in consumed
+        if isinstance(k, tuple) and len(k) >= 3
+           and isinstance(k[0], (int, float)) and float(k[0]) < cutoff
+    }
+    if stale:
+        consumed -= stale
+    return len(stale)
+
 
 _QUALITY_RANK = {"NONE": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3}
 
@@ -236,7 +326,8 @@ def _find_5m_bar_after(c5m_times, target_time) -> int:
 
 
 def _check_confluence(direction: str, c1_high: float, c1_low: float,
-                      mss_bar_5m: int, c5m: dict, ob_cached):
+                      mss_bar_5m: int, c5m: dict, ob_cached,
+                      sweep_5m_idx: int = -1):
     """Return a confluence dict if EITHER an FVG OR an Order Block overlaps
     the SWEPT-EXTREME ZONE of C1. Otherwise None.
 
@@ -276,10 +367,33 @@ def _check_confluence(direction: str, c1_high: float, c1_low: float,
         zone_high, zone_low = c1_high, c1_mid
 
     # 1. Check for FVG near the MSS bar (5M displacement creates FVG).
-    #    Probe [mss-1, mss] only — live/backtest parity (H-3 fix).
+    #    Probe window = [mss - (W-1) ... mss], W = H4_CRT_FVG_PROBE_WIDTH.
+    #    W=2 (DEFAULT) reproduces the original H-3 fix's [mss-1, mss] probe
+    #    bit-exact (preserves Run-1749 baseline). Wider W values catch FVGs
+    #    formed at the displacement bar that landed earlier than the MSS
+    #    confirmation bar — common in slower trend shifts where the MSS
+    #    close-through-structure happens several bars after the originating
+    #    push. The same constant is read by the backtest CRT path through
+    #    this module import — live/BT parity preserved at any width.
     if 0 <= mss_bar_5m < len(c5):
-        for d in (mss_bar_5m - 1, mss_bar_5m):
+        _probe_start = mss_bar_5m - (H4_CRT_FVG_PROBE_WIDTH - 1)
+        _probe_end_inclusive = mss_bar_5m  # inclusive upper bound
+        for d in range(_probe_start, _probe_end_inclusive + 1):
             if d < 1 or d + 1 >= len(c5):
+                continue
+            # H1 fix (explorer audit 2026-05-29 cycle-12): exclude FVGs that
+            # formed BEFORE the C2 sweep. At W=2 (default) `d` is always
+            # >= mss_bar_5m - 1 which is always >= sweep_5m_idx (MSS confirms
+            # AFTER the sweep wick by definition), so this guard is a no-op
+            # for the baseline. At W>=3 the probe loop can reach bars that
+            # pre-date C2's sweep — those FVGs are NOT institutional defense
+            # zones for the CRT setup, they're just stale gaps that happen
+            # to overlap C1's swept-extreme zone. Empirical evidence: Run
+            # #1837 (W=4) added 4 signals but dropped DSR 87.6→83.4% — the
+            # +4 were predominantly pre-sweep false-confluence matches.
+            # Default sweep_5m_idx=-1 disables the guard (caller didn't pass
+            # the value), so existing tests + the W=2 baseline are unaffected.
+            if sweep_5m_idx >= 0 and d < sweep_5m_idx:
                 continue
             # L-NEW-1 fix (cycle-9 audit 2026-05-28): cap the FVG mitigation
             # lookahead to H4_CRT_MSS_HORIZON bars past the FVG formation.
@@ -350,7 +464,14 @@ def detect_h4_crt(c4h: dict, c5m: dict, token: str = "",
           "c1_high":         float,
           "c1_low":          float,
           "c2_idx":          int,        # H4 bar index of sweep candle
-          "c2_time":         <time>,     # close time of C2 (for downstream timing)
+          "c2_time":         <time>,     # H4 OPEN time of C2 (Binance kline open
+                                        # time — NOT close. Close = open + 4h.
+                                        # Used by _find_5m_bar_after as the
+                                        # anchor for the 5M MSS scan window;
+                                        # do NOT add +4h "to fix" this — the
+                                        # current behavior is intentional and
+                                        # matches live's scan-during-C2-formation
+                                        # cadence. H3 fix cycle-12 audit 2026-05-29.)
           "sweep_wick":      float,      # the actual wicked extreme (SL anchor)
           "sweep_5m_idx":    int,        # first 5M bar after C2 close
           "mss_bar_5m":      int,        # 5M bar where MSS confirmed (entry anchor)
@@ -401,6 +522,39 @@ def detect_h4_crt(c4h: dict, c5m: dict, token: str = "",
 
     # Build 5M swings once per call (cheap to compute, reused per candidate)
     sh_5m, sl_5m = find_ict_swings(h5, l5)
+
+    # EQH/EQL clustering on H4 swings — 2026-05-28: enriches each CRT signal
+    # with c1_cluster_size so per-cluster WR becomes measurable as paper
+    # accumulates (Phase 5B prerequisite). TAGGING ONLY — no gate effect on
+    # acceptance. cluster_size>=2 == clustered EQH/EQL (canonical ICT strong
+    # liquidity pool); cluster_size==1 == isolated swing (weaker target).
+    #
+    # H-CY11-2 fix (audit 2026-05-28 cycle-11): tolerance-based lookup.
+    # `find_ict_swings(n=2)` requires next 2 H4 bars > current for a swing
+    # low; C2 BY DEFINITION has c2_low < c1_low → C1's low is STRUCTURALLY
+    # INELIGIBLE to be a confirmed N=2 swing. Exact-match `.get(c1_low, 1)`
+    # would therefore always return 1 (ISOLATED), making the cluster tag
+    # dead-on-arrival. Canonical ICT intent is "is this swept extreme near
+    # 2+ prior swings within ICT_EQH_TOLERANCE?" — proximity scan answers that.
+    sh_h4, sl_h4 = find_ict_swings(h4_highs, h4_lows)
+    _sh_lvls = sorted({lev for _, lev in sh_h4})
+    _sl_lvls = sorted({lev for _, lev in sl_h4})
+
+    def _cluster_size_near(level: float, levels: list, tol: float = ICT_EQH_TOLERANCE) -> int:
+        """Count swing levels within `tol` (fractional) of `level`.
+
+        Returns 1 (ISOLATED) when `level` matches at most 1 prior swing
+        (itself OR one near-equal swing) within the tolerance band, and N
+        when N near-equal swings cluster around `level`. Canonical ICT
+        EQH/EQL: cluster_size>=2 marks a strong BSL/SSL liquidity pool.
+        """
+        if level <= 0 or not levels:
+            return 1
+        cnt = sum(1 for lev in levels if abs(lev - level) / level <= tol)
+        # `cnt` may be 0 when `level` (C1's extreme) has no near-equal swings;
+        # treat as ISOLATED. cnt>=2 means N near-equal swing levels surround
+        # the sweep target — strong cluster.
+        return max(cnt, 1)
 
     # M-2 fix (cycle-7 audit 2026-05-27): pre-compute H4 Order Block ONCE per
     # call instead of per CRT candidate. OB depends only on c4h data — same
@@ -487,6 +641,7 @@ def detect_h4_crt(c4h: dict, c5m: dict, token: str = "",
             mss_bar = mss["mss_bar"]
             confluence = _check_confluence(
                 "BUY", c1_high, c1_low, mss_bar, c5m, ob_cached,
+                sweep_5m_idx=sweep_5m_idx,  # H1 fix cycle-12: exclude pre-sweep FVGs
             )
             if confluence is None:
                 continue
@@ -496,6 +651,7 @@ def detect_h4_crt(c4h: dict, c5m: dict, token: str = "",
                 fvg_q = confluence["details"].get("quality", "NONE")
                 if not _quality_meets(fvg_q, CRT_FVG_MIN_QUALITY):
                     continue
+            c1_cluster_size = _cluster_size_near(c1_low, _sl_lvls)
             return {
                 "source":        "H4_CRT",
                 "type":          "SSL_CRT",
@@ -513,6 +669,8 @@ def detect_h4_crt(c4h: dict, c5m: dict, token: str = "",
                 "tp1":           round(c1_high, 6),
                 "sl":            round(c2_low, 6),
                 "key":           key,
+                "c1_cluster_size":     c1_cluster_size,
+                "c1_cluster_type":     "EQL" if c1_cluster_size >= 2 else "ISOLATED",
             }
 
         # ── Bearish CRT (BSL sweep of C1.high) ───────────────────────────
@@ -542,6 +700,7 @@ def detect_h4_crt(c4h: dict, c5m: dict, token: str = "",
             mss_bar = mss["mss_bar"]
             confluence = _check_confluence(
                 "SELL", c1_high, c1_low, mss_bar, c5m, ob_cached,
+                sweep_5m_idx=sweep_5m_idx,  # H1 fix cycle-12: exclude pre-sweep FVGs
             )
             if confluence is None:
                 continue
@@ -550,6 +709,7 @@ def detect_h4_crt(c4h: dict, c5m: dict, token: str = "",
                 fvg_q = confluence["details"].get("quality", "NONE")
                 if not _quality_meets(fvg_q, CRT_FVG_MIN_QUALITY):
                     continue
+            c1_cluster_size = _cluster_size_near(c1_high, _sh_lvls)
             return {
                 "source":        "H4_CRT",
                 "type":          "BSL_CRT",
@@ -567,9 +727,81 @@ def detect_h4_crt(c4h: dict, c5m: dict, token: str = "",
                 "tp1":           round(c1_low, 6),
                 "sl":            round(c2_high, 6),
                 "key":           key,
+                "c1_cluster_size":     c1_cluster_size,
+                "c1_cluster_type":     "EQH" if c1_cluster_size >= 2 else "ISOLATED",
             }
 
     return None
+
+
+# ── OTE (Optimal Trade Entry) overlay — 2026-05-28 ──────────────────────────
+# Canonical ICT defines OTE as the 62–79% Fibonacci retracement of the most
+# recent impulse leg. For CRT, the impulse leg is from C2's wick (the swept
+# extreme) to the post-MSS extreme on 5M. We tag every signal with:
+#   ote_zone     ∈ {IN_OTE, BELOW_OTE, ABOVE_OTE, OTE_UNDEFINED}
+#   ote_fib_pct  = entry's retracement % within the impulse leg
+# Tagging only — NO gate effect on signal acceptance. Operator/OGD can later
+# use ote_zone as a quality slicer once paper accumulates enough cells.
+OTE_FIB_LOW  = 0.62
+OTE_FIB_HIGH = 0.79
+
+def compute_ote_overlay(direction: str, sweep_wick: float, mss_extreme: float,
+                        entry_price: float) -> dict:
+    """Compute OTE retracement zone for a CRT signal.
+
+    Args:
+        direction:    "BUY" or "SELL"
+        sweep_wick:   the C2 wick price (low for BUY, high for SELL)
+        mss_extreme:  the 5M MSS confirmation extreme
+                      (post-sweep high for BUY, post-sweep low for SELL)
+        entry_price:  the actual entry price
+
+    Returns:
+        {"ote_zone": str, "ote_fib_pct": float, "ote_low": float, "ote_high": float}
+
+    For BUY: leg = sweep_wick (low) → mss_extreme (high above).
+             OTE band = [low + 0.62*leg, low + 0.79*leg].
+             Entry IN_OTE if it falls inside that band.
+    For SELL: leg = sweep_wick (high) → mss_extreme (low below).
+              OTE band = [high - 0.79*leg_abs, high - 0.62*leg_abs].
+
+    Returns OTE_UNDEFINED if leg is degenerate (zero or wrong-direction).
+    """
+    leg = float(mss_extreme) - float(sweep_wick)
+    if direction == "BUY":
+        if leg <= 0:
+            return {"ote_zone": "OTE_UNDEFINED", "ote_fib_pct": None,
+                    "ote_low": None, "ote_high": None}
+        ote_low  = sweep_wick + OTE_FIB_LOW  * leg
+        ote_high = sweep_wick + OTE_FIB_HIGH * leg
+        fib_pct  = (entry_price - sweep_wick) / leg if leg else None
+    elif direction == "SELL":
+        if leg >= 0:
+            return {"ote_zone": "OTE_UNDEFINED", "ote_fib_pct": None,
+                    "ote_low": None, "ote_high": None}
+        leg_abs  = abs(leg)
+        ote_low  = sweep_wick - OTE_FIB_HIGH * leg_abs   # deeper retrace
+        ote_high = sweep_wick - OTE_FIB_LOW  * leg_abs   # shallower retrace
+        fib_pct  = (sweep_wick - entry_price) / leg_abs if leg_abs else None
+    else:
+        return {"ote_zone": "OTE_UNDEFINED", "ote_fib_pct": None,
+                "ote_low": None, "ote_high": None}
+
+    if fib_pct is None:
+        zone = "OTE_UNDEFINED"
+    elif fib_pct < OTE_FIB_LOW:
+        zone = "BELOW_OTE"
+    elif fib_pct > OTE_FIB_HIGH:
+        zone = "ABOVE_OTE"
+    else:
+        zone = "IN_OTE"
+
+    return {
+        "ote_zone":    zone,
+        "ote_fib_pct": round(float(fib_pct), 4) if fib_pct is not None else None,
+        "ote_low":     round(float(ote_low),  8),
+        "ote_high":    round(float(ote_high), 8),
+    }
 
 
 # ────────────────────────────────────────────────────────────────────────────

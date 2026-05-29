@@ -44,7 +44,17 @@ ICT_IFVG_PROXIMITY_PCT = 0.03  # iFVG midpoint must be within 3% of FVG midpoint
 DEALING_RANGE_LOOKBACK = _env_int("DEALING_RANGE_LOOKBACK", 50)  # 4H/1H bars to define active dealing range
 
 # Trade plan constants
-MIN_TP1_MULT         = 1.5    # Run #36: reverted 2.0→1.5 — 2.0R killed WR (18% vs 38%), 1.5R+24H untested
+# Cycle-12 explorer-axis (2026-05-29): env-overridable so Optuna can sweep
+# the RR floor for TP1 placement. Anti-pattern threshold is ≥2.0 (Run #36
+# empirical: 2.0R killed WR 18% vs 38%); explorer is locked to <2.0 via
+# CRT_ANTI_PATTERN_LOCKS. Default 1.5 preserves Run-1749 baseline EXACTLY.
+MIN_TP1_MULT         = _env_float("MIN_TP1_MULT", 1.5)
+# Defensive clamp — refuse to load with value ≥2.0 (anti-pattern). This
+# matches the explorer's lock; manual env overrides also can't violate.
+if MIN_TP1_MULT >= 2.0:
+    MIN_TP1_MULT = 1.5  # safe fallback on operator typo
+if MIN_TP1_MULT < 0.8:
+    MIN_TP1_MULT = 0.8  # safe floor — below 0.8 makes economics gate degenerate
 # Fix #37 (2026-05-22 cycle 11): MAX_SL_PCT / MIN_SL_PCT migrated to config.py
 # with env-var support. Imported here as module-level constants so all existing
 # `from ict_engine import MAX_SL_PCT` callers (crypto_alert.py:71, backtest.py:66)
@@ -67,7 +77,15 @@ TOKEN_RT_COST: dict = {
     "HBAR": 0.005,
 }
 MAX_BREAKEVEN_WR     = 0.60    # relaxed - ICT structural SLs are larger
-ICT_SL_BUFFER_PCT          = 0.003  # SL placed 0.3% beyond swept wick (structural buffer)
+# Cycle-12 explorer-axis (2026-05-29): env-overridable so Optuna can sweep
+# the SL buffer beyond the swept wick. Tighter = more SL hits but better RR;
+# looser = fewer SL hits but worse RR. Default 0.003 (0.3%) preserves Run-1749
+# baseline EXACTLY. Clamped to [0.0005, 0.010] = [0.05%, 1.0%].
+ICT_SL_BUFFER_PCT          = _env_float("ICT_SL_BUFFER_PCT", 0.003)
+if ICT_SL_BUFFER_PCT < 0.0005:
+    ICT_SL_BUFFER_PCT = 0.0005   # safe floor — too tight invalidates structural buffer
+if ICT_SL_BUFFER_PCT > 0.010:
+    ICT_SL_BUFFER_PCT = 0.010    # safe cap — too wide invalidates economics gate
 ICT_FVG_SIZE_BONUS_THRESHOLD = 0.003  # FVG must be ≥0.3% of price to earn confidence bonus
 ICT_SMT_LOOKBACK           = 8   # bars to scan backward for SMT sweep confirmation
 ICT_SMT_REF_HORIZON        = 40  # reference window (bars) to check BTC did not sweep

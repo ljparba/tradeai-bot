@@ -208,6 +208,16 @@ SIGNAL_COOLDOWN: int = _env_int("SIGNAL_COOLDOWN", 40)      # minutes — matche
 NEAR_LEVEL_PROX: float = _env_float("NEAR_LEVEL_PROX", 0.025)  # fixed 2.5% S/R proximity
 SR_LOOKBACK: int     = _env_int("SR_LOOKBACK", 50)
 STALE_CANDLE_THRESHOLD: int = _env_int("STALE_CANDLE_THRESHOLD", CHECK_INTERVAL * 3)  # alert > 3 cycles old
+# M-CY13-2/3 fix (audit cycle-13 2026-05-29): elevate BTC stale-cache
+# threshold from a hardcoded local constant in fetch_btc_state to an
+# env-overridable config knob. Pre-fix the 600s value lived inline at
+# crypto_alert.py:2499 with no relationship to STALE_CANDLE_THRESHOLD;
+# this created a 270-600s window where the IF-branch freshness check
+# (270s threshold) updated last_candle_fetch_ok while the silent-stale
+# flip (600s threshold) hadn't tripped — leaving feed_ok=True with
+# 5-10min old data. Default 600s preserves original behavior; operator
+# can tighten via env.
+BTC_STALE_FEED_S: int = _env_int("BTC_STALE_FEED_S", 600)
 
 EXPIRY_BY_REGIME: dict = {
     "TRENDING_BULL":      12,
