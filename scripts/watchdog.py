@@ -25,7 +25,7 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -115,7 +115,10 @@ def main() -> int:
     logger.info(f"starting — file={hb_path} interval={args.interval}s staleness={args.staleness}s")
 
     _stale_minutes = max(1, args.staleness // 60)
-    _started_str   = datetime.now().strftime("%Y-%m-%d %H:%M")
+    # CY12-UTC-WD fix (full audit 2026-05-29 pre-LIVE M3): use UTC for
+    # alert timestamps so watchdog messages align with crypto_alert.py +
+    # heartbeat.json. Pre-fix this used VPS local time (SGT +8h).
+    _started_str   = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M") + " UTC"
     _hr = "━" * 22  # mirrors crypto_alert._TG_HR — same visual width
     # 2026-05-28 redesign — match the clean signal/heartbeat/exit Telegram
     # style across operational alerts. Drops <pre> blocks (no copy button)
