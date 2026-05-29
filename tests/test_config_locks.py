@@ -57,22 +57,45 @@ def test_ict_swing_n_locked_at_2():
     )
 
 
-def test_ict_min_rr_gate_locked_at_1_5():
-    """ICT_MIN_RR_GATE >= 2.0 is a documented anti-pattern (Cycle 1b: WR=50% n=10)."""
+def test_ict_min_rr_gate_locked_at_1_3():
+    """ICT_MIN_RR_GATE >= 2.0 is a documented anti-pattern (Cycle 1b: WR=50% n=10).
+
+    Lowered 1.5 → 1.3 in cycle-9 (audit 2026-05-28) after H-NEW-3 SL clamp cut
+    CRT signal output -77% (416 → 95). The 1.3 floor still rejects the proven
+    catastrophic >=2.0 band while admitting the [1.3, 1.5) R:R signals that
+    H-NEW-3's structural ceiling left on the table. Same anti-pattern rule;
+    re-calibrated floor.
+    """
     from ict_engine import ICT_MIN_RR_GATE
-    assert ICT_MIN_RR_GATE == 1.5, (
-        f"ICT_MIN_RR_GATE is locked at 1.5 — got {ICT_MIN_RR_GATE}. "
+    assert ICT_MIN_RR_GATE == 1.3, (
+        f"ICT_MIN_RR_GATE is locked at 1.3 — got {ICT_MIN_RR_GATE}. "
         f">=2.0 produces catastrophic n=10/WR=50%. "
         f"Override only with a full audit cycle + CROSS_REF.md update."
     )
 
 
-def test_ict_min_rr_matches_min_tp1_mult():
-    """The min-R:R gate must match the min TP1 multiplier — separate variables, same constraint."""
-    from ict_engine import ICT_MIN_RR_GATE, MIN_TP1_MULT
-    assert ICT_MIN_RR_GATE == MIN_TP1_MULT, (
-        f"ICT_MIN_RR_GATE ({ICT_MIN_RR_GATE}) must equal MIN_TP1_MULT ({MIN_TP1_MULT}) — "
-        f"they represent the same R:R floor and drifting them apart silently breaks the gate."
+def test_min_tp1_mult_preserved_for_5m_sweep_at_1_5():
+    """MIN_TP1_MULT preserved at 1.5 for the 5M_SWEEP path's Run-168 baseline.
+
+    Cycle-11 (audit 2026-05-28) deliberately diverged ICT_MIN_RR_GATE (1.3, CRT
+    path) from MIN_TP1_MULT (1.5, 5M_SWEEP TP1 multiplier). They are NO LONGER
+    the same constraint:
+      • `ICT_MIN_RR_GATE` is the R:R reject gate consumed by `compute_crt_trade_economics`
+        + `compute_ict_trade_plan`'s post-multiplier check.
+      • `MIN_TP1_MULT` is the TP1 distance multiplier used by `compute_ict_trade_plan`
+        to construct the 5M_SWEEP TP1 from the SL distance.
+    For the 5M_SWEEP path, the effective floor is still 1.5 (the multiplier).
+    For the CRT path, the effective floor is 1.3 (the gate).
+    Operator's current Run-338 baseline runs CRT-only with ENABLE_5M_SWEEP=0,
+    so the 5M_SWEEP floor is currently inert. If 5M_SWEEP is ever re-enabled,
+    Run-168 was calibrated at 1.5 — do NOT change MIN_TP1_MULT without re-running
+    the 5M_SWEEP Run-168 baseline backtest.
+    """
+    from ict_engine import MIN_TP1_MULT
+    assert MIN_TP1_MULT == 1.5, (
+        f"MIN_TP1_MULT is locked at 1.5 — got {MIN_TP1_MULT}. "
+        f"Run-168 (5M_SWEEP canonical baseline) is calibrated at 1.5. "
+        f"Drop only if explicitly re-baselining 5M_SWEEP."
     )
 
 

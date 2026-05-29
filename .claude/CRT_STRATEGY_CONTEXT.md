@@ -1,7 +1,7 @@
 # CRT Strategy Context — Shared Reference for All Agents & Skills
 
-**Last updated:** 2026-05-27
-**Operator state:** PAPER mode, CRT-only (ENABLE_5M_SWEEP=0)
+**Last updated:** 2026-05-28 (Run-338 baseline promoted + cycle-11 patches)
+**Operator state:** PAPER mode, CRT-only (ENABLE_5M_SWEEP=0); Run-338 baseline pin (Trial #336)
 **Reference for:** all `.claude/agents/*.md` and `.claude/skills/*/SKILL.md`
 
 This file is the **shared CRT context** any agent should consult when working on TradeAI after 2026-05-27. It complements the project-wide `CLAUDE.md` (which is auto-loaded into every session) by concentrating CRT-specific architectural facts in one place.
@@ -19,13 +19,18 @@ TradeAI ships with TWO independent signal sources, each gated by a kill switch:
 
 Both scan the same 5M/4H candle cache. Each emits its own signal stream, tagged with `source='5M_SWEEP'` or `source='H4_CRT'` in both `signals` and `backtest_signals` tables.
 
-**Current operator config** (in `.env`):
+**Current operator config** (in `.env`, Run-338 baseline aligned 2026-05-28):
 ```
 ENABLE_5M_SWEEP=0       # legacy scanner DISABLED
 ENABLE_H4_CRT=1         # CRT scanner ACTIVE
-CRT_TP1_MODE=min_1r
-LIVE_BIAS_4H_GATE=strict
-BACKTEST_BIAS_4H_GATE=strict
+CRT_TP1_MODE=dynamic    # Trial #336 promoted config (was min_1r pre Run-338)
+CRT_TP2_RR=1.8
+CRT_TP3_RR=2.2
+CRT_FORWARD_BARS=864    # 72h outcome window
+CRT_REQUIRE_1H_TREND=1
+H4_CRT_C2_LOOKBACK=6
+LIVE_BIAS_4H_GATE=loose      # was strict pre Run-338
+BACKTEST_BIAS_4H_GATE=loose
 WYCKOFF_PHASE_FILTER=off
 ```
 
@@ -35,7 +40,7 @@ WYCKOFF_PHASE_FILTER=off
 
 ```
 H4 candle stream → detect_h4_crt():
-  ├── Find C1 reference candle (within H4_CRT_C2_LOOKBACK=6 H4 bars back)
+  ├── Find C1 reference candle (within H4_CRT_C2_LOOKBACK H4 bars back; code default=10, operator's .env=6)
   ├── Detect C2 sweep (C2.low < C1.low → BUY candidate, or C2.high > C1.high → SELL)
   ├── Skip if dual-extreme sweep (chaos)
   ├── On 5M timeframe within C2 window: find MSS confirming reversal

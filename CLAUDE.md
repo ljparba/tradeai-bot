@@ -2,8 +2,8 @@
 
 **Project:** TradeAI v13 — ICT (Inner Circle Trader) Crypto Signal Bot
 **Owner:** Operator (Cebu, Philippines)
-**Current state:** PAPER mode running 24/7 on Contabo VPS Singapore — **CRT-only strategy active**
-**Last updated:** 2026-05-27
+**Current state:** PAPER mode running 24/7 on Contabo VPS Singapore — **CRT-only strategy active, Run #1749 baseline promoted (cycle-12 hash refresh)**
+**Last updated:** 2026-05-29
 
 This file is the canonical project context for any Claude Code session opening this repo. Read it FIRST before making any changes.
 
@@ -31,15 +31,27 @@ Each signal carries `source='5M_SWEEP'` or `source='H4_CRT'` for per-scanner att
 - LIVE switch requires: `EXECUTION_MODE=LIVE` + `LIVE_MODE_CONFIRMED=YES` env vars + `YOUR_CAPITAL` set
 - **LIVE never auto-flips** — always operator-deliberate
 
-### Active strategy mode (operator's `.env`)
+### Active strategy mode (operator's `.env` — Run #1749 baseline aligned 2026-05-29)
 ```
 ENABLE_H4_CRT=1                # CRT scanner ON  ← active signal source
 ENABLE_5M_SWEEP=0              # 5M_SWEEP scanner OFF  ← legacy baseline disabled
-CRT_TP1_MODE=min_1r            # TP1 = max(C1 opposite, entry ± 1R) — uncaps profit on tight C1
-LIVE_BIAS_4H_GATE=strict       # 4H bias must align with signal direction
-BACKTEST_BIAS_4H_GATE=strict
-WYCKOFF_PHASE_FILTER=off       # default off — strict mode empirically hurt WR (-5.22pp on 365d)
+CRT_TP1_MODE=dynamic           # TP1 = C1 opposite extreme (Trial #336 → Run-1056 → Run #1749)
+CRT_TP2_RR=1.5                 # TP2 = 1.5R from entry (Run-1056 / Run #1749)
+CRT_TP3_RR=2.2                 # TP3 = 2.2R from entry
+CRT_FORWARD_BARS=864           # 72h outcome window
+CRT_REQUIRE_1H_TREND=1         # 1H trend must align with signal direction
+H4_CRT_C2_LOOKBACK=4           # search 4 H4 bars back for C2 candidate (Run-1056 / Run #1749)
+LIVE_BIAS_4H_GATE=loose        # 4H bias relaxed — admits NEUTRAL-biased setups
+BACKTEST_BIAS_4H_GATE=loose
+WYCKOFF_PHASE_FILTER=off       # locked off — strict empirically hurt WR (-5.22pp on 365d)
 ```
+
+### Cycle-12 enhancement wave (2026-05-29) — SHIPPED
+- **T1.2 Funding rate overlay** (`funding_rate_client.py`) — Binance fapi `/premiumIndex` live + `/fundingRate` historical (Stage B) for full live↔BT parity. Confidence bonus `±FUNDING_BONUS_PCT` modulates `_crt_conf` based on `EXTREME_COUNTER_*` / `EXTREME_AGAINST` classification.
+- **T1.3 BTC correlation overlay** (`btc_correlation.py`) — Pearson r over 5M log-returns. ALIGNED_HIGH / DIVERGENT / ALIGNED_LOW / AMBIGUOUS. Confidence bonus `±BTC_CORR_BONUS_PCT`. Vocabulary accepts BOTH EMA-trend (`STRONG_BULL`) and ICT-bias (`BULLISH`) per H-CY12-2 fix.
+- **H-CY12-1 confidence-bonus parity** — backtest CRT path now applies the SAME `confidence + 10*(funding+btc_corr bonuses)` formula as live. Attribution columns (`confidence_base`, `confidence_funding_bonus`, `confidence_btc_corr_bonus`) in both `signals` and `backtest_signals` schemas.
+- **M-CY12-2 DSR pool dedup** — `compute_cross_config_sr_std.py` now dedups pool entries by OOS Sharpe within ±0.0001 (default ON, `--no-dedup` to disable). Bailey/LdP independent-trial assumption preserved.
+- **M-CY12-3/4 fapi rate-limit safety** — 418/429 detection in both fapi endpoints + 0.25s inter-token sleep in `preload_historical_funding`.
 
 ### Canonical baselines (BOTH preserved, each for its scanner)
 - **Run-168** (5M_SWEEP canonical, currently DISABLED) — historic Pareto-optimal: F-8 (`bias_4h: strict→none`) + P-2b (`ICT_SWEEP_LOOKBACK: 30→20`) + TP-2-b (`TREND_1H_GATE: loose→strict`). Metrics: n=43, WR=79.1%, CPCV mean=79.11%, DSR=100% [n_trials=27]. Snapshot: `data/snapshots/signals_baseline_run168_20260524_0826_tp2b_promoted_honest.db`.
@@ -391,7 +403,12 @@ python3 scripts/snapshot_baseline.py --restore <snapshot_filename>
 
 | Date | Event |
 |------|-------|
-| 2026-05-27 | **CRT-only operational mode shipped.** ENABLE_5M_SWEEP=0 + ENABLE_H4_CRT=1 + CRT_TP1_MODE=min_1r. Live bot running CRT exclusively in PAPER. |
+| 2026-05-28 | **Cycle-11 audit + 7 fixes shipped (9.30/10 ALL-TIME HIGH).** CR-CY11-1 ICT_MIN_RR_GATE added to `_compute_run_config_hash`. H-CY11-2 EQH/EQL lookup converted to tolerance-based proximity scan (was dead-on-arrival via exact-match dict lookup). H-CY11-1 stale-verdict drift guard mirrored into `_check_dsr_fail_streak`. M-CY11-2 drift-state log line added. M-CY11-3 1H stale + gap guard added to CRT scan path. M-CY11-6 test_config_locks.py updated for MIN_RR=1.3 + MIN_TP1_MULT=1.5 deliberate divergence. |
+| 2026-05-28 | **Run-338 baseline promoted (Trial #336 reproduced).** n=110, WR=62.7%, CPCV mean=60.91%, CPCV std=2.16% (4× more stable than prior pin), Sharpe=0.367, DSR=88.7%. Operator's `.env` aligned: bias_4h_gate=loose, CRT_TP1_MODE=dynamic, CRT_TP2_RR=1.8, CRT_TP3_RR=2.2, CRT_FORWARD_BARS=864, CRT_REQUIRE_1H_TREND=1, H4_CRT_C2_LOOKBACK=6. config_hash `ca9b1355...`. |
+| 2026-05-28 | **3 feature wirings shipped:** EQH/EQL cluster tag on CRT signals (canonical ICT BSL/SSL pool detection), OTE overlay (62-79% Fibonacci retracement of impulse leg — tag-only), DSR-aware OGD learning gate stale-verdict drift guard (config_hash comparison). |
+| 2026-05-28 | **Reports tab on tracker:** LIVE/PAPER trading performance dashboard with 3 pie charts (outcomes, direction, WR by session), equity curve relocated from Open Positions, R-multiple histogram, drawdown underwater chart, monthly P&L bars, per-token bar chart. |
+| 2026-05-28 | Explorer `consecutive_fail_max` raised 50→100 (basin-loss guard tolerance widened post Run-338 tighter promote gates). ICT_MIN_RR_GATE lowered 1.5→1.3 (cycle-9 post H-NEW-3 fix; CRT signal count recovery). |
+| 2026-05-27 | **CRT-only operational mode shipped.** ENABLE_5M_SWEEP=0 + ENABLE_H4_CRT=1 + CRT_TP1_MODE=min_1r (pre Run-338). Live bot running CRT exclusively in PAPER. |
 | 2026-05-27 | CRT Pro v1.1: TP1 modes (dynamic/fixed_1r/min_1r), CRT_APPLY_QUALITY_GATES, CRT_REQUIRE_1H_TREND. Empirical findings locked. Commit `6c9137e`. |
 | 2026-05-27 | Adaptive learning gap closed: `compute_crt_feature_scores()` bridges CRT data into OGD's 6-feature schema. Bootstrap WHERE clause loosened to admit OB-only CRT rows (was excluding 90% of CRT signals). |
 | 2026-05-27 | **Explorer search space switched to CRT-tuned (8 CRT params).** Default `EXPLORER_SEARCH_SPACE=crt`; legacy 5M_SWEEP space via `=5m`. Tunes CRT_TP1_MODE, CRT_TP2_RR/TP3_RR, H4_CRT_C2_LOOKBACK, WYCKOFF_PHASE_FILTER (off/loose only — strict locked), CRT_REQUIRE_1H_TREND, BACKTEST_BIAS_4H_GATE, CRT_FORWARD_BARS. |
@@ -439,6 +456,7 @@ If you're a new Claude session opening this repo and the operator says "continue
 ## 12. Cross-references
 
 - **Design docs:** `docs/AUTONOMOUS_EXPLORER_DESIGN.md`, `docs/OPTIMIZATION_AGENT_PIPELINE.md`, `docs/ENTERPRISE_ROADMAP.md`
+- **Enhancement roadmap (Tier 1-4):** `docs/ENHANCEMENT_ROADMAP.md` — single canonical list of all strategy + AI improvements identified post-cycle-11 (portfolio risk, funding rates, BTC correlation, multi-armed bandit, VPVR, D1/W1 bias, CUSUM drift, per-direction OGD, Phase 5B per-template, ML regime classifier). Each item tiered by when it should ship vs binding data-volume constraint. Read FIRST before adding any new strategy feature or learning capability — it's the contract for "what's next."
 - **Live ↔ Backtest Parity Plan:** `docs/LIVE_BACKTEST_PARITY_ROADMAP.md` — canonical sequenced plan (Phases A-D) to bring TradeAI's backtest-vs-live divergences to enterprise quant standards. Read FIRST before proposing changes to execution model, validation methodology, or backtest gate symmetry.
 - **Audit history:** `docs/comprehensive/CROSS_REF.md`, `.claude/reports/tradeai-audit/`
 - **Exploration logs:** `docs/exploration_runs/` (Cycle 1, 1b, 1c, Tier-2 grids)

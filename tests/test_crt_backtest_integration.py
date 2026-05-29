@@ -134,6 +134,17 @@ class TestSourceColumnSchema(unittest.TestCase):
                 ("tb_bin", "INTEGER"), ("tb_touch", "TEXT"),
                 ("tb_ret", "REAL"), ("tb_t1", "INTEGER"),
                 ("source", "TEXT DEFAULT '5M_SWEEP'"),
+                # OTE overlay (cycle-11, 2026-05-28) — keep in sync with
+                # backtest.py:init_backtest_db()'s schema migration loop.
+                ("ote_zone", "TEXT"), ("ote_fib_pct", "REAL"),
+                # T1.2 funding overlay + T1.3 BTC correlation (2026-05-29) —
+                # keep in sync with backtest.py:init_backtest_db() ALTER loop.
+                ("funding_rate_pct", "REAL"), ("funding_classification", "TEXT"),
+                ("btc_corr_strength", "REAL"), ("btc_corr_classification", "TEXT"),
+                # H-CY12-1 confidence-bonus attribution (cycle-12 audit 2026-05-29).
+                ("confidence_base", "INTEGER"),
+                ("confidence_funding_bonus", "REAL"),
+                ("confidence_btc_corr_bonus", "REAL"),
             ]:
                 conn.execute(f"ALTER TABLE backtest_signals ADD COLUMN {col_def[0]} {col_def[1]}")
 
@@ -358,6 +369,86 @@ class TestCrtSignalShape(unittest.TestCase):
                 missing.append(f)
         self.assertEqual(missing, [],
                          f"CRT signal dict missing required INSERT fields: {missing}")
+
+
+class TestCy12RegimePersistence(unittest.TestCase):
+    """CY12-REGIME fix (post explorer audit 2026-05-29): CRT signals must
+    persist a real market regime (RANGING / TRENDING_BULL / TRENDING_BEAR /
+    CHOPPY / UNKNOWN) computed via detect_regime() on the 1H window — NOT
+    the legacy hardcoded "UNKNOWN".
+
+    Pre-fix every CRT signal in backtest_signals.regime was the literal
+    string "UNKNOWN", which collapsed the tracker UI's WIN RATE BY REGIME
+    panel into a single useless bucket. The fix mirrors the 5M_SWEEP path
+    at backtest.py:799 — same detect_regime call on the 120-bar 1H window
+    up to the signal's entry time.
+    """
+
+    def test_crt_path_no_longer_hardcodes_regime_unknown(self):
+        """Source must NOT contain the pre-fix hardcoded literal in the
+        signal append. Regression catches accidental revert."""
+        import backtest, inspect
+        src = inspect.getsource(backtest.run_backtest_token_h4_crt)
+        self.assertNotIn(
+            '"regime":          "UNKNOWN",',
+            src,
+            "Pre-fix hardcoded UNKNOWN regime still present in CRT path — "
+            "WIN RATE BY REGIME panel will collapse all signals into one bucket",
+        )
+
+    def test_crt_path_references_crt_regime_variable(self):
+        """The signal dict must reference _crt_regime (the computed value)."""
+        import backtest, inspect
+        src = inspect.getsource(backtest.run_backtest_token_h4_crt)
+        self.assertIn(
+            '"regime":          _crt_regime',
+            src,
+            "CRT signal dict must use computed _crt_regime, not hardcoded literal",
+        )
+
+    def test_crt_path_calls_detect_regime(self):
+        """detect_regime() must be invoked inside the CRT signal generation
+        path so the value is computed at signal-emit time."""
+        import backtest, inspect
+        src = inspect.getsource(backtest.run_backtest_token_h4_crt)
+        self.assertIn(
+            "detect_regime(",
+            src,
+            "CRT path must call detect_regime() to classify signal regime",
+        )
+
+
+class TestLiveCrtRegimePersistence(unittest.TestCase):
+    """Live CRT path must also pass a real regime to save_signal, not the
+    pre-fix `{"regime": "UNKNOWN", "adx": 0, ...}` hardcoded dict.
+
+    The fix lifts the regime computation (M-CY11-1 had already plumbed it
+    for Phase 5A) to BEFORE save_signal so both code paths share one source
+    of truth.
+    """
+
+    def test_live_path_no_longer_hardcodes_regime_unknown(self):
+        """Source must NOT contain the pre-fix hardcoded UNKNOWN payload."""
+        with open("crypto_alert.py") as f:
+            src = f.read()
+        self.assertNotIn(
+            '{"regime": "UNKNOWN", "adx": 0, "efficiency": 0,',
+            src,
+            "Live CRT save_signal is back to hardcoded UNKNOWN — "
+            "tracker UI regime panel will break",
+        )
+
+    def test_live_path_uses_crt_regime_payload(self):
+        """Live CRT must build a _crt_regime_payload dict (real values)."""
+        with open("crypto_alert.py") as f:
+            src = f.read()
+        self.assertIn(
+            "_crt_regime_payload",
+            src,
+            "Live CRT must use _crt_regime_payload (computed) rather than a "
+            "hardcoded literal — the payload is consumed by save_signal AND "
+            "reused for Phase 5A template eval (single source of truth)",
+        )
 
 
 if __name__ == "__main__":

@@ -43,6 +43,13 @@ data/*.bak_*
 # Legacy DB location (pre-VPS migration; lives in data/signals.db now)
 TradeAI.db
 
+# Backtest run reports (one per backtest run, can accumulate to thousands)
+backtest_reports/
+
+# Local env backups (pre-promotion snapshots, operator-local)
+.env.bak_*
+.env.explorer
+
 # ── Auto-generated backups ──────────────────────────────────
 backups/
 
