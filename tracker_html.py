@@ -63,9 +63,9 @@ main{max-width:1500px;margin:0 auto;padding:1.75rem 2rem}
 .main-tab.active{background:var(--bg2);color:#fff;border-color:var(--border);
   border-bottom-color:var(--bg2)}
 .main-tab:hover:not(.active){color:var(--accent2)}
-.tab-count{background:var(--dim);color:var(--muted);padding:.1rem .45rem;
-  border-radius:10px;font-size:.72rem;font-weight:700;min-width:20px;text-align:center}
-.main-tab.active .tab-count{background:var(--accent);color:#fff}
+/* 2026-05-28: operator request — hide tab count pills (declutter). The DOM
+   nodes stay so existing updater JS (#openCount, #histCount, etc.) won't error. */
+.tab-count{display:none}
 
 /* TAB PANELS */
 .tab-panel{display:none}.tab-panel.active{display:block}
@@ -596,6 +596,40 @@ tr:hover td{background:rgba(37,37,56,.45)}
 .honest-status .honest-desc{text-align:center}
 .honest-section-intro{color:var(--muted);font-size:.82rem;line-height:1.5;margin:-.4rem 0 1rem 0;padding:.65rem .85rem;background:var(--bg);border-left:3px solid var(--accent);border-radius:4px}
 .honest-section-intro b{color:#eaeaea;font-weight:600}
+
+/* Open Positions 2-col layout — left: cards / intro; right: live AI activity feed */
+.open-2col-layout{display:flex;gap:1.25rem;align-items:flex-start}
+.open-col-left{flex:1 1 0;min-width:0}
+.open-col-right{flex:0 0 340px;position:sticky;top:1rem}
+@media (max-width:1000px){.open-2col-layout{flex-direction:column}.open-col-right{flex:1 1 100%;width:100%;position:static}}
+
+.activity-feed-wrap{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:.85rem .9rem;box-shadow:0 1px 0 rgba(0,0,0,.25)}
+.activity-feed-head{display:flex;justify-content:space-between;align-items:center;gap:.5rem;margin-bottom:.25rem}
+.activity-feed-title{font-size:.92rem;font-weight:600;color:#eaeaea;letter-spacing:.01em}
+.activity-feed-status{font-size:.7rem;color:#22c55e;font-weight:600;letter-spacing:.04em}
+.activity-feed-status.stale{color:#f59e0b}
+.activity-feed-status.err{color:#ef4444}
+.activity-feed-sub{font-size:.7rem;color:var(--muted);line-height:1.4;margin-bottom:.7rem;padding-bottom:.6rem;border-bottom:1px dashed var(--border)}
+.activity-feed-list{display:flex;flex-direction:column;gap:.3rem;max-height:640px;overflow-y:auto}
+.activity-feed-list::-webkit-scrollbar{width:6px}
+.activity-feed-list::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+.activity-item{font-size:.78rem;line-height:1.45;color:#cbd5e1;padding:.45rem .55rem;background:var(--bg);border-left:2px solid var(--border);border-radius:3px;word-break:break-word}
+.activity-item.cycle{border-left-color:#64748b;color:#94a3b8;font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;font-weight:600}
+.activity-item.macro{border-left-color:#06b6d4}
+.activity-item.signal{border-left-color:#22c55e;color:#bbf7d0;font-weight:600}
+.activity-item.blocked{border-left-color:#f59e0b}
+.activity-item.skipped{border-left-color:#64748b;opacity:.85}
+.activity-item.cooldown{border-left-color:#a78bfa}
+.activity-item.kill{border-left-color:#ef4444;color:#fecaca;font-weight:600}
+.activity-item.tokens{border-left-color:#a78bfa;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.7rem;line-height:1.5;color:#cbd5e1}
+.activity-item.tokens .tok-cell{display:inline-block;margin:1px 4px 1px 0;padding:1px 5px;background:rgba(99,102,241,.08);border-radius:3px;white-space:nowrap}
+.activity-item.tokens .tok-name{color:#fbbf24;font-weight:600}
+.activity-item.tokens .tok-bull{color:#22c55e}
+.activity-item.tokens .tok-bear{color:#ef4444}
+.activity-item.tokens .tok-neut{color:#94a3b8}
+.activity-item.tokens .tok-zones{color:#94a3b8}
+.activity-token{color:#fbbf24;font-weight:600}
+.activity-empty{font-size:.78rem;color:var(--muted);font-style:italic;text-align:center;padding:1rem .5rem}
 .honest-cell-desc{color:var(--muted);font-size:.7rem;line-height:1.4;margin-top:.5rem;padding-top:.45rem;border-top:1px dashed var(--border);font-style:italic}
 .honest-cell-desc code{background:var(--bg);padding:1px 5px;border-radius:3px;font-size:.95em}
 
@@ -606,6 +640,22 @@ tr:hover td{background:rgba(37,37,56,.45)}
 .honest-legend-dot.pass{background:var(--green)}
 .honest-legend-dot.marginal{background:#ffb84d}
 .honest-legend-dot.fail{background:#ff4444}
+
+/* ── Reports tab (2026-05-28) ────────────────────────────────────────────── */
+.rp-kpi-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:.6rem;margin:0 0 1rem 0}
+.rp-kpi{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:.7rem .9rem}
+.rp-kpi-lbl{color:var(--mute);font-size:.72rem;text-transform:uppercase;letter-spacing:.04em}
+.rp-kpi-val{color:#eaeaea;font-size:1.25rem;font-weight:600;margin-top:.25rem}
+.rp-pie-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:.8rem;margin:0 0 1rem 0}
+.rp-card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1rem 1.1rem;margin:0 0 1rem 0}
+.rp-card-header{display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;margin:0 0 .8rem 0;flex-wrap:wrap}
+.rp-card-title{color:#eaeaea;font-size:1rem;font-weight:600}
+.rp-card-sub{color:var(--mute);font-size:.78rem;margin:.15rem 0 .5rem 0}
+.rp-pie-card{display:flex;flex-direction:column}
+.rp-pie-wrap{position:relative;height:220px;margin-top:.4rem}
+.rp-bar-wrap{position:relative;height:240px;margin-top:.4rem}
+.rp-two-col{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:.8rem;margin:0 0 1rem 0}
+.rp-two-col > .rp-card{margin-bottom:0}
 </style>
 </head>
 <body>
@@ -645,10 +695,13 @@ tr:hover td{background:rgba(37,37,56,.45)}
     <button class="main-tab" id="tabBtnHistory" onclick="showTab('history',this)">
       Signal History <span class="tab-count" id="histCount">0</span>
     </button>
+    <button class="main-tab" id="tabBtnReports" onclick="showTab('reports',this);loadReports()">
+      &#128202; Reports <span class="tab-count" id="reportsPill">&middot;</span>
+    </button>
     <button class="main-tab" id="tabBtnBacktest" onclick="showTab('backtest',this);loadBacktest();loadBaselinePin()">
       &#128202; Backtest <span class="tab-count" id="btRunCount">—</span>
     </button>
-    <button class="main-tab" id="tabBtnIntelligence" onclick="showTab('intelligence',this)">
+    <button class="main-tab" id="tabBtnIntelligence" onclick="showTab('intelligence',this);loadIntelligence()">
       AI Intelligence <span class="tab-count">&#9889;</span>
     </button>
     <button class="main-tab" id="tabBtnAdaptive" onclick="showTab('adaptive',this);loadAdaptive()">
@@ -675,41 +728,46 @@ tr:hover td{background:rgba(37,37,56,.45)}
 
   <!-- OPEN POSITIONS PANEL -->
   <div id="panelOpen" class="tab-panel active">
-    <div class="honest-section-intro" style="margin:0 0 1rem 0">
-      <b>What is this tab?</b> Your <b>live action board</b>. Shows every signal that is still in-progress
-      (not yet hit TP1 / TP2 / TP3 / SL and not past the outcome window &mdash; 48h for CRT, 24h for 5M_SWEEP)
-      and the cumulative P&amp;L equity curve from all closed signals.
-      <br><br>
-      Each card is one active position with its entry, stop loss, take-profit ladder, real-time MFE/MAE,
-      and a manual close button (for when you exit before TP/SL fires &mdash; the bot will recompute the P&amp;L from your exit price).
-      The equity curve appears below once the first signal closes; toggle 30d / 90d / 1y to zoom.
-      <br><br>
-      <b>Tip:</b> "Open" count in the page header should match this tab's card count. If they diverge,
-      something fired but didn't render &mdash; check <b>Signal History</b> with the "Open" filter.
-      <br>
-      <button class="faq-learn-btn" onclick="openFAQ('open')">&#128214; Learn more &rarr;</button>
-    </div>
-    <!-- C1 (2026-05-22 tracker audit): Equity curve — cumulative P&L over closed signals.
-         Hidden until first data point arrives. -->
-    <div id="equityCurveWrap" class="equity-wrap" style="display:none">
-      <div class="equity-hdr">
-        <div class="equity-titles">
-          <div class="sec-title">Equity Curve</div>
-          <div class="equity-sub" id="equitySummary">—</div>
+    <div class="open-2col-layout">
+      <div class="open-col-left">
+        <div class="honest-section-intro" style="margin:0 0 1rem 0">
+          <b>What is this tab?</b> Your <b>live action board</b>. Shows every signal that is still in-progress
+          (not yet hit TP1 / TP2 / TP3 / SL and not past the outcome window &mdash; 48h for CRT, 24h for 5M_SWEEP).
+          For the cumulative P&amp;L equity curve, win/loss breakdowns, and other trade performance charts,
+          see the <b>&#128202; Reports</b> tab.
+          <br><br>
+          Each card is one active position with its entry, stop loss, take-profit ladder, real-time MFE/MAE,
+          and a manual close button (for when you exit before TP/SL fires &mdash; the bot will recompute the P&amp;L from your exit price).
+          <b>Tip:</b> "Open" count in the page header should match this tab's card count. If they diverge,
+          something fired but didn't render &mdash; check <b>Signal History</b> with the "Open" filter.
+          <br>
+          <button class="faq-learn-btn" onclick="openFAQ('open')">&#128214; Learn more &rarr;</button>
         </div>
-        <div class="equity-range">
-          <button class="ftab eq-range active" data-days="30" onclick="setEquityRange(30,this)">30d</button>
-          <button class="ftab eq-range" data-days="90" onclick="setEquityRange(90,this)">90d</button>
-          <button class="ftab eq-range" data-days="365" onclick="setEquityRange(365,this)">1y</button>
+        <!-- Equity Curve relocated to Reports tab on 2026-05-28 (operator request). -->
+        <div id="openList"></div>
+        <div class="pg-bar" id="openPgBar" style="display:none">
+          <button class="pg-btn" id="openPrevBtn" onclick="openChangePage(-1)">&#8249; Prev</button>
+          <span class="pg-info" id="openPgInfo"></span>
+          <button class="pg-btn" id="openNextBtn" onclick="openChangePage(1)">Next &#8250;</button>
         </div>
       </div>
-      <div class="equity-canvas-wrap"><canvas id="equityChart"></canvas></div>
-    </div>
-    <div id="openList"></div>
-    <div class="pg-bar" id="openPgBar" style="display:none">
-      <button class="pg-btn" id="openPrevBtn" onclick="openChangePage(-1)">&#8249; Prev</button>
-      <span class="pg-info" id="openPgInfo"></span>
-      <button class="pg-btn" id="openNextBtn" onclick="openChangePage(1)">Next &#8250;</button>
+
+      <!-- Live AI activity feed — last 20 plain-English milestones from logs/bot.log -->
+      <div class="open-col-right">
+        <div class="activity-feed-wrap">
+          <div class="activity-feed-head">
+            <span class="activity-feed-title">&#129302; Live AI Activity</span>
+            <span class="activity-feed-status" id="activityFeedStatus">&#8226; live</span>
+          </div>
+          <div class="activity-feed-sub">
+            What the bot is thinking right now &mdash; last 20 events, auto-refresh every 10s.
+            Ephemeral (not saved to DB).
+          </div>
+          <div class="activity-feed-list" id="activityFeedList">
+            <div class="activity-empty">Waiting for first scan cycle...</div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -953,7 +1011,8 @@ tr:hover td{background:rgba(37,37,56,.45)}
           <th title="Slippage between fired signal price and live tick at save. Green ≤0.5%, yellow 0.5–2%, red >2% (CRT_SLIPPAGE_WARN_PCT=0.5, CRT_SLIPPAGE_CRIT_PCT=2.0).">Slip</th>
           <th title="Did price retouch the entry within the limit-order fill window">Fill</th>
           <th class="sortable" onclick="histSetSort('outcome')">Result <span class="sort-ico" id="sh-outcome"></span></th>
-          <th class="sortable" onclick="histSetSort('profit_pct')">P&amp;L <span class="sort-ico" id="sh-profit_pct"></span></th>
+          <th class="sortable" onclick="histSetSort('profit_pct')" title="Maximum-greed P&amp;L — assumes 100% of position exits at whichever target hit (TP1 for PARTIAL_TP1, TP3 for WIN, SL for LOSS). What the bot fires.">P&amp;L (max) <span class="sort-ico" id="sh-profit_pct"></span></th>
+          <th title="Realistic 50/50 cascade P&amp;L — first 50% exits at TP1, remaining 50% runs to TP2/TP3 or trails to break-even after TP1 hits. Matches the ICT execution discipline + the backtest's realized_r formula.">P&amp;L (50/50)</th>
           <th class="sortable" onclick="histSetSort('timestamp')">Time <span class="sort-ico" id="sh-timestamp"></span></th>
         </tr></thead>
         <tbody id="histBody"></tbody>
@@ -965,6 +1024,112 @@ tr:hover td{background:rgba(37,37,56,.45)}
       <button class="pg-btn" id="histNextBtn" onclick="histChangePage(1)">Next &#8250;</button>
     </div>
   </div>
+
+  <!-- REPORTS PANEL — 2026-05-28: live/paper trading-performance dashboard. -->
+  <div id="panelReports" class="tab-panel">
+    <div id="reportsError" style="display:none" class="err-banner"></div>
+    <div class="honest-section-intro" style="margin:0 0 1rem 0">
+      <b>What is this tab?</b> Your <b>trading-performance report</b>. Pure paper/live trade analytics &mdash;
+      <em>no backtest data</em>, no learning weights, no bot internals. Just outcomes, P&amp;L, drawdown,
+      session breakdown and direction skew across every signal the bot has fired.
+      <br><br>
+      <b>P&amp;L convention:</b> All numbers here use the <b>50/50 cascade execution model</b> &mdash;
+      first 50% of position exits at TP1, remaining 50% trails to TP2 / TP3 or break-even after TP1.
+      This matches the backtest's <code>realized_r</code> formula and standard ICT TP discipline.
+      Signal History's "P&amp;L (max)" column shows the max-greed alternative (100%-at-target);
+      this tab uses the realistic cascade so equity curve and drawdown reflect actual booked profit.
+      <br><br>
+      <b>Empty?</b> The panel needs at least one closed signal to render. New paper accounts will see
+      empty cards until the first WIN / LOSS / PARTIAL / EXPIRED outcome lands.
+    </div>
+
+    <!-- ── Range selector ──────────────────────────────────────────────── -->
+    <div style="display:flex;gap:.5rem;align-items:center;margin:0 0 1rem 0">
+      <span style="color:var(--mute);font-size:.9rem">Range:</span>
+      <button class="ftab rp-range" data-days="30" onclick="setReportsRange(30,this)">30d</button>
+      <button class="ftab rp-range" data-days="90" onclick="setReportsRange(90,this)">90d</button>
+      <button class="ftab rp-range active" data-days="365" onclick="setReportsRange(365,this)">1y</button>
+      <button class="ftab rp-range" data-days="3650" onclick="setReportsRange(3650,this)">All</button>
+      <span style="margin-left:auto;color:var(--mute);font-size:.85rem" id="rpUpdated">&mdash;</span>
+    </div>
+
+    <!-- ── KPI row ─────────────────────────────────────────────────────── -->
+    <div class="rp-kpi-row">
+      <div class="rp-kpi"><div class="rp-kpi-lbl">Total Trades</div><div class="rp-kpi-val" id="rpKpiN">&mdash;</div></div>
+      <div class="rp-kpi"><div class="rp-kpi-lbl">Win Rate</div><div class="rp-kpi-val" id="rpKpiWr">&mdash;</div></div>
+      <div class="rp-kpi"><div class="rp-kpi-lbl">Total P&amp;L</div><div class="rp-kpi-val" id="rpKpiPnl">&mdash;</div></div>
+      <div class="rp-kpi"><div class="rp-kpi-lbl">Profit Factor</div><div class="rp-kpi-val" id="rpKpiPf">&mdash;</div></div>
+      <div class="rp-kpi"><div class="rp-kpi-lbl">Avg R</div><div class="rp-kpi-val" id="rpKpiR">&mdash;</div></div>
+      <div class="rp-kpi"><div class="rp-kpi-lbl">Best / Worst</div><div class="rp-kpi-val" id="rpKpiBw">&mdash;</div></div>
+      <div class="rp-kpi"><div class="rp-kpi-lbl">Max Drawdown</div><div class="rp-kpi-val" id="rpKpiDd">&mdash;</div></div>
+    </div>
+
+    <!-- ── Three pie charts ────────────────────────────────────────────── -->
+    <div class="rp-pie-row">
+      <div class="rp-card rp-pie-card">
+        <div class="rp-card-title">Outcomes</div>
+        <div class="rp-card-sub">WIN / PARTIAL / LOSS / EXPIRED</div>
+        <div class="rp-pie-wrap"><canvas id="rpOutcomeChart"></canvas></div>
+      </div>
+      <div class="rp-card rp-pie-card">
+        <div class="rp-card-title">Direction</div>
+        <div class="rp-card-sub">BUY vs SELL distribution</div>
+        <div class="rp-pie-wrap"><canvas id="rpDirChart"></canvas></div>
+      </div>
+      <div class="rp-card rp-pie-card">
+        <div class="rp-card-title">Win Rate by Session</div>
+        <div class="rp-card-sub">Asia / London / NY / Overnight</div>
+        <div class="rp-pie-wrap"><canvas id="rpSessionChart"></canvas></div>
+      </div>
+    </div>
+
+    <!-- ── Equity Curve (relocated from Open Positions) ────────────────── -->
+    <div class="rp-card">
+      <div class="rp-card-header">
+        <div>
+          <div class="rp-card-title">Equity Curve</div>
+          <div class="rp-card-sub" id="rpEquitySummary">Cumulative P&amp;L over closed signals (50/50 cascade)</div>
+        </div>
+        <div class="equity-range">
+          <button class="ftab eq-range active" data-days="30" onclick="setEquityRange(30,this)">30d</button>
+          <button class="ftab eq-range" data-days="90" onclick="setEquityRange(90,this)">90d</button>
+          <button class="ftab eq-range" data-days="365" onclick="setEquityRange(365,this)">1y</button>
+        </div>
+      </div>
+      <div id="equityCurveWrap" class="equity-canvas-wrap"><canvas id="equityChart"></canvas></div>
+    </div>
+
+    <!-- ── R-multiple distribution + Drawdown ──────────────────────────── -->
+    <div class="rp-two-col">
+      <div class="rp-card">
+        <div class="rp-card-title">R-Multiple Distribution</div>
+        <div class="rp-card-sub">How many trades closed in each realized-R bucket</div>
+        <div class="rp-bar-wrap"><canvas id="rpRChart"></canvas></div>
+      </div>
+      <div class="rp-card">
+        <div class="rp-card-title">Drawdown (Underwater)</div>
+        <div class="rp-card-sub">% below all-time-peak equity over time</div>
+        <div class="rp-bar-wrap"><canvas id="rpDdChart"></canvas></div>
+      </div>
+    </div>
+
+    <!-- ── Monthly P&L + Per-token bar ─────────────────────────────────── -->
+    <div class="rp-two-col">
+      <div class="rp-card">
+        <div class="rp-card-title">Monthly P&amp;L</div>
+        <div class="rp-card-sub">Cumulative profit per month (green=positive, red=negative)</div>
+        <div class="rp-bar-wrap"><canvas id="rpMonthlyChart"></canvas></div>
+      </div>
+      <div class="rp-card">
+        <div class="rp-card-title">Trades by Token</div>
+        <div class="rp-card-sub">Count and WR% per token (top 10 by volume)</div>
+        <div class="rp-bar-wrap"><canvas id="rpTokenChart"></canvas></div>
+      </div>
+    </div>
+
+  </div>
+  <!-- /panelReports -->
+
   <!-- BACKTEST PANEL -->
   <div id="panelBacktest" class="tab-panel">
 
@@ -2452,7 +2617,7 @@ async function loadAll(){
     }
   }catch(e){console.error('health',e)}
 
-  await Promise.all([loadStats(), loadOpen(), loadHistory(), loadIntelligence(), loadEquityCurve(), loadHourDayHeatmap()]);
+  await Promise.all([loadStats(), loadOpen(), loadHistory(), loadIntelligence(), loadEquityCurve(), loadHourDayHeatmap(), loadActivity()]);
   document.getElementById('lastUpdated').textContent=
     'Updated: '+new Date().toLocaleTimeString();
 }
@@ -2861,13 +3026,15 @@ function setEquityRange(days, btn){
 }
 async function loadEquityCurve(){
   const wrap = document.getElementById('equityCurveWrap');
-  const sub  = document.getElementById('equitySummary');
+  // 2026-05-28: equity card moved to Reports tab — summary now lives at #rpEquitySummary.
+  const sub  = document.getElementById('rpEquitySummary') || document.getElementById('equitySummary');
   if(!wrap) return;
   try{
     const r = await fetch('/api/equity-curve?days='+_equityRangeDays);
     const d = await r.json();
     if(!d.ok || !Array.isArray(d.points) || d.points.length === 0){
       wrap.style.display = 'none';
+      if(sub) sub.innerHTML = 'No closed signals yet — chart will appear after the first WIN / LOSS / PARTIAL.';
       return;
     }
     wrap.style.display = 'block';
@@ -2876,7 +3043,7 @@ async function loadEquityCurve(){
     const s = d.summary || {};
     const finalSign = (s.final||0) >= 0 ? '+' : '';
     const ddSign    = (s.max_dd||0) <= 0 ? '' : '+';
-    sub.innerHTML =
+    if(sub) sub.innerHTML =
       '<span style="color:'+((s.final||0)>=0?'var(--green)':'var(--red)')+'">'
       + finalSign + (s.final||0).toFixed(2) + '%</span>'
       + ' &nbsp;·&nbsp; n=' + (s.n||0)
@@ -2949,6 +3116,276 @@ async function loadEquityCurve(){
     console.error('equity-curve', e);
     wrap.style.display = 'none';
   }
+}
+
+// ── REPORTS TAB (2026-05-28) ─────────────────────────────────────────────────
+// Trading-performance dashboard. LIVE/PAPER only — backtest excluded server-side.
+let _rpRangeDays = 365;
+let _rpCharts = {outcome:null, dir:null, session:null, r:null, monthly:null, token:null, dd:null};
+
+function setReportsRange(days, btn){
+  _rpRangeDays = days;
+  document.querySelectorAll('.rp-range').forEach(b => b.classList.remove('active'));
+  if(btn) btn.classList.add('active');
+  loadReports();
+}
+
+function _rpFmtPct(v){
+  v = Number(v||0);
+  return (v>=0?'+':'') + v.toFixed(2) + '%';
+}
+
+function _rpColor(s){
+  // Outcome colors aligned with the rest of the dashboard
+  const map = {
+    WIN:'#22c55e', PARTIAL:'#fbbf24', LOSS:'#ef4444', EXPIRED:'#94a3b8',
+    BUY:'#22c55e', SELL:'#ef4444',
+    ASIA_KZ:'#a78bfa', LONDON_KZ:'#60a5fa', NY_AM_KZ:'#fbbf24',
+    OVERNIGHT:'#64748b', UNKNOWN:'#475569',
+  };
+  return map[s] || '#475569';
+}
+
+async function loadReports(){
+  const err = document.getElementById('reportsError');
+  if(err) err.style.display = 'none';
+  try{
+    const r = await fetch('/api/reports?days='+_rpRangeDays);
+    const d = await r.json();
+    if(!d.ok){
+      if(err){ err.textContent = 'Reports load failed: '+(d.error||'unknown'); err.style.display = 'block'; }
+      return;
+    }
+    _rpRenderKpi(d.kpi || {});
+    _rpRenderOutcomes(d.outcomes || {});
+    _rpRenderDirections(d.directions || {});
+    _rpRenderSessions(d.sessions || []);
+    _rpRenderRDist(d.r_dist || {});
+    _rpRenderMonthly(d.monthly || []);
+    _rpRenderTokens(d.tokens || []);
+    _rpRenderDrawdown(d.underwater || []);
+    // Equity curve uses the existing endpoint + chart
+    loadEquityCurve();
+    const upd = document.getElementById('rpUpdated');
+    if(upd) upd.textContent = 'Updated ' + new Date().toLocaleTimeString();
+    // Tab pill: show total trade count
+    const pill = document.getElementById('reportsPill');
+    if(pill) pill.textContent = (d.kpi && d.kpi.n) ? String(d.kpi.n) : '·';
+  }catch(e){
+    if(err){ err.textContent = 'Reports fetch error: '+e.message; err.style.display = 'block'; }
+  }
+}
+
+function _rpRenderKpi(k){
+  const set = (id,v) => { const el = document.getElementById(id); if(el) el.textContent = v; };
+  set('rpKpiN',  k.n || 0);
+  set('rpKpiWr', (k.wr_pct||0).toFixed(1) + '%');
+  const pnlEl = document.getElementById('rpKpiPnl');
+  if(pnlEl){
+    pnlEl.textContent = _rpFmtPct(k.total_pnl_pct);
+    pnlEl.style.color = (k.total_pnl_pct||0) >= 0 ? '#22c55e' : '#ef4444';
+  }
+  set('rpKpiPf', k.profit_factor === null || k.profit_factor === undefined ? '∞' : k.profit_factor.toFixed(2));
+  set('rpKpiR',  (k.avg_r||0).toFixed(2));
+  set('rpKpiBw', _rpFmtPct(k.best) + ' / ' + _rpFmtPct(k.worst));
+  const ddEl = document.getElementById('rpKpiDd');
+  if(ddEl){
+    ddEl.textContent = _rpFmtPct(k.max_dd_pct);
+    ddEl.style.color = '#ef4444';
+  }
+}
+
+function _rpDoughnut(canvasId, labels, data, colors, cssText){
+  const el = document.getElementById(canvasId);
+  if(!el) return null;
+  const ctx = el.getContext('2d');
+  if(_rpCharts[cssText]){ _rpCharts[cssText].destroy(); _rpCharts[cssText] = null; }
+  const total = data.reduce((a,b)=>a+(Number(b)||0),0);
+  return new Chart(ctx, {
+    type:'doughnut',
+    data:{labels:labels, datasets:[{data:data, backgroundColor:colors, borderColor:'#0f0f17', borderWidth:2}]},
+    options:{
+      responsive:true, maintainAspectRatio:false, cutout:'62%',
+      plugins:{
+        legend:{position:'bottom', labels:{color:'#cbd5e1', font:{size:11}, padding:10, usePointStyle:true}},
+        tooltip:{
+          backgroundColor:'rgba(18,18,29,0.96)', borderColor:'#252538', borderWidth:1,
+          callbacks:{
+            label:(ctx)=>{
+              const v = Number(ctx.parsed||0);
+              const pct = total > 0 ? (v/total*100).toFixed(1)+'%' : '0%';
+              return ctx.label + ': ' + v + ' (' + pct + ')';
+            }
+          }
+        }
+      }
+    }
+  });
+}
+
+function _rpRenderOutcomes(o){
+  const labels = ['WIN','PARTIAL','LOSS','EXPIRED'];
+  const data   = labels.map(k => o[k] || 0);
+  const colors = labels.map(_rpColor);
+  _rpCharts.outcome = _rpDoughnut('rpOutcomeChart', labels, data, colors, 'outcome');
+}
+
+function _rpRenderDirections(dir){
+  const labels = ['BUY','SELL'];
+  const data   = labels.map(k => dir[k] || 0);
+  const colors = labels.map(_rpColor);
+  _rpCharts.dir = _rpDoughnut('rpDirChart', labels, data, colors, 'dir');
+}
+
+function _rpRenderSessions(sessions){
+  // Donut showing trade count per session — tooltip shows WR%.
+  const labels = sessions.map(s => s.session);
+  const data   = sessions.map(s => s.n);
+  const colors = labels.map(_rpColor);
+  const el = document.getElementById('rpSessionChart');
+  if(!el) return;
+  const ctx = el.getContext('2d');
+  if(_rpCharts.session){ _rpCharts.session.destroy(); _rpCharts.session = null; }
+  const total = data.reduce((a,b)=>a+(Number(b)||0),0);
+  _rpCharts.session = new Chart(ctx, {
+    type:'doughnut',
+    data:{labels:labels, datasets:[{data:data, backgroundColor:colors, borderColor:'#0f0f17', borderWidth:2}]},
+    options:{
+      responsive:true, maintainAspectRatio:false, cutout:'62%',
+      plugins:{
+        legend:{position:'bottom', labels:{color:'#cbd5e1', font:{size:11}, padding:10, usePointStyle:true}},
+        tooltip:{
+          backgroundColor:'rgba(18,18,29,0.96)', borderColor:'#252538', borderWidth:1,
+          callbacks:{
+            label:(ctx)=>{
+              const idx = ctx.dataIndex;
+              const sess = sessions[idx] || {};
+              const v = Number(ctx.parsed||0);
+              const pct = total > 0 ? (v/total*100).toFixed(1)+'%' : '0%';
+              return ctx.label + ': ' + v + ' trades (' + pct + ')  ·  WR ' + (sess.wr||0).toFixed(1) + '%';
+            }
+          }
+        }
+      }
+    }
+  });
+}
+
+function _rpRenderRDist(rd){
+  const labels = ['<-1R','-1..0R','0..1R','1..2R','2..3R','>3R'];
+  const data   = labels.map(k => rd[k] || 0);
+  const colors = labels.map(l => l.startsWith('<') || l.startsWith('-') ? '#ef4444' : '#22c55e');
+  const el = document.getElementById('rpRChart');
+  if(!el) return;
+  const ctx = el.getContext('2d');
+  if(_rpCharts.r){ _rpCharts.r.destroy(); _rpCharts.r = null; }
+  _rpCharts.r = new Chart(ctx, {
+    type:'bar',
+    data:{labels:labels, datasets:[{label:'Trades', data:data, backgroundColor:colors, borderRadius:4}]},
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{legend:{display:false}},
+      scales:{
+        x:{ticks:{color:'#94a3b8',font:{size:10}}, grid:{color:'rgba(37,37,56,0.3)'}},
+        y:{beginAtZero:true, ticks:{color:'#94a3b8',font:{size:10}, precision:0}, grid:{color:'rgba(37,37,56,0.3)'}}
+      }
+    }
+  });
+}
+
+function _rpRenderMonthly(arr){
+  const labels = arr.map(m => m.month);
+  const data   = arr.map(m => m.pnl);
+  const colors = data.map(v => v >= 0 ? '#22c55e' : '#ef4444');
+  const el = document.getElementById('rpMonthlyChart');
+  if(!el) return;
+  const ctx = el.getContext('2d');
+  if(_rpCharts.monthly){ _rpCharts.monthly.destroy(); _rpCharts.monthly = null; }
+  _rpCharts.monthly = new Chart(ctx, {
+    type:'bar',
+    data:{labels:labels, datasets:[{label:'Monthly P&L %', data:data, backgroundColor:colors, borderRadius:4}]},
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{
+        legend:{display:false},
+        tooltip:{
+          callbacks:{
+            label:(ctx)=>{
+              const idx = ctx.dataIndex; const m = arr[idx] || {};
+              return (m.pnl>=0?'+':'')+m.pnl.toFixed(2)+'%  ·  n='+m.n+'  ·  WR '+m.wr.toFixed(1)+'%';
+            }
+          }
+        }
+      },
+      scales:{
+        x:{ticks:{color:'#94a3b8',font:{size:10}}, grid:{color:'rgba(37,37,56,0.3)'}},
+        y:{ticks:{color:'#94a3b8',font:{size:10}, callback:(v)=>(v>=0?'+':'')+v.toFixed(1)+'%'}, grid:{color:'rgba(37,37,56,0.3)'}}
+      }
+    }
+  });
+}
+
+function _rpRenderTokens(arr){
+  const labels = arr.map(t => t.token);
+  const data   = arr.map(t => t.n);
+  const colors = arr.map(t => t.wr >= 60 ? '#22c55e' : (t.wr < 40 ? '#ef4444' : '#fbbf24'));
+  const el = document.getElementById('rpTokenChart');
+  if(!el) return;
+  const ctx = el.getContext('2d');
+  if(_rpCharts.token){ _rpCharts.token.destroy(); _rpCharts.token = null; }
+  _rpCharts.token = new Chart(ctx, {
+    type:'bar',
+    data:{labels:labels, datasets:[{label:'Trades', data:data, backgroundColor:colors, borderRadius:4}]},
+    options:{
+      indexAxis:'y',
+      responsive:true, maintainAspectRatio:false,
+      plugins:{
+        legend:{display:false},
+        tooltip:{
+          callbacks:{
+            label:(ctx)=>{
+              const idx = ctx.dataIndex; const t = arr[idx] || {};
+              return t.n + ' trades  ·  WR ' + t.wr.toFixed(1) + '%  ·  P&L ' + (t.pnl>=0?'+':'') + t.pnl.toFixed(2) + '%';
+            }
+          }
+        }
+      },
+      scales:{
+        x:{beginAtZero:true, ticks:{color:'#94a3b8',font:{size:10}, precision:0}, grid:{color:'rgba(37,37,56,0.3)'}},
+        y:{ticks:{color:'#94a3b8',font:{size:10}}, grid:{display:false}}
+      }
+    }
+  });
+}
+
+function _rpRenderDrawdown(arr){
+  const labels = arr.map(p => (p.ts || '').substring(5,16));
+  const data   = arr.map(p => p.dd_pct);
+  const el = document.getElementById('rpDdChart');
+  if(!el) return;
+  const ctx = el.getContext('2d');
+  if(_rpCharts.dd){ _rpCharts.dd.destroy(); _rpCharts.dd = null; }
+  _rpCharts.dd = new Chart(ctx, {
+    type:'line',
+    data:{labels:labels, datasets:[{
+      label:'Drawdown %', data:data,
+      borderColor:'#ef4444', backgroundColor:'rgba(239,68,68,0.18)',
+      borderWidth:2, fill:true, tension:0.18, pointRadius:0
+    }]},
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{
+        legend:{display:false},
+        tooltip:{
+          callbacks:{label:(ctx)=>'DD: ' + Number(ctx.parsed.y||0).toFixed(2) + '%'}
+        }
+      },
+      scales:{
+        x:{ticks:{color:'#94a3b8',font:{size:10}, maxRotation:0, autoSkip:true, maxTicksLimit:8}, grid:{color:'rgba(37,37,56,0.3)'}},
+        y:{ticks:{color:'#94a3b8',font:{size:10}, callback:(v)=>v.toFixed(1)+'%'}, grid:{color:'rgba(37,37,56,0.3)'}}
+      }
+    }
+  });
 }
 
 async function loadStats(){
@@ -3248,6 +3685,96 @@ async function loadOpen(){
   }catch(e){showErr('Failed to load open positions: '+e.message)}
 }
 
+// ── Live AI activity feed ─────────────────────────────────────────────────
+// Tails logs/bot.log via /api/activity for plain-English [ACTIVITY] lines.
+// Renders into the Open Positions tab's right-side panel.
+function _classifyActivity(msg){
+  const m = msg.toLowerCase();
+  if(m.startsWith('tokens:')) return 'tokens';
+  if(m.includes('signal fired')) return 'signal';
+  if(m.includes('kill switch')) return 'kill';
+  if(m.includes('cycle') && m.includes('start')) return 'cycle';
+  if(m.startsWith('btc macro')) return 'macro';
+  if(m.includes('cooldown')) return 'cooldown';
+  if(m.includes('blocked')) return 'blocked';
+  if(m.includes('skipped') || m.includes('waiting')) return 'skipped';
+  return '';
+}
+// Per-cycle 10-token snapshot — render as colored chip grid
+// Bot emits: "Tokens: BTC(sBEAR/BEAR/1) ETH(sBEAR/BEAR/1) ..."
+// We split into per-token chips so the operator can scan it.
+function _renderTokenSnapshot(msg){
+  const body = msg.slice(7).trim();  // strip leading "Tokens:"
+  // Match "TOKEN(1h/4h/zones)" patterns
+  const cells = body.match(/[A-Z]+\([^)]+\)/g) || [];
+  if(cells.length === 0) return _escapeHtml(msg);
+  return cells.map(cell => {
+    const openP = cell.indexOf('(');
+    const name = cell.slice(0, openP);
+    const inner = cell.slice(openP+1, -1);  // "sBEAR/BEAR/1"
+    const parts = inner.split('/');
+    const tr1h = parts[0] || '';
+    const b4h  = parts[1] || '';
+    const zones = parts[2] || '0';
+    const t1cls = tr1h.includes('BULL') ? 'tok-bull' : tr1h.includes('BEAR') ? 'tok-bear' : 'tok-neut';
+    const b4cls = b4h === 'BULL' ? 'tok-bull' : b4h === 'BEAR' ? 'tok-bear' : 'tok-neut';
+    return '<span class="tok-cell">'
+         +   '<span class="tok-name">'+_escapeHtml(name)+'</span> '
+         +   '<span class="'+t1cls+'">'+_escapeHtml(tr1h)+'</span>'
+         +   '<span class="tok-zones">|</span>'
+         +   '<span class="'+b4cls+'">'+_escapeHtml(b4h)+'</span>'
+         +   '<span class="tok-zones">|'+_escapeHtml(zones)+'z</span>'
+         + '</span>';
+  }).join('');
+}
+function _renderActivityItem(msg){
+  const cls = _classifyActivity(msg);
+  let html;
+  if(cls === 'tokens'){
+    html = _renderTokenSnapshot(msg);
+  } else {
+    // Highlight the leading token name (e.g. "BTC: foo") in amber for scannability
+    const colonIdx = msg.indexOf(':');
+    if(colonIdx > 0 && colonIdx < 8){
+      const tok = msg.slice(0, colonIdx);
+      const rest = msg.slice(colonIdx);
+      html = '<span class="activity-token">'+_escapeHtml(tok)+'</span>'+_escapeHtml(rest);
+    } else {
+      html = _escapeHtml(msg);
+    }
+  }
+  return '<div class="activity-item '+cls+'">'+html+'</div>';
+}
+function _escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+async function loadActivity(){
+  try{
+    const r = await fetch('/api/activity?limit=20');
+    if(!r.ok) throw new Error('activity '+r.status);
+    const data = await r.json();
+    const list = document.getElementById('activityFeedList');
+    const status = document.getElementById('activityFeedStatus');
+    if(!list) return;
+    if(!data.ok || !Array.isArray(data.entries) || data.entries.length === 0){
+      list.innerHTML = '<div class="activity-empty">'+(data.error || 'Waiting for first scan cycle...')+'</div>';
+      if(status){ status.textContent='• idle'; status.className='activity-feed-status stale'; }
+      return;
+    }
+    list.innerHTML = data.entries.map(_renderActivityItem).join('');
+    // Freshness indicator — green if log updated <90s ago, amber if older
+    if(status){
+      const ageS = data.log_mtime ? (Date.now()/1000 - data.log_mtime) : 9999;
+      if(ageS < 90){ status.textContent='• live'; status.className='activity-feed-status'; }
+      else if(ageS < 300){ status.textContent='• '+Math.round(ageS)+'s ago'; status.className='activity-feed-status stale'; }
+      else { status.textContent='• stale'; status.className='activity-feed-status err'; }
+    }
+  }catch(e){
+    const status = document.getElementById('activityFeedStatus');
+    if(status){ status.textContent='• error'; status.className='activity-feed-status err'; }
+  }
+}
+
 async function loadHistory(){
   try{
     const r=await fetch('/api/signals');
@@ -3296,7 +3823,7 @@ function toggleAutoRefresh(btn){
     clearInterval(_autoRefresh); _autoRefresh=null;
     btn.textContent='Auto Off'; btn.classList.remove('ar-on');
   } else {
-    _autoRefresh=setInterval(()=>{loadOpen();loadStats();},30000);
+    _autoRefresh=setInterval(()=>{loadOpen();loadStats();loadActivity();},30000);
     btn.textContent='Auto On'; btn.classList.add('ar-on');
   }
 }
@@ -3327,18 +3854,42 @@ function renderTable(){
   const body=document.getElementById('histBody');
   const pgBar=document.getElementById('histPgBar');
   if(!total){
-    body.innerHTML='<tr><td colspan="24" class="empty">'
+    body.innerHTML='<tr><td colspan="25" class="empty">'
       +(allSigs.length===0
         ?'No signals yet — bot will save signals here once running'
         :'No signals matching this filter')
       +'</td></tr>';
     pgBar.style.display='none'; return;
   }
+  // 50/50 cascade P&L formula (mirrors backtest._calc_realized_r):
+  //   LOSS         : full sl_pct (already negative)
+  //   PARTIAL_TP1  : 0.5 × tp1_pct  (first half exits TP1, runner trails to BE = 0)
+  //   PARTIAL_TP2  : 0.5 × tp1_pct + 0.5 × tp2_pct
+  //   WIN          : 0.5 × tp1_pct + 0.5 × tp3_pct
+  //   EXPIRED      : if tp1 was hit → 0.5 × tp1_pct (TP1 banked, runner BE);
+  //                  else → 0
+  //   OPEN         : null (not closed yet)
+  const _cascadePnl = (r) => {
+    const out = r.outcome || 'OPEN';
+    const t1 = Number(r.tp1_pct || 0), t2 = Number(r.tp2_pct || 0),
+          t3 = Number(r.tp3_pct || 0), sl = Number(r.sl_pct || 0);
+    if(out === 'WIN')          return 0.5 * t1 + 0.5 * t3;
+    if(out === 'PARTIAL_TP2')  return 0.5 * t1 + 0.5 * t2;
+    if(out === 'PARTIAL_TP1' || out === 'PARTIAL') return 0.5 * t1;
+    if(out === 'LOSS')         return sl;     // sl_pct stored negative
+    if(out === 'EXPIRED')      return r.tp1_hit ? 0.5 * t1 : 0;
+    return null;  // OPEN
+  };
   body.innerHTML=pageRows.map(r=>{
     const out=r.outcome||'OPEN';
     const pnl=r.profit_pct!=null?Number(r.profit_pct):0;
     const pnlHtml=pnl>0?'<span class="pnl-p">+'+pnl.toFixed(2)+'%</span>'
       :pnl<0?'<span class="pnl-n">'+pnl.toFixed(2)+'%</span>':'<span style="color:var(--muted)">—</span>';
+    const cascade = _cascadePnl(r);
+    const cascadeHtml = cascade === null ? '<span style="color:var(--muted)">—</span>'
+      : cascade > 0 ? '<span class="pnl-p">+'+cascade.toFixed(2)+'%</span>'
+      : cascade < 0 ? '<span class="pnl-n">'+cascade.toFixed(2)+'%</span>'
+      : '<span style="color:var(--muted)">0.00%</span>';
     const conf=r.confidence||0;
     const segs=Array.from({length:5},(_,i)=>
       '<div class="cseg'+(i<Math.round(conf/2)?' on':'')+'"></div>').join('');
@@ -3369,6 +3920,7 @@ function renderTable(){
       +_fillCell(r)
       +'<td><span class="out '+out+'">'+out+'</span></td>'
       +'<td>'+pnlHtml+'</td>'
+      +'<td>'+cascadeHtml+'</td>'
       +'<td style="color:var(--muted);white-space:nowrap;font-size:.78rem">'+ts+'</td>'
       +'</tr>';
   }).join('');
@@ -3381,6 +3933,11 @@ function renderTable(){
 }
 
 async function loadIntelligence(){
+  // Reset any stale error banner from a prior failed load — without this,
+  // re-clicking the tab leaves the old "Failed to fetch" message visible
+  // even after a successful retry.
+  const _errReset = document.getElementById('intelError');
+  if(_errReset){ _errReset.style.display='none'; _errReset.textContent=''; }
   try{
     const r=await fetch('/api/intelligence');
     if(!r.ok) throw new Error('intelligence '+r.status);
@@ -4858,11 +5415,21 @@ async function loadBaselinePin(){
       (pin.label ? '(' + pin.label + ')' : '') +
       (pin.promoted_at ? '  ·  promoted ' + pin.promoted_at : '');
     document.getElementById('baselinePinMsg').textContent = d.message || '';
+    // M-CY11-4 fix (audit 2026-05-28 cycle-11): pin's `expected.dsr_pct` split
+    // into `dsr_pct_at_promote` (figure at promotion time) and
+    // `dsr_pct_post_pool_refresh` (honest figure with current sr_trial_std).
+    // Surface the post-refresh value as the canonical figure; fall back to
+    // the legacy `dsr_pct` field for back-compat with older pin files.
+    const _dsr_show = (
+      exp.dsr_pct_post_pool_refresh != null ? exp.dsr_pct_post_pool_refresh + '%'
+      : exp.dsr_pct != null ? exp.dsr_pct + '%'
+      : '?'
+    );
     document.getElementById('baselinePinExpected').textContent =
       'Expected: n=' + (exp.n||'?') + '  ·  WR=' + (exp.wr_pct||'?') + '%' +
       '  ·  CPCV mean=' + (exp.cpcv_wr_mean_pct||'?') + '%' +
       '  ·  Sharpe=' + (exp.cpcv_sharpe_mean||'?') +
-      '  ·  DSR=' + (exp.dsr_pct||'?') + '%' +
+      '  ·  DSR=' + _dsr_show +
       '   |   Latest in DB: Run-' + (lat.id||'?') +
       ' (n=' + (lat.n||'?') + ', WR=' + (lat.wr||'?') + '%)';
   }catch(e){ /* silent */ }
@@ -4931,6 +5498,10 @@ async function loadQuantStats(){
 }
 
 setInterval(loadAll, 30000);
+// Dedicated 10s tick for the live AI activity feed — independent from the
+// 30s page-wide refresh so the operator sees fresh per-token milestones
+// closer to real-time. Endpoint is cheap (64KB tail read).
+setInterval(loadActivity, 10000);
 loadAll();
 </script>
 </body>

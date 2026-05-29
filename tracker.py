@@ -132,32 +132,49 @@ def get_equity_curve(limit_days: int = 90):
     """Return cumulative P&L over time for the equity curve chart (C1, 2026-05-22 tracker audit).
 
     Returns a list of {ts, pnl, cum_pnl} ordered by closed_at ASC. `cum_pnl` is the
-    running sum of profit_pct over closed signals only (open positions excluded).
+    running sum of 50/50 cascade P&L over closed signals only (open positions excluded).
     Limited to the last `limit_days` of closed signals to keep the payload light.
+
+    P&L convention (2026-05-28 cascade fix): uses 50/50 cascade execution
+    (50% at TP1, 50% runner to TP2/TP3/BE) instead of the live bot's stored
+    profit_pct (max-greed full-position). Mirrors get_reports() so the
+    equity curve on the Reports tab is consistent with the rest of the panel.
     """
     try:
         conn = _connect()
         rows = conn.execute(
-            """SELECT s.timestamp, r.closed_at, r.profit_pct, s.token, s.signal, r.result
+            """SELECT s.timestamp, r.closed_at, r.result, s.token, s.signal,
+                      s.tp1_pct, s.tp2_pct, s.tp3_pct, s.sl_pct, r.tp1_hit
                FROM results r
                JOIN signals s ON r.signal_id = s.id
                WHERE r.result IN ('WIN','PARTIAL','PARTIAL_TP1','PARTIAL_TP2','LOSS','EXPIRED')
-                 AND r.profit_pct IS NOT NULL
                  AND COALESCE(r.closed_at, s.timestamp) >= datetime('now', ?)
                ORDER BY COALESCE(r.closed_at, s.timestamp) ASC""",
             (f"-{int(limit_days)} days",)
         ).fetchall()
         conn.close()
+
+        def _cascade(res, t1, t2, t3, sl, tp1_hit):
+            t1 = float(t1 or 0.0); t2 = float(t2 or 0.0)
+            t3 = float(t3 or 0.0); sl = float(sl or 0.0)
+            if res == "WIN":         return 0.5 * t1 + 0.5 * t3
+            if res == "PARTIAL_TP2": return 0.5 * t1 + 0.5 * t2
+            if res in ("PARTIAL_TP1", "PARTIAL"): return 0.5 * t1
+            if res == "LOSS":        return sl
+            if res == "EXPIRED":     return 0.5 * t1 if tp1_hit else 0.0
+            return 0.0
+
         cum = 0.0
         out = []
-        for ts, closed_at, pnl, tok, sig, res in rows:
-            cum += float(pnl or 0.0)
+        for ts, closed_at, res, tok, sig, tp1_pct, tp2_pct, tp3_pct, sl_pct, tp1_hit in rows:
+            pnl = _cascade(res, tp1_pct, tp2_pct, tp3_pct, sl_pct, tp1_hit)
+            cum += pnl
             out.append({
                 "ts":      closed_at or ts,
                 "token":   tok,
                 "signal":  sig,
                 "result":  res,
-                "pnl":     round(float(pnl or 0.0), 3),
+                "pnl":     round(pnl, 3),
                 "cum_pnl": round(cum, 3),
             })
         # Headroom + drawdown stats for the chart annotation
@@ -181,6 +198,228 @@ def get_equity_curve(limit_days: int = 90):
         }
     except Exception as e:
         return {"ok": False, "error": str(e), "points": [], "summary": {}}
+
+def get_reports(limit_days: int = 365):
+    """Aggregate trading-performance numbers for the Reports tab (LIVE/PAPER only).
+
+    Joins signals + results so backtest_* tables are excluded by construction.
+    Returns the structured payload consumed by /api/reports.
+
+    P&L convention (2026-05-28 cascade fix): all returned P&L figures use the
+    50/50 cascade execution model (50% exits at TP1, 50% runs to TP2/TP3/BE
+    after TP1 hits). This matches the backtest's realized_r formula and the
+    ICT TP discipline. The `signals.profit_pct` column stored by the live bot
+    assumes 100%-at-target (max-greed) and would double-count partial exits.
+    """
+    from collections import defaultdict
+    try:
+        conn = _connect()
+        rows = conn.execute(
+            """SELECT s.id, s.token, s.signal, s.session, s.entry_price,
+                      s.timestamp, r.closed_at, r.result, r.profit_pct,
+                      r.realized_r, r.tp1_hit, r.tp2_hit, r.tp3_hit, r.sl_hit,
+                      s.tp1_pct, s.tp2_pct, s.tp3_pct, s.sl_pct
+               FROM results r
+               JOIN signals s ON r.signal_id = s.id
+               WHERE r.result IN ('WIN','PARTIAL','PARTIAL_TP1','PARTIAL_TP2','LOSS','EXPIRED')
+                 AND COALESCE(r.closed_at, s.timestamp) >= datetime('now', ?)
+               ORDER BY COALESCE(r.closed_at, s.timestamp) ASC""",
+            (f"-{int(limit_days)} days",)
+        ).fetchall()
+        conn.close()
+
+        def _cascade_pnl(result, tp1_pct, tp2_pct, tp3_pct, sl_pct, tp1_hit):
+            """50/50 cascade P&L — mirrors backtest._calc_realized_r conventions.
+
+            Returns a position-pct % return assuming 50% of the position exits
+            at TP1 and the remaining 50% trails to TP2/TP3 or break-even.
+            """
+            t1 = float(tp1_pct or 0.0)
+            t2 = float(tp2_pct or 0.0)
+            t3 = float(tp3_pct or 0.0)
+            sl = float(sl_pct or 0.0)
+            if result == "WIN":
+                return 0.5 * t1 + 0.5 * t3
+            if result == "PARTIAL_TP2":
+                return 0.5 * t1 + 0.5 * t2
+            if result in ("PARTIAL_TP1", "PARTIAL"):
+                return 0.5 * t1
+            if result == "LOSS":
+                return sl  # sl_pct stored negative
+            if result == "EXPIRED":
+                return 0.5 * t1 if tp1_hit else 0.0
+            return 0.0
+
+        # ── KPI accumulators ──────────────────────────────────────────────────
+        n_total = len(rows)
+        wins = partials = losses = expired = 0
+        pnl_sum = 0.0
+        best = worst = None
+        gross_win = gross_loss = 0.0
+        # Outcome / direction / token / session / R distribution / monthly buckets
+        outcome_buckets = {"WIN": 0, "PARTIAL": 0, "LOSS": 0, "EXPIRED": 0}
+        direction_buckets = {"BUY": 0, "SELL": 0}
+        session_stats = defaultdict(lambda: {"n": 0, "win": 0, "partial": 0, "loss": 0, "expired": 0})
+        token_stats = defaultdict(lambda: {"n": 0, "win": 0, "partial": 0, "loss": 0, "pnl": 0.0})
+        r_buckets = {"<-1R": 0, "-1..0R": 0, "0..1R": 0, "1..2R": 0, "2..3R": 0, ">3R": 0}
+        r_values = []
+        monthly = defaultdict(lambda: {"n": 0, "pnl": 0.0, "win": 0})
+
+        # ── Equity + underwater accumulators ─────────────────────────────────
+        equity_pts = []
+        underwater_pts = []
+        cum = peak = 0.0
+
+        for (sid, tok, sig, sess, _ent, ts, closed_at, result, _max_pnl,
+             realized_r, _t1, _t2, _t3, _sl,
+             tp1_pct, tp2_pct, tp3_pct, sl_pct) in rows:
+            # 2026-05-28 cascade fix: replace the live bot's stored profit_pct
+            # (max-greed full-position assumption) with the 50/50 cascade P&L
+            # that matches the backtest's realized_r and real ICT execution.
+            pnl_f = _cascade_pnl(result, tp1_pct, tp2_pct, tp3_pct, sl_pct, _t1)
+            sess_lbl = (sess or "UNKNOWN").upper()
+            sig_lbl  = (sig  or "").upper()
+            tok_lbl  = (tok  or "UNKNOWN").upper()
+            close_ts = closed_at or ts
+
+            # ── Outcome classification (PARTIAL_TP1/TP2 collapsed into PARTIAL)
+            if result == "WIN":
+                outcome_key = "WIN"; wins += 1
+                session_stats[sess_lbl]["win"] += 1
+                token_stats[tok_lbl]["win"]   += 1
+            elif result in ("PARTIAL", "PARTIAL_TP1", "PARTIAL_TP2"):
+                outcome_key = "PARTIAL"; partials += 1
+                session_stats[sess_lbl]["partial"] += 1
+                token_stats[tok_lbl]["partial"]   += 1
+            elif result == "LOSS":
+                outcome_key = "LOSS"; losses += 1
+                session_stats[sess_lbl]["loss"] += 1
+                token_stats[tok_lbl]["loss"]   += 1
+            elif result == "EXPIRED":
+                outcome_key = "EXPIRED"; expired += 1
+                session_stats[sess_lbl]["expired"] += 1
+            else:
+                outcome_key = "EXPIRED"; expired += 1
+            outcome_buckets[outcome_key] += 1
+
+            # ── Direction
+            if sig_lbl in ("BUY", "SELL"):
+                direction_buckets[sig_lbl] += 1
+
+            # ── Session bucket count
+            session_stats[sess_lbl]["n"] += 1
+
+            # ── Token bucket
+            token_stats[tok_lbl]["n"]   += 1
+            token_stats[tok_lbl]["pnl"] += pnl_f
+
+            # ── R-multiple histogram
+            r_val = realized_r if realized_r is not None else (pnl_f / 1.0)  # fall back to %
+            if realized_r is not None:
+                r_values.append(float(realized_r))
+                rr = float(realized_r)
+                if   rr <  -1.0: r_buckets["<-1R"] += 1
+                elif rr <   0.0: r_buckets["-1..0R"] += 1
+                elif rr <   1.0: r_buckets["0..1R"] += 1
+                elif rr <   2.0: r_buckets["1..2R"] += 1
+                elif rr <   3.0: r_buckets["2..3R"] += 1
+                else:            r_buckets[">3R"]  += 1
+
+            # ── Monthly bucket (YYYY-MM)
+            try:
+                month_key = (close_ts or "")[:7]
+                if len(month_key) == 7 and month_key[4] == "-":
+                    monthly[month_key]["n"]   += 1
+                    monthly[month_key]["pnl"] += pnl_f
+                    if outcome_key == "WIN":
+                        monthly[month_key]["win"] += 1
+            except Exception:
+                pass
+
+            # ── KPI numerics
+            pnl_sum += pnl_f
+            best  = pnl_f if best  is None or pnl_f > best  else best
+            worst = pnl_f if worst is None or pnl_f < worst else worst
+            if pnl_f > 0: gross_win  += pnl_f
+            if pnl_f < 0: gross_loss += pnl_f
+
+            # ── Equity + underwater
+            cum  += pnl_f
+            peak  = max(peak, cum)
+            equity_pts.append({"ts": close_ts, "cum_pnl": round(cum, 3)})
+            underwater_pts.append({"ts": close_ts, "dd_pct": round(cum - peak, 3)})
+
+        # ── Derived KPIs ──────────────────────────────────────────────────────
+        wr_canon = _canonical_wr(wins, partials, losses, expired)
+        avg_r    = (sum(r_values) / len(r_values)) if r_values else 0.0
+        profit_factor = round(gross_win / abs(gross_loss), 2) if gross_loss < 0 else None
+        max_dd = min((p["dd_pct"] for p in underwater_pts), default=0.0)
+
+        # ── WR-by-session (donut needs win count and total to render WR%) ────
+        sessions_out = []
+        for sess, agg in session_stats.items():
+            n = agg["n"]
+            wr = _canonical_wr(agg["win"], agg["partial"], agg["loss"], agg["expired"])
+            sessions_out.append({"session": sess, "n": n,
+                                 "wins": agg["win"], "partials": agg["partial"],
+                                 "losses": agg["loss"], "expired": agg["expired"],
+                                 "wr": wr})
+        # Canonical session order
+        _SESS_ORDER = {"ASIA_KZ": 0, "LONDON_KZ": 1, "NY_AM_KZ": 2, "OVERNIGHT": 3, "UNKNOWN": 9}
+        sessions_out.sort(key=lambda s: _SESS_ORDER.get(s["session"], 8))
+
+        # ── Per-token table (top 10 by count) ────────────────────────────────
+        tokens_out = []
+        for tok, agg in token_stats.items():
+            n = agg["n"]
+            wr = _canonical_wr(agg["win"], agg["partial"], agg["loss"], 0)
+            tokens_out.append({"token": tok, "n": n,
+                               "wins": agg["win"], "partials": agg["partial"],
+                               "losses": agg["loss"], "pnl": round(agg["pnl"], 2),
+                               "wr": wr})
+        tokens_out.sort(key=lambda t: t["n"], reverse=True)
+
+        # ── Monthly P&L sorted by month ──────────────────────────────────────
+        monthly_out = []
+        for k in sorted(monthly.keys()):
+            m = monthly[k]
+            wr = _canonical_wr(m["win"], 0, m["n"] - m["win"], 0)
+            monthly_out.append({"month": k, "n": m["n"],
+                                "pnl": round(m["pnl"], 2), "wr": wr})
+
+        return {
+            "ok": True,
+            "pnl_mode": "cascade_50_50",
+            "pnl_mode_note": ("50/50 cascade execution: 50% exits at TP1, "
+                              "remaining 50% runs to TP2/TP3 or trails to "
+                              "break-even after TP1 hits. Matches backtest "
+                              "realized_r + standard ICT TP discipline."),
+            "kpi": {
+                "n":              n_total,
+                "wins":           wins,
+                "partials":       partials,
+                "losses":         losses,
+                "expired":        expired,
+                "wr_pct":         round(wr_canon, 1),
+                "avg_r":          round(avg_r, 2),
+                "best":           round(best  or 0.0, 2),
+                "worst":          round(worst or 0.0, 2),
+                "profit_factor":  profit_factor,
+                "total_pnl_pct":  round(pnl_sum, 2),
+                "max_dd_pct":     round(max_dd, 2),
+                "days":           limit_days,
+            },
+            "outcomes":   outcome_buckets,
+            "directions": direction_buckets,
+            "sessions":   sessions_out,
+            "tokens":     tokens_out[:10],
+            "r_dist":     r_buckets,
+            "monthly":    monthly_out,
+            "equity":     equity_pts,
+            "underwater": underwater_pts,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 def get_rolling_wf(run_id: int = None, train_days: int = 90, test_days: int = 30, step_days: int = 30):
     """Rolling walk-forward train/test WR series for the backtest WF chart (C6, 2026-05-22).
@@ -544,7 +783,14 @@ def get_intelligence():
                         key=lambda x: x["wr"], default=None)
 
         # ── Token performance ─────────────────────────────────
-        _OGD_MIN = 30
+        # CY12-OGD-MIN-UNIFY fix (full audit 2026-05-29 tracker H2): unify
+        # the blend_pct threshold across BOTH the Intelligence and Adaptive
+        # panels. Pre-fix this used _OGD_MIN=30 (SAMPLE_N_OBSERVE) while
+        # the Adaptive panel below used _OGD_MIN=10 (OGD_MIN_SAMPLES) —
+        # operator saw DIFFERENT blend_pct for the same token between
+        # tabs. OGD_MIN_SAMPLES (10) is the canonical "OGD learning
+        # active" threshold per adaptive_engine.py; use that everywhere.
+        _OGD_MIN = 10
         token_rows = conn.execute(
             "SELECT DISTINCT token FROM signals ORDER BY token").fetchall()
         tokens = []
@@ -2031,7 +2277,13 @@ def manual_close_signal(signal_id, exit_price):
         else:
             result = "LOSS"
 
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # CY12-UTC-TRACKER fix (full audit 2026-05-29 tracker HIGH-1):
+        # pre-fix this used datetime.now() which returns VPS LOCAL time (SGT
+        # = UTC+8). Every other writer (crypto_alert.py:1714, signal save
+        # path) uses UTC, so a manual close added an +8h drift to closed_at,
+        # silently breaking equity-curve ordering, monthly P&L buckets, and
+        # the Reports tab "days" filter. Now uses UTC consistently.
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         conn.execute("UPDATE signals SET status='CLOSED' WHERE id=?", (signal_id,))
         conn.execute("""UPDATE results SET
             result=?, profit_pct=?, closed_at=?, exit_price=?, close_reason='MANUAL'
@@ -2132,13 +2384,28 @@ def _latest_audit_score() -> dict:
         import re as _re
         # Find the "Overall" scorecard row, then take the LAST score
         # mentioned on that line (rightmost = most recent column).
+        # 2026-05-28: tolerate both `9.30/10` and bare `9.30` formats —
+        # cycle-11 report dropped the `/10` suffix and broke the strict
+        # regex, leaving the dashboard's audit score blank.
+        # Scores are markdown-bold-wrapped (`**9.30**`) so we anchor on
+        # the bold delimiter to avoid matching unrelated numbers like
+        # "+0.06" deltas on the same row.
         for line in text.splitlines():
             if "Overall" not in line:
                 continue
-            matches = _re.findall(r"(\d+\.\d+)\s*/\s*10", line)
+            # Try strict X.X/10 first (most precise); fall back to bare X.X
+            # surrounded by markdown bold (**X.X** or **X.X/10**).
+            matches = _re.findall(r"(\d+\.\d{1,2})\s*/\s*10", line)
+            if not matches:
+                matches = _re.findall(r"\*\*(\d+\.\d{1,2})(?:/10)?\*\*", line)
             if matches:
-                out["score"] = float(matches[-1])
-                break
+                # Filter implausible values (deltas like "+0.06" or "0.06"
+                # could theoretically match the bold pattern if formatted
+                # oddly; cap at the 0-10 range for sanity).
+                valid = [float(m) for m in matches if 0.0 <= float(m) <= 10.0]
+                if valid:
+                    out["score"] = valid[-1]
+                    break
     except Exception:
         pass
     return out
@@ -2258,6 +2525,54 @@ def get_explorer_trials(limit: int = 50) -> dict:
                 "totals": totals, "n_studies": n_studies}
     except Exception as e:
         return {"ok": False, "error": str(e), "trials": []}
+
+
+def get_activity_feed(limit: int = 20) -> dict:
+    """Return the last `limit` plain-English [ACTIVITY] lines from bot.log.
+
+    The bot's CRT scan path emits "[ACTIVITY] ..." prefixed lines at
+    meaningful decision points (cycle start, BTC macro context, per-token
+    rejection / cooldown / signal emit). The tracker tails bot.log and
+    surfaces them in the Open Positions tab's live AI feed.
+
+    The feed is INTENTIONALLY ephemeral — no DB persistence. Operator
+    sees the last ~10-15 min of activity. Buffer rotates as the bot's
+    log file rolls.
+
+    Parse a fixed tail window (default 8KB) so the read is bounded; the
+    operator's bot.log grows to multi-MB and we don't want to load it all.
+    """
+    log_path = os.path.join(_ROOT, "logs", "bot.log")
+    entries: list = []
+    try:
+        with open(log_path, "rb") as f:
+            try:
+                f.seek(-65536, 2)  # last 64KB — enough for ~200 [ACTIVITY] lines
+            except OSError:
+                f.seek(0)
+            tail = f.read().decode("utf-8", errors="replace")
+    except FileNotFoundError:
+        return {"ok": False, "error": "bot.log not found", "entries": []}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "entries": []}
+
+    # Most recent file mtime as "feed timestamp" (best-effort).
+    try:
+        mtime = os.path.getmtime(log_path)
+    except Exception:
+        mtime = 0
+
+    for line in tail.splitlines():
+        idx = line.find("[ACTIVITY]")
+        if idx < 0:
+            continue
+        msg = line[idx + len("[ACTIVITY]"):].strip()
+        if not msg:
+            continue
+        entries.append(msg)
+    # Take last `limit`, newest at the top of the returned list
+    entries = entries[-int(limit):][::-1]
+    return {"ok": True, "entries": entries, "log_mtime": mtime, "count": len(entries)}
 
 
 def get_baseline_pin() -> dict:
@@ -2613,6 +2928,16 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(rows)
         elif self.path == "/api/intelligence":
             self.send_json(get_intelligence())
+        elif self.path == "/api/activity" or self.path.startswith("/api/activity?"):
+            # Activity feed for Open Positions tab — last 20 plain-English
+            # AI-decision lines tailed from logs/bot.log.
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            try:
+                _lim = max(1, min(50, int(qs.get("limit", ["20"])[0])))
+            except (ValueError, TypeError):
+                _lim = 20
+            self.send_json(get_activity_feed(limit=_lim))
         elif self.path == "/api/hour-day-heatmap":
             # C2 (2026-05-22 tracker audit): WR by hour-of-day × day-of-week
             self.send_json(get_hour_day_heatmap())
@@ -2630,6 +2955,17 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     _rid = None
             self.send_json(get_rolling_wf(run_id=_rid))
+        elif self.path == "/api/reports" or self.path.startswith("/api/reports?"):
+            # Reports tab payload — LIVE/PAPER only, backtest excluded by SQL.
+            _days = 365
+            if "?" in self.path:
+                try:
+                    from urllib.parse import urlparse, parse_qs
+                    _q = parse_qs(urlparse(self.path).query)
+                    _days = max(7, min(3650, int(_q.get("days", ["365"])[0])))
+                except Exception:
+                    _days = 365
+            self.send_json(get_reports(limit_days=_days))
         elif self.path == "/api/equity-curve" or self.path.startswith("/api/equity-curve?"):
             # C1 (2026-05-22 tracker audit): cumulative P&L for the Open Positions chart.
             # Optional ?days=N query (default 90, clamped 7..365).
@@ -2654,9 +2990,35 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/tune/status":
             self.send_json(tune_status())
         elif self.path == "/api/health":
+            # CY12-UTC-HEALTH fix (round-2 audit 2026-05-29 tracker NEW-1):
+            # consistent UTC discipline across every timestamp the dashboard
+            # emits. The pre-fix LOCAL `datetime.now()` was the last surviving
+            # non-UTC timestamp writer in tracker.py. Also surface heartbeat
+            # freshness so the frontend can render "BOT STALE" instead of
+            # the always-green "DB OK" pill when the bot is frozen
+            # (tracker round-1 H3 closes when frontend consumes this).
             ok = os.path.exists(DB_PATH)
-            self.send_json({"db_exists": ok, "db_path": DB_PATH,
-                            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+            _hb_age_s = None
+            _bot_active = None
+            try:
+                _hb_path = os.path.join(_ROOT, "data", "heartbeat.json")
+                if os.path.exists(_hb_path):
+                    with open(_hb_path, "r", encoding="utf-8") as _f:
+                        _hb = json.load(_f)
+                    _hb_ts = float(_hb.get("ts_unix") or 0.0)
+                    if _hb_ts > 0:
+                        import time as _time
+                        _hb_age_s = round(_time.time() - _hb_ts, 1)
+                        _bot_active = (_hb_age_s < 300)  # 5-min window
+            except Exception:
+                pass
+            self.send_json({
+                "db_exists": ok,
+                "db_path": DB_PATH,
+                "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S") + " UTC",
+                "heartbeat_age_s": _hb_age_s,
+                "bot_active": _bot_active,
+            })
         elif self.path == "/api/adaptive/summary":
             self.send_json(get_adaptive_summary())
         elif self.path == "/api/adaptive/forensic" or self.path.startswith("/api/adaptive/forensic?"):

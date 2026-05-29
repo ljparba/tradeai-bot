@@ -182,6 +182,11 @@ CRT_ANTI_PATTERN_LOCKS = {
     # 2026-05-27 CRT Pro empirical: quality gates ON cost -21% total R vs OFF
     # at the same bias setting. Locked to "0" (OFF) until re-tested.
     "CRT_APPLY_QUALITY_GATES":  ("0",),
+    # Cycle-12 explorer-axis additions (2026-05-29). These are env-overridable
+    # via ict_engine.py module-level _env_float() reads (added 2026-05-29).
+    # MIN_TP1_MULT anti-pattern at ≥2.0 — Run #36 catastrophic (WR 18% vs 38%);
+    # the explorer is locked to <2.0. The 4 sampled values stay below.
+    "MIN_TP1_MULT":             ("1.0", "1.25", "1.5", "1.75"),
 }
 
 
@@ -229,7 +234,7 @@ def _assert_anti_pattern_locks() -> None:
 
 # Anti-overfit guard thresholds
 GUARD = {
-    "consecutive_fail_max":     50,    # PAUSE if N consecutive FAIL verdicts
+    "consecutive_fail_max":     150,   # PAUSE if N consecutive FAIL verdicts. H2 fix (explorer audit cycle-12 2026-05-29): lowered from 500 to 150. At ~11min/trial, 500 = 92h of continuous failure before tripping — effectively disables invariant #12. 150 = ~27h, still allows tolerant Bayesian exploration in productive regions but doesn't let a broken session run unattended for ~4 days. Operator can stop manually anytime. (Prior raise 100→500 on 2026-05-28 PM was overcorrection for config_hash collision investigation — collisions are now impossible per CR-CY11-1 patch, so 100-150 is the right band.)
     "sr_trial_std_jump_pct":    25.0,  # PAUSE if cross-config std rises >X% mid-session
     "best_dsr_drop_vs_pin_pp":  5.0,   # PAUSE if best-of-session DSR < pin DSR - X pp
     "consecutive_error_max":    3,     # PAUSE if N consecutive ERROR (timeouts/crashes)
@@ -515,6 +520,83 @@ def _suggest_params(trial: optuna.Trial) -> dict:
         # Default 576 (48h); test 24h / 48h / 72h variants.
         "CRT_FORWARD_BARS":         trial.suggest_categorical("CRT_FORWARD_BARS",
                                         ["288", "576", "864"]),
+        # ── T1.2 Funding rate overlay knobs (2026-05-29, ENHANCEMENT_ROADMAP.md)
+        # FUNDING_GATE_ENABLED toggles the overlay on/off. When 0 the funding
+        # rate is captured for metadata but applies no confidence bonus.
+        "FUNDING_GATE_ENABLED":     trial.suggest_categorical("FUNDING_GATE_ENABLED",
+                                        ["0", "1"]),
+        # Extreme thresholds — values in raw fractional 8h rate.
+        # Defaults ±0.0003 (=±0.03% per 8h). Search [±0.0001 .. ±0.0010].
+        "FUNDING_EXTREME_SHORT_THRESH": trial.suggest_float(
+            "FUNDING_EXTREME_SHORT_THRESH", 0.0001, 0.0010, step=0.0001),
+        "FUNDING_EXTREME_LONG_THRESH":  trial.suggest_float(
+            "FUNDING_EXTREME_LONG_THRESH", -0.0010, -0.0001, step=0.0001),
+        # Confidence bonus magnitude. 0.0 = disabled; 0.10 = ±1 confidence pt.
+        "FUNDING_BONUS_PCT":        trial.suggest_float(
+            "FUNDING_BONUS_PCT", 0.0, 0.10, step=0.01),
+        # ── T1.3 BTC correlation overlay knobs (2026-05-29) ────────────
+        # Window in 5M bars: 30=2.5h, 60=5h, 120=10h. Sweet spot is 60-100.
+        "BTC_CORR_WINDOW_MIN":      trial.suggest_int(
+            "BTC_CORR_WINDOW_MIN", 30, 120, step=10),
+        # Confidence bonus magnitude. 0.0 = metadata-only.
+        "BTC_CORR_BONUS_PCT":       trial.suggest_float(
+            "BTC_CORR_BONUS_PCT", 0.0, 0.10, step=0.01),
+        # High-correlation threshold for ALIGNED_HIGH classification.
+        "BTC_CORR_HIGH_THRESH":     trial.suggest_float(
+            "BTC_CORR_HIGH_THRESH", 0.5, 0.9, step=0.05),
+        # ── Cycle-12 unexplored axes (2026-05-29) ───────────────────────────
+        # H4_CRT_FVG_PROBE_WIDTH — number of 5M bars probed for FVG
+        # confluence around the MSS confirmation site. Default W=2 reproduces
+        # the H-3 fix [mss-1, mss] probe (Run-1749 baseline). Wider W catches
+        # displacement-style FVGs that landed earlier than the MSS close-
+        # through bar. Live diagnostic 2026-05-29 showed BTC currently has 0
+        # BUY FVGs at exactly [mss-1, mss] in the 24h window — sweeping W=2-5
+        # tests whether the legacy probe is the binding gate on signal
+        # frequency at any rate of cost to per-signal WR.
+        "H4_CRT_FVG_PROBE_WIDTH":   trial.suggest_int(
+            "H4_CRT_FVG_PROBE_WIDTH", 2, 5, step=1),
+        # H4_CRT_MITIGATION_TTL_H — hours after which a consumed C1 zone
+        # becomes re-eligible for re-firing. 0 = never expire (DEFAULT,
+        # Run-1749 baseline). 24/72/168 lets zones re-fire after 1d/3d/1wk.
+        # Rationale: with C2_LOOKBACK=4 the search window slides only ~1 H4
+        # bar per scan but consumed zones accumulate indefinitely → in long
+        # bear runs eventually every recent C1 is locked. TTL re-eligibles
+        # old zones that re-test in subsequent trend phases (canonical ICT
+        # behavior for LRLR/LH-LL liquidity pools).
+        "H4_CRT_MITIGATION_TTL_H":  trial.suggest_categorical(
+            "H4_CRT_MITIGATION_TTL_H", ["0", "24", "72", "168"]),
+        # ── Cycle-12 extended axes (added 2026-05-29 post explorer audit) ───
+        # A: H4_CRT_MSS_HORIZON — 5M bars allowed for MSS confirmation after
+        # sweep. Live diagnostic 2026-05-29 found "MSS NOT confirmed in 30-bar
+        # horizon" was the binding gate for ~half of CRT candidates. Test
+        # 20/30/40/50 to find the sweet spot between strictness and frequency.
+        "H4_CRT_MSS_HORIZON":       trial.suggest_int(
+            "H4_CRT_MSS_HORIZON", 20, 50, step=5),
+        # B: ICT_SL_BUFFER_PCT — SL placement buffer beyond swept wick.
+        # Tighter = more SL hits but better RR; looser = fewer SL hits but
+        # worse RR. Default 0.003 (0.3%). Range = 0.001 to 0.005 (0.1-0.5%).
+        "ICT_SL_BUFFER_PCT":        trial.suggest_float(
+            "ICT_SL_BUFFER_PCT", 0.001, 0.005, step=0.0005),
+        # C: MIN_TP1_MULT — RR floor for TP1 placement. Affects which setups
+        # pass the economics gate. Anti-pattern at ≥2.0 (Run #36 catastrophic
+        # WR 18%); explorer locks <2.0. Default 1.5 preserves Run-1749 baseline.
+        "MIN_TP1_MULT":             trial.suggest_categorical(
+            "MIN_TP1_MULT", ["1.0", "1.25", "1.5", "1.75"]),
+        # D: H4_CRT_OB_SCAN_LOOKBACK — OB scan depth on H4 stream. Wider =
+        # more OB confluence matches but possibly stale OBs. Default 20.
+        "H4_CRT_OB_SCAN_LOOKBACK":  trial.suggest_int(
+            "H4_CRT_OB_SCAN_LOOKBACK", 10, 40, step=5),
+        # E: SIGNAL_COOLDOWN — re-fire latency in minutes per direction per
+        # token. Tighter = more signals on same token but correlation risk;
+        # looser = fewer signals. Default 40 minutes.
+        "SIGNAL_COOLDOWN":          trial.suggest_categorical(
+            "SIGNAL_COOLDOWN", ["20", "30", "40", "60", "120"]),
+        # F: ICT_FVG_MIN_GAP — min FVG gap as fraction of price for FVG
+        # detection sensitivity. Affects both 5M_SWEEP path and CRT FVG
+        # confluence. Default 0.001 (0.1%). Already in 5M_SWEEP space but
+        # not CRT — adding here so CRT-only mode can sweep it too.
+        "ICT_FVG_MIN_GAP":          trial.suggest_float(
+            "ICT_FVG_MIN_GAP", 0.0005, 0.003, step=0.0005),
     }
 
 
@@ -817,6 +899,11 @@ def _runtime_env_snapshot() -> dict:
         "CRT_REQUIRE_1H_TREND",
         # Wyckoff v2
         "WYCKOFF_PHASE_FILTER",
+        # Cycle-12 unexplored axes (2026-05-29)
+        "H4_CRT_FVG_PROBE_WIDTH", "H4_CRT_MITIGATION_TTL_H",
+        # Cycle-12 extended axes (added post explorer audit 2026-05-29)
+        "MIN_TP1_MULT", "ICT_SL_BUFFER_PCT", "SIGNAL_COOLDOWN",
+        "ICT_FVG_MIN_GAP",  # already in 5M space; explicit for CRT clarity
     ]
     # Conservative defaults — match what _compute_run_config_hash reads.
     defaults = {
@@ -826,6 +913,14 @@ def _runtime_env_snapshot() -> dict:
         "CRT_APPLY_QUALITY_GATES": "0",
         "CRT_REQUIRE_1H_TREND":    "0",
         "WYCKOFF_PHASE_FILTER":    "off",
+        # Cycle-12 unexplored axes — defaults preserve Run-1749 baseline
+        "H4_CRT_FVG_PROBE_WIDTH":  "2",
+        "H4_CRT_MITIGATION_TTL_H": "0",
+        # Cycle-12 extended axes — all 6 defaults preserve Run-1749 baseline
+        "MIN_TP1_MULT":            "1.5",
+        "ICT_SL_BUFFER_PCT":       "0.003",
+        "SIGNAL_COOLDOWN":         "40",
+        "ICT_FVG_MIN_GAP":         "0.001",
     }
     return {k: os.environ.get(k, defaults.get(k, "")) for k in keys}
 
@@ -987,6 +1082,16 @@ def _auto_promote(study_name: str, trial_no: int, params: dict, m: dict, m2: dic
             "WYCKOFF_PHASE_FILTER":   "wyckoff_phase_filter",
             "CRT_REQUIRE_1H_TREND":   "crt_require_1h_trend",
             "CRT_FORWARD_BARS":       "crt_forward_bars",
+            # Cycle-12 unexplored axes (2026-05-29)
+            "H4_CRT_FVG_PROBE_WIDTH": "h4_crt_fvg_probe_width",
+            "H4_CRT_MITIGATION_TTL_H": "h4_crt_mitigation_ttl_h",
+            # Cycle-12 extended axes (added post explorer audit 2026-05-29)
+            "MIN_TP1_MULT":            "min_tp1_mult",
+            "ICT_SL_BUFFER_PCT":       "ict_sl_buffer_pct",
+            "SIGNAL_COOLDOWN":         "signal_cooldown",
+            "ICT_FVG_MIN_GAP":         "ict_fvg_min_gap",
+            "H4_CRT_MSS_HORIZON":      "h4_crt_mss_horizon",
+            "H4_CRT_OB_SCAN_LOOKBACK": "h4_crt_ob_scan_lookback",
         }.get(k, k.lower())
         prev = pin_settings.get(nice_key)
         if prev is not None and str(prev) != str(v):

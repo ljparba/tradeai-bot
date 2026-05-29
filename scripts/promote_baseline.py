@@ -45,10 +45,21 @@ def _current_settings() -> dict:
     sys.path.insert(0, _ROOT)
     import config as cfg
     import ict_engine as ict
+    # M-CY11-7 fix (audit 2026-05-28 cycle-11): snapshot bias gates with explicit
+    # LIVE_ and BACKTEST_ split. Pre-fix the pin recorded a single `bias_4h_gate`
+    # = cfg.LIVE_BIAS_4H_GATE (process env at promote time) while `_extra` below
+    # recorded backtest_bias_4h_gate from os.environ — producing asymmetric pin
+    # snapshots where live_bias_4h_gate=strict but backtest_bias_4h_gate=loose
+    # for the SAME promoted trial. Now both are read via os.environ.get() with
+    # config defaults, so the pin transparently reflects the operator's env at
+    # promote time and (when explorer subprocess sets only one) the asymmetry
+    # is visible rather than hidden.
     return {
-        # Original ICT gate fingerprint
-        "bias_4h_gate":              cfg.LIVE_BIAS_4H_GATE,
-        "trend_1h_gate":             cfg.LIVE_TREND_1H_GATE,
+        # Original ICT gate fingerprint (LIVE/BACKTEST split surfaced)
+        "live_bias_4h_gate":         os.environ.get("LIVE_BIAS_4H_GATE", cfg.LIVE_BIAS_4H_GATE),
+        "backtest_bias_4h_gate":     os.environ.get("BACKTEST_BIAS_4H_GATE", cfg.BACKTEST_BIAS_4H_GATE),
+        "live_trend_1h_gate":        os.environ.get("LIVE_TREND_1H_GATE", cfg.LIVE_TREND_1H_GATE),
+        "backtest_trend_1h_gate":    os.environ.get("BACKTEST_TREND_1H_GATE", cfg.BACKTEST_TREND_1H_GATE),
         "dealing_range_gate_live":   cfg.LIVE_DEALING_RANGE_GATE,
         "dealing_range_gate_backtest": cfg.BACKTEST_DEALING_RANGE_GATE,
         "mss_min_quality":           cfg.LIVE_MSS_MIN_QUALITY,
@@ -58,6 +69,8 @@ def _current_settings() -> dict:
         "ict_mss_horizon":           ict.ICT_MSS_HORIZON,
         "ict_fvg_min_gap":           ict.ICT_FVG_MIN_GAP,
         "ict_eqh_tolerance":         ict.ICT_EQH_TOLERANCE,
+        # ICT_MIN_RR_GATE (cycle-11): now in config_hash payload too
+        "ict_min_rr_gate":           os.environ.get("ICT_MIN_RR_GATE", "1.3"),
         # Scanner kill switches (Fix E-3, 2026-05-27)
         "enable_5m_sweep":           os.environ.get("ENABLE_5M_SWEEP", "1"),
         "enable_h4_crt":             os.environ.get("ENABLE_H4_CRT",   "0"),
@@ -76,6 +89,18 @@ def _current_settings() -> dict:
         "crt_forward_bars":          os.environ.get("CRT_FORWARD_BARS", "576"),
         # Wyckoff v2 (Fix E-3, 2026-05-27)
         "wyckoff_phase_filter":      os.environ.get("WYCKOFF_PHASE_FILTER", "off"),
+        # Cycle-12 unexplored axes (2026-05-29) — fingerprint MUST include
+        # these so promoted baselines that flip them are diffable against
+        # the prior pin and the explorer's headline-param picker shows them.
+        "h4_crt_fvg_probe_width":    os.environ.get("H4_CRT_FVG_PROBE_WIDTH", "2"),
+        "h4_crt_mitigation_ttl_h":   os.environ.get("H4_CRT_MITIGATION_TTL_H", "0"),
+        # Cycle-12 extended axes (added 2026-05-29 post explorer audit)
+        "min_tp1_mult":              os.environ.get("MIN_TP1_MULT", "1.5"),
+        "ict_sl_buffer_pct":         os.environ.get("ICT_SL_BUFFER_PCT", "0.003"),
+        "signal_cooldown":           os.environ.get("SIGNAL_COOLDOWN", "40"),
+        # H4_CRT_MSS_HORIZON, H4_CRT_OB_SCAN_LOOKBACK, ICT_FVG_MIN_GAP already
+        # captured above (lines 84, 85; ict_fvg_min_gap is implicit via 5M
+        # path though CRT-only mode now sweeps it too).
     }
 
 
