@@ -50,6 +50,9 @@ backtest_reports/
 .env.bak_*
 .env.explorer
 
+# Watchdog liveness marker — written every poll, operational-only
+data/watchdog_alive.txt
+
 # ── Auto-generated backups ──────────────────────────────────
 backups/
 
