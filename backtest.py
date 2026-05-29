@@ -104,11 +104,75 @@ from crypto_alert import (
     STRATEGY_VERSION,
     # Phase 5A: safety layer constants for backtest simulation
     EXECUTION_MODE,
+    # per-scanner kill switches (2026-05-27)
+    ENABLE_5M_SWEEP,
     TEMPLATE_MIN_SAMPLE, CIRCUIT_BREAKER_LOOKBACK, CIRCUIT_BREAKER_MIN_WR,
     TIER_DAILY_LIVE_CAPS, BLOCK_RANGING_LIVE, BLOCK_RANGING_TEMPLATES,
 )
+
+# CRT v1 Session 2 (cycle-7 audit 2026-05-27): parallel H4-CRT signal source.
+# Disabled by default (ENABLE_H4_CRT=0 in crt_engine.py); when enabled, the
+# main per-token loop runs a SECOND scan via run_backtest_token_h4_crt()
+# and merges H4_CRT signals with the existing 5M_SWEEP signals before they
+# enter the validation pipeline. Source tagging in the DB row enables
+# per-source attribution.
+from crt_engine import (
+    detect_h4_crt, ENABLE_H4_CRT, H4_CRT_DISABLED_TOKENS,
+    H4_CRT_C2_LOOKBACK, H4_CRT_MSS_HORIZON,
+    # Cycle-12 unexplored axes (2026-05-29): FVG probe width + mitigation TTL
+    H4_CRT_FVG_PROBE_WIDTH, H4_CRT_MITIGATION_TTL_H,
+    prune_consumed_zones,
+    # NEW-4 fix (Session 2 Option H audit 2026-05-27): helpers moved from
+    # backtest.py to crt_engine.py so the live-side integration can import
+    # them via the shared module — eliminates live/BT drift risk.
+    compute_crt_trade_economics, crt_quality_to_confidence,
+    # Option S fix (audit cycle-7 2026-05-27): CRT_TP2_RR / CRT_TP3_RR /
+    # CRT_FORWARD_BARS moved to crt_engine.py so Session 3's crypto_alert.py
+    # imports the SAME values via the shared module. Final 3 constants out
+    # of backtest.py per LBC reviewer's recommendation.
+    CRT_TP2_RR, CRT_TP3_RR, CRT_FORWARD_BARS,
+    # Option S fix: per-gate rejection reason helper for D2 diagnostic
+    # — splits the opaque `crt_economics_gate` counter into 3 specific
+    # gate-fired counters (fees_kill / bew_too_high / invalid_inputs).
+    crt_trade_rejection_reason,
+    # v2 Wyckoff phase context filter (Option KK, audit cycle-7 2026-05-27)
+    detect_wyckoff_context, is_crt_phase_aligned, WYCKOFF_PHASE_FILTER,
+    # CRT Pro v1.1 — TP1 mode + 1H trend gate (2026-05-27)
+    adjust_crt_tp1, CRT_TP1_MODE, CRT_REQUIRE_1H_TREND,
+    # OTE overlay (2026-05-28) — tagging only, no gate.
+    compute_ote_overlay,
+)
+# T1.3 — BTC correlation overlay (2026-05-29). Aliased locally so the
+# backtest CRT inner loop can call without re-importing each iteration.
+from btc_correlation import (
+    compute_btc_correlation as _bt_compute_btc_correlation,
+    classify_btc_corr as _bt_classify_btc_corr,
+)
+# T1.2 Stage B — historical funding lookup (2026-05-29). Cache preloaded once
+# per backtest run; per-signal lookup is O(log N) bisect.
+# H-CY12-1 fix (audit 2026-05-29 cycle-12): import bonus functions to mirror
+# the live confidence overlay formula in the backtest CRT path. Pre-fix the
+# bonus was applied only in live (crypto_alert.py:1245) so the same setup
+# produced different confidence values in signals vs backtest_signals — an
+# M24-class drift that made FUNDING_BONUS_PCT/BTC_CORR_BONUS_PCT inert in
+# any explorer Pareto search using backtest fitness.
+from funding_rate_client import (
+    preload_historical_funding as _bt_preload_funding,
+    get_historical_funding_at as _bt_get_historical_funding_at,
+    historical_fetch_failed as _bt_historical_fetch_failed,
+    classify_funding_extreme as _bt_classify_funding_extreme,
+    funding_confidence_bonus as _bt_funding_confidence_bonus,
+)
+from btc_correlation import (
+    btc_corr_confidence_bonus as _bt_btc_corr_confidence_bonus,
+)
+# H-CRT2-1 fix (Session 2 Option B audit 2026-05-27): import SL buffer
+# directly from ict_engine (crypto_alert.py doesn't re-export it).
+from ict_engine import ICT_SL_BUFFER_PCT
 from strategy_engine import BACKTEST_CONFIG, LIVE_CONFIG, StrategyConfig, evaluate_setup, meets_quality, QUALITY_RANK
-from strategy_templates import evaluate_confluences_vs_templates
+from strategy_templates import (evaluate_confluences_vs_templates,
+                                # Phase B (2026-05-28) — CRT tier classifier
+                                evaluate_crt_templates)
 from adaptive_engine import (
     _utc_to_session, label_sample_size, SAMPLE_N_OBSERVE, weight_engine,
     _QUALITY_SCORE, _SESSION_SCORE, DEFAULT_WEIGHTS as AE_DEFAULT_WEIGHTS,
@@ -193,6 +257,23 @@ REGIME_WINDOW  = 360    # 5M bars for rolling regime = 30H window (was 120×15M)
 COOLDOWN_BARS  = 8      # rollback: F-8/F-9/F-10 reverted to F-4 level (40min); quality config
 ENTRY_WINDOW   = 72     # P-3 ACCEPTED: 48→72 (4H→6H); E-1 (72→96) rejected — 0 new signals
 OUTPUT_FILE    = os.path.join(_ROOT, "data", "backtest_results.json")
+
+# CRT v1 Session 2 H-3 fix (audit cycle-7 2026-05-27): module-level constants
+# for the H4-CRT scanner — promoted from inline magic numbers per the code-
+# quality review. Derived where possible from crt_engine constants so the
+# autonomous explorer's env-override path stays consistent across both.
+CRT_H4_WINDOW_BUFFER       = 2   # padding bars on top of H4_CRT_C2_LOOKBACK
+CRT_5M_WINDOW_SIZE         = 300 # 5M bars in the sub-window passed to detect_h4_crt
+CRT_5M_HEADROOM_BUFFER     = 5   # extra 5M bars beyond H4_CRT_MSS_HORIZON for MSS scan
+CRT_H4_BAR_DURATION_MS     = 4 * 3600 * 1000  # 4 hours in ms — for H4 close-time anchoring
+# CRT_TP2_RR + CRT_TP3_RR + CRT_FORWARD_BARS moved to crt_engine.py (Option S
+# audit cycle-7 2026-05-27) for shared live/backtest import — see imports above.
+
+
+# Session 2 Option H NEW-4 fix (audit cycle-7 2026-05-27): helpers moved to
+# crt_engine.py (compute_crt_trade_economics, crt_quality_to_confidence) so
+# the Session 3 live-side integration can import them via the shared module.
+# Imports are at the top of this file; in-file definitions deleted.
 
 # Locked OOS start date — set once before optimization, never moved.
 # All signals with ts >= this date form the out-of-sample set.
@@ -1223,6 +1304,11 @@ def run_backtest_token(token, c5m, c1h, c4h, btc_c1h=None, btc_c5m=None, config=
             "tb_touch":   _tb["touch"],
             "tb_ret":     _tb["ret"],
             "tb_t1":      _tb["t1"],
+            # CRT v1 Session 2 (cycle-7 audit 2026-05-27): signal source tag.
+            # This is the canonical 5M-sweep path; H4-CRT signals are emitted
+            # by run_backtest_token_h4_crt() with source='H4_CRT' for
+            # independent per-source performance attribution.
+            "source":     "5M_SWEEP",
         })
 
     if rejection_counts:
@@ -1236,6 +1322,626 @@ def run_backtest_token(token, c5m, c1h, c4h, btc_c1h=None, btc_c5m=None, config=
     # above only shows the top-20 per-token rejection reasons; cross-token
     # aggregation in print_report() reveals the structural picture.
     return signals, rejection_counts
+
+
+# ══════════════════════════════════════════════════════════
+# CRT v1 — PARALLEL H4 SCANNER (Session 2)
+# ══════════════════════════════════════════════════════════
+def run_backtest_token_h4_crt(token, c5m, c4h, c1h=None, config=None,
+                               btc_c5m=None):
+    """Simulate H4 CRT signals across the historical timeline (Session 2 + Option B fixes).
+
+    Parallel to run_backtest_token() — uses the SAME 5M/4H candle cache,
+    SAME outcome simulator (check_outcome), SAME triple-barrier labeling,
+    SAME session filter and 4H-bias gate as the 5M-sweep path, and writes
+    signals into the SAME pipeline tagged with source='H4_CRT'.
+
+    Per the spec doc §7 (docs/exploration_runs/CRT_RESEARCH_2026_05_27.md):
+      - H4 reference candle, 5M entry timeframe
+      - Wyckoff/flexible validation school via crt_engine.detect_h4_crt
+      - One-shot mitigation per C1 zone (timestamp-keyed)
+      - (FVG OR OB) confluence required (enforced inside detect_h4_crt)
+      - 4H bias filter applied as "Daily Bias proxy" (H-CRT2-4 fix)
+      - Killzone/session filter (H-CRT2-3 fix)
+      - SL placed 0.3% beyond swept wick (H-CRT2-1 fix — matches 5M path)
+
+    Default-OFF: returns ([], {}) immediately when ENABLE_H4_CRT=0 (the
+    canonical deployment state). Operator enables via ENABLE_H4_CRT=1 in env.
+
+    H6 isolation: backtest uses DEFAULT_WEIGHTS for OGD scoring — same
+    constraint as run_backtest_token. CRT does not break this invariant.
+
+    Returns:
+        (signals: list, rejection_counts: dict) — same contract shape as
+        run_backtest_token() so the main loop can aggregate CRT rejections
+        into _GLOBAL_REJECTIONS with `crt_` prefix for D2 diagnostic
+        surfacing (H-4 fix).
+    """
+    rej: dict = {}
+    if not ENABLE_H4_CRT:
+        rej["crt_default_off"] = 1
+        return [], rej
+    if token.upper() in H4_CRT_DISABLED_TOKENS:
+        rej["crt_blacklisted"] = 1
+        return [], rej
+    if config is None:
+        config = ACTIVE_CONFIG
+
+    if not c4h or not c5m:
+        rej["crt_no_data"] = 1
+        return [], rej
+    n5 = len(c5m["closes"])
+    n4 = len(c4h["closes"])
+    # Option E M-CRT2-2 fix: use CRT_FORWARD_BARS (default 2x larger than 5M
+    # FORWARD_BARS) for the data-sufficiency check so H4 setups near the
+    # latest data don't fall off the edge prematurely.
+    if n5 < WARMUP_BARS + CRT_FORWARD_BARS or n4 < 20:
+        rej["crt_insufficient_data"] = 1
+        return [], rej
+
+    signals = []
+    # Mitigation set persists across H4 scan windows — one-shot per C1 zone
+    # exactly as the spec requires. C-CRT-1 fix: keyed on c1_time (stable
+    # across cache rotation), not list index.
+    consumed: set = set()
+
+    # H-3 fix: derive H4 window size from the env-overridable C2 lookback so
+    # the explorer's tuning propagates correctly. +buffer ensures detector
+    # always has the C2_LOOKBACK bars it expects plus parent context.
+    h4_window = H4_CRT_C2_LOOKBACK + CRT_H4_WINDOW_BUFFER
+
+    # F-1 fix (ict-logic-validator 2026-05-28): precompute BTC 5M indicators
+    # once for time-anchored SMT lookups per CRT setup (mirrors the 5M_SWEEP
+    # path at line 728). When btc_c5m=None (e.g. BTC token's own scan, or
+    # caller didn't pass it), SMT defaults to NONE/False with reason —
+    # same fallback semantics as the 5M_SWEEP path.
+    btc5m_ind_crt = precompute_tf(btc_c5m) if btc_c5m else None
+
+    # Walk H4 candles forward, scanning a sliding window at each step.
+    for h4_end in range(h4_window, n4):
+        h4_start = h4_end - h4_window
+        c4h_win = {
+            "opens":  c4h["opens"][h4_start:h4_end],
+            "highs":  c4h["highs"][h4_start:h4_end],
+            "lows":   c4h["lows"][h4_start:h4_end],
+            "closes": c4h["closes"][h4_start:h4_end],
+            "times":  c4h["times"][h4_start:h4_end],
+        }
+        # C1 fix (audit cycle-7 Option B 2026-05-27): anchor sub-window to
+        # the H4 bar's CLOSE time, not its OPEN time. Binance kline times
+        # store the bar's open; the bar closes 4 hours later. Previously
+        # the +60-bar headroom put the sub-window ~1h past close, letting
+        # score_ict_fvg's mitigation walk and find_ict_swings' confirmation
+        # bars peek into FUTURE 5M data — lookahead bias.
+        h4_open_time_ms  = c4h["times"][h4_end - 1]
+        h4_close_time_ms = h4_open_time_ms + CRT_H4_BAR_DURATION_MS
+        c5m_end_idx = bisect.bisect_right(c5m["times"], h4_close_time_ms)
+        # Tightened headroom: enough for MSS scan + small buffer, no more
+        c5m_end_idx = min(c5m_end_idx + H4_CRT_MSS_HORIZON + CRT_5M_HEADROOM_BUFFER, n5)
+        c5m_start_idx = max(0, c5m_end_idx - CRT_5M_WINDOW_SIZE)
+        if c5m_end_idx - c5m_start_idx < 30:
+            rej["crt_sub_window_too_small"] = rej.get("crt_sub_window_too_small", 0) + 1
+            continue
+        c5m_win = {
+            "opens":  c5m["opens"][c5m_start_idx:c5m_end_idx],
+            "highs":  c5m["highs"][c5m_start_idx:c5m_end_idx],
+            "lows":   c5m["lows"][c5m_start_idx:c5m_end_idx],
+            "closes": c5m["closes"][c5m_start_idx:c5m_end_idx],
+            "times":  c5m["times"][c5m_start_idx:c5m_end_idx],
+        }
+
+        # Cycle-12 mitigation TTL (2026-05-29): re-eligible consumed zones
+        # whose C1 candle closed more than H4_CRT_MITIGATION_TTL_H hours
+        # before the CURRENT-bar wall clock. now_ms is the close time of
+        # the most recent H4 bar in the sub-window — same time reference
+        # the live path uses via wall-clock when this bar would be live.
+        # Default TTL=0 → no-op (Run-1749 baseline behavior preserved).
+        if H4_CRT_MITIGATION_TTL_H > 0 and consumed:
+            try:
+                prune_consumed_zones(consumed, float(h4_close_time_ms),
+                                      H4_CRT_MITIGATION_TTL_H)
+            except Exception:
+                pass
+
+        setup = detect_h4_crt(c4h_win, c5m_win, token=token, consumed=consumed)
+        if setup is None:
+            rej["crt_no_setup"] = rej.get("crt_no_setup", 0) + 1
+            continue
+
+        # Mark the C1 range as mitigated so this scan window won't refire
+        consumed.add(setup["key"])
+
+        # Translate the sub-window MSS bar back into absolute c5m index
+        mss_bar_abs = c5m_start_idx + setup["mss_bar_5m"]
+        if mss_bar_abs >= n5 - CRT_FORWARD_BARS - 1:
+            rej["crt_late_mss_no_forward"] = rej.get("crt_late_mss_no_forward", 0) + 1
+            continue
+        entry_bar = mss_bar_abs + 1  # enter at next 5M bar's open after MSS
+        if entry_bar >= n5 - CRT_FORWARD_BARS - 1:
+            continue
+        entry_price = c5m["opens"][entry_bar]
+        direction = setup["direction"]
+
+        # ── OTE overlay (2026-05-28) — tagging only, no gate ─────────────
+        # Mirror crypto_alert.py:1043+. Impulse leg = C2 wick → 5M MSS extreme.
+        try:
+            _sweep_5m_abs = c5m_start_idx + setup["sweep_5m_idx"]
+            if direction == "BUY":
+                _mss_extreme = max(c5m["highs"][_sweep_5m_abs:mss_bar_abs + 1])
+            else:
+                _mss_extreme = min(c5m["lows"][_sweep_5m_abs:mss_bar_abs + 1])
+            _ote = compute_ote_overlay(
+                direction=direction,
+                sweep_wick=setup["sweep_wick"],
+                mss_extreme=_mss_extreme,
+                entry_price=entry_price,
+            )
+        except Exception:
+            _ote = {"ote_zone": "OTE_UNDEFINED", "ote_fib_pct": None}
+
+        # ── T1.3 BTC correlation overlay (2026-05-29) ──────────────────
+        # Identical computation to the live path (crypto_alert.py CRT scan).
+        # FIX (review 2026-05-29): use timestamp-aligned BTC index, NOT the
+        # raw mss_bar_abs slice. Token and BTC series can have different
+        # lengths if either had a listing-date gap or Binance maintenance
+        # window — naive index slicing would compute correlation over
+        # misaligned timestamps. Mirror the SMT logic at line 1703-1704.
+        _btc_corr_bt = None
+        _btc_corr_cls_bt = "UNKNOWN"
+        try:
+            if (token.upper() != "BTC" and btc_c5m
+                    and btc_c5m.get("closes") and btc_c5m.get("times")):
+                # Look up BTC's index at the same timestamp as the token's
+                # mss_bar (the bar at which the live scanner would have
+                # detected the setup). bisect_right - 1 finds the last BTC
+                # bar at or before that ts.
+                _ts_ms_mss = c5m["times"][mss_bar_abs]
+                _btc_idx = bisect.bisect_right(
+                    btc_c5m["times"], _ts_ms_mss - 1) - 1
+                if _btc_idx >= 0:
+                    _tok_hist = c5m["closes"][:mss_bar_abs + 1]
+                    _btc_hist = btc_c5m["closes"][:_btc_idx + 1]
+                    _btc_corr_bt = _bt_compute_btc_correlation(
+                        _btc_hist, _tok_hist,
+                    )
+                    _btc_corr_cls_bt = _bt_classify_btc_corr(
+                        _btc_corr_bt, direction, bias_4h,
+                    )
+        except Exception:
+            _btc_corr_bt = None
+            _btc_corr_cls_bt = "UNKNOWN"
+
+        # ── T1.2 Stage B funding rate overlay (2026-05-29) ─────────────
+        # Look up the historical funding rate at signal time. The history
+        # cache is preloaded once per backtest run at run_backtest() entry
+        # via preload_historical_funding(). Lookups here are O(log N) bisect.
+        # Returns 0.0 (NEUTRAL) when ts is before the earliest cached rate
+        # (e.g., token listed mid-window) — same behavior as live path's
+        # FUNDING_GATE_ENABLED=0 fallback.
+        _funding_rate_bt = 0.0
+        _funding_cls_bt = "NEUTRAL"
+        try:
+            _signal_ts_ms = c5m["times"][entry_bar]
+            _funding_rate_bt = _bt_get_historical_funding_at(token, _signal_ts_ms)
+            _funding_failed_bt = _bt_historical_fetch_failed(token)
+            _funding_cls_bt = _bt_classify_funding_extreme(
+                _funding_rate_bt, direction, fetch_failed=_funding_failed_bt,
+            )
+        except Exception:
+            _funding_rate_bt = 0.0
+            _funding_cls_bt = "NEUTRAL"
+
+        # ── H-CY12-1 fix (audit 2026-05-29 cycle-12): compute confidence
+        # bonuses identically to the live path (crypto_alert.py:1109, 1158).
+        # The bonus magnitudes are pure functions of (rate, direction) and
+        # (corr, direction, bias) — no Binance/state dependency, so the
+        # backtest computes them deterministically from the same inputs.
+        # Applied below in the result-dict's `confidence` field at line ~1804.
+        try:
+            _funding_bonus_bt = _bt_funding_confidence_bonus(
+                _funding_rate_bt, direction,
+            )
+        except Exception:
+            _funding_bonus_bt = 0.0
+        try:
+            _btc_corr_bonus_bt = _bt_btc_corr_confidence_bonus(
+                _btc_corr_bt, direction, bias_4h,
+            )
+        except Exception:
+            _btc_corr_bonus_bt = 0.0
+
+        # H-CRT2-3 fix: session/killzone filter. Spec § 7 promised reuse
+        # of existing NY AM / London / Asia gates — the 5M-sweep path
+        # applies this at line ~692. Apply same gate to CRT entries.
+        ts = datetime.utcfromtimestamp(c5m["times"][entry_bar] / 1000)
+        if ts.hour not in config.liquid_hours:
+            rej["crt_outside_killzone"] = rej.get("crt_outside_killzone", 0) + 1
+            continue
+
+        # H-CRT2-4 fix + NEW-2 follow-up (Option H 2026-05-27): 4H bias gate.
+        # The earlier fix passed the 12-bar sub-window to get_ict_4h_bias,
+        # which silently returned NEUTRAL for any input shorter than 200
+        # bars — the gate was inert. Replaced with `_lookup_4h_bias`, the
+        # same helper the 5M-sweep path uses at backtest.py:880. It
+        # binary-searches the FULL c4h for the most-recent bar at the entry
+        # timestamp and computes bias from the last 210 bars — guarantees
+        # adequate sample size and live/BT parity by construction.
+        bias_4h = _lookup_4h_bias(c4h, c5m["times"][entry_bar])
+        # Direction must align with bias OR bias is NEUTRAL
+        # (strict gate: reject when bias opposes; loose: accept NEUTRAL too;
+        # none: skip the gate). Use config.bias_4h_gate which the 5M path also reads.
+        gate_mode = getattr(config, "bias_4h_gate", "loose")
+        if gate_mode == "strict":
+            allowed = (bias_4h == ("BULLISH" if direction == "BUY" else "BEARISH"))
+        elif gate_mode == "loose":
+            allowed = (bias_4h in ("NEUTRAL", "BULLISH" if direction == "BUY" else "BEARISH"))
+        else:  # "none"
+            allowed = True
+        if not allowed:
+            rej["crt_bias_gate_blocked"] = rej.get("crt_bias_gate_blocked", 0) + 1
+            continue
+
+        # CRT Pro v1.1 — optional 1H trend gate (2026-05-27).
+        # When CRT_REQUIRE_1H_TREND=1, mirror 5M_SWEEP's trend_1h_gate logic:
+        # BUY needs BULL/STRONG_BULL/NEUTRAL; SELL needs BEAR/STRONG_BEAR/NEUTRAL.
+        # Reuses _lookup_trend helper for live/BT parity. Skipped if c1h not
+        # passed (defensive — preserves v1 behavior when caller omits c1h).
+        # H-3 fix (audit cycle-8 2026-05-27): compute trend_1h UNCONDITIONALLY
+        # (when c1h is available) so the signal dict + OGD feature scores see
+        # the real trend value, not the hardcoded NEUTRAL stub. The gate-apply
+        # logic below remains conditional on CRT_REQUIRE_1H_TREND.
+        # Previously: trend_1h was only computed when the gate was active →
+        # bootstrap_from_backtest read "NEUTRAL" for every CRT signal → OGD's
+        # trend_strength feature got zero-input signal → broken attribution.
+        if c1h is not None:
+            try:
+                _ind1h = precompute_tf(c1h)
+                _trend_1h = _lookup_trend(_ind1h, c5m["times"][entry_bar])
+            except Exception:
+                _ind1h = None
+                _trend_1h = "NEUTRAL"
+        else:
+            _ind1h = None
+            _trend_1h = "NEUTRAL"
+
+        # CY12-REGIME fix (post explorer audit 2026-05-29): compute the real
+        # market regime for the CRT signal so the persisted backtest_signals
+        # row has proper RANGING / TRENDING_BULL / TRENDING_BEAR / UNKNOWN
+        # classification. Pre-fix this was hardcoded to "UNKNOWN" with the
+        # stale comment "H4 CRT operates above regime classifier" — but the
+        # tracker's WIN RATE BY REGIME panel + AI Recommendations regime
+        # slicer can't separate edges without it. Mirrors the 5M_SWEEP
+        # backtest pattern at backtest.py:799 (same detect_regime call on
+        # the 120-bar 1H window up to the signal's entry time).
+        _crt_regime = "UNKNOWN"
+        if _ind1h is not None:
+            try:
+                _ts_ms = c5m["times"][entry_bar]
+                _idx_1h_reg = bisect.bisect_right(_ind1h["times"], _ts_ms - 1) - 1
+                if _idx_1h_reg >= 40:
+                    _w1 = max(0, _idx_1h_reg - 120)
+                    _reg_dict = detect_regime(
+                        _ind1h["closes"][_w1 : _idx_1h_reg + 1],
+                        _ind1h["highs"][_w1  : _idx_1h_reg + 1],
+                        _ind1h["lows"][_w1   : _idx_1h_reg + 1],
+                    )
+                    _crt_regime = _reg_dict.get("regime", "UNKNOWN")
+            except Exception:
+                _crt_regime = "UNKNOWN"
+        if CRT_REQUIRE_1H_TREND and c1h is not None:
+            _bull_ok = _trend_1h in ("BULL", "STRONG_BULL", "NEUTRAL")
+            _bear_ok = _trend_1h in ("BEAR", "STRONG_BEAR", "NEUTRAL")
+            if (direction == "BUY" and not _bull_ok) or (direction == "SELL" and not _bear_ok):
+                rej["crt_1h_trend_blocked"] = rej.get("crt_1h_trend_blocked", 0) + 1
+                continue
+
+        # v2 Wyckoff phase filter (Option KK, audit cycle-7 2026-05-27).
+        # Default mode = "off" → no filter, preserves Test A behavior.
+        # When mode == "strict" or "loose", computes the macro Wyckoff
+        # context from the H4 candle stream and rejects setups whose
+        # direction conflicts with the current phase. Single biggest WR
+        # booster per the article (raw 45-50% → 55-62% band).
+        # Context is ALWAYS computed (regardless of filter mode) so the
+        # entry_type field encodes it for retroactive per-context analysis.
+        #
+        # C-3 CRITICAL fix (audit 2026-05-27 cycle-8): pass a bounded H4
+        # sub-window instead of the full 365-day c4h dataset, otherwise the
+        # function's internal `closes[-window_n:]` slice reads the FINAL 120
+        # bars regardless of signal date → lookahead contamination.
+        #
+        # H-NEW-2 fix (audit 2026-05-28 cycle-9): the original C-3 patch passed
+        # `c4h_win` which is only ~12 bars wide (h4_window = H4_CRT_C2_LOOKBACK
+        # + buffer). That's below detect_wyckoff_context's min_bars=80
+        # requirement, so every backtest CRT signal got the defensive
+        # "TRANSITION" fallback — breaking per-phase OGD attribution and the
+        # explorer's `WYCKOFF_PHASE_FILTER=loose` search variant. Build a
+        # dedicated 200-bar slice ending at h4_end so we have enough history
+        # for an honest classification, while still respecting the
+        # no-lookahead invariant (only bars ≤ h4_end - 1 are visible).
+        _wyk_start = max(0, h4_end - 200)
+        c4h_for_wyckoff = {
+            "opens":  c4h["opens"][_wyk_start:h4_end],
+            "highs":  c4h["highs"][_wyk_start:h4_end],
+            "lows":   c4h["lows"][_wyk_start:h4_end],
+            "closes": c4h["closes"][_wyk_start:h4_end],
+            "times":  c4h["times"][_wyk_start:h4_end],
+        }
+        wyckoff_context = detect_wyckoff_context(c4h_for_wyckoff)
+        if WYCKOFF_PHASE_FILTER != "off":
+            if not is_crt_phase_aligned(wyckoff_context, direction):
+                rej[f"crt_wyckoff_{wyckoff_context.lower()}"] = (
+                    rej.get(f"crt_wyckoff_{wyckoff_context.lower()}", 0) + 1
+                )
+                continue
+
+        # SL = sweep wick + buffer (H-CRT2-1 fix: matches 5M-sweep behavior
+        # at ict_engine.py:757,784 — 0.3% structural buffer beyond the wick).
+        # F-4 fix (ict-logic-validator 2026-05-28): also widen too-tight SL
+        # to MIN_SL_PCT floor — mirrors compute_ict_trade_plan exactly.
+        raw_wick = setup["sl"]
+        if direction == "BUY":
+            sl_price = raw_wick * (1.0 - ICT_SL_BUFFER_PCT)
+            sl_price = min(sl_price, entry_price * (1.0 - MIN_SL_PCT))
+        else:
+            sl_price = raw_wick * (1.0 + ICT_SL_BUFFER_PCT)
+            sl_price = max(sl_price, entry_price * (1.0 + MIN_SL_PCT))
+        # CRT Pro TP1 override (2026-05-27): apply CRT_TP1_MODE policy.
+        # mode=dynamic (default) preserves the C1 opposite extreme behavior.
+        # fixed_1r / min_1r empirically test if uncapping TP1 lifts avg_R.
+        tp1_price = adjust_crt_tp1(
+            direction=direction,
+            entry_price=entry_price,
+            sl_price=sl_price,
+            c1_high=setup["c1_high"],
+            c1_low=setup["c1_low"],
+        )
+        # H-3: TP2/TP3 RR-cascade derived from named module constants
+        risk_dist = abs(entry_price - sl_price)
+        if risk_dist <= 0:
+            rej["crt_zero_risk_dist"] = rej.get("crt_zero_risk_dist", 0) + 1
+            continue
+        if direction == "BUY":
+            tp2_price = entry_price + CRT_TP2_RR * risk_dist
+            tp3_price = entry_price + CRT_TP3_RR * risk_dist
+        else:
+            tp2_price = entry_price - CRT_TP2_RR * risk_dist
+            tp3_price = entry_price - CRT_TP3_RR * risk_dist
+
+        # Forward outcome scan via shared check_outcome helper.
+        # Option E M-CRT2-2 fix: window length = CRT_FORWARD_BARS (default
+        # 576 bars = 48h, vs 5M-sweep's 288 = 24h). H4 setups develop over
+        # longer timescales; capping at 24h artificially TIMEOUTs winners.
+        future = [
+            {"h": c5m["highs"][j], "l": c5m["lows"][j]}
+            for j in range(entry_bar + 1, min(entry_bar + 1 + CRT_FORWARD_BARS, n5))
+        ]
+        if not future:
+            continue
+        outcome, tp_reached = check_outcome(
+            direction, sl_price, tp1_price, tp2_price, tp3_price, future,
+        )
+
+        # Triple-barrier label (de Prado canonical) — same window as check_outcome
+        _tb = triple_barrier_label(
+            direction, entry_price, sl_price, tp1_price,
+            future, t1_bars=CRT_FORWARD_BARS,
+        )
+
+        # Excursion metrics
+        _mfe_pct, _mae_pct = compute_excursions(
+            direction, entry_price, sl_price, tp1_price, future,
+        )
+
+        # NEW-3 + NEW-4 fix (Option H 2026-05-27): economics via shared helper
+        # in crt_engine.py with conventions aligned to compute_ict_trade_plan
+        # (3-dp rounding, MAX_BREAKEVEN_WR gate, net_tp1 ≤ 0 gate). The helper
+        # returns None when a structural gate fails — caller skips the signal
+        # and records the appropriate rejection counter for D2 surfacing.
+        rt_cost = TOKEN_RT_COST.get(token, ROUND_TRIP_COST_PCT) * 100
+        econ = compute_crt_trade_economics(
+            direction, entry_price, sl_price,
+            tp1_price, tp2_price, tp3_price,
+            outcome, rt_cost,
+        )
+        if econ is None:
+            # Option S fix (audit cycle-7 2026-05-27): split opaque
+            # `crt_economics_gate` counter into per-gate counters so the
+            # D2 diagnostic surfaces WHICH gate fired (fees_kill /
+            # bew_too_high / invalid_inputs).
+            _reason = crt_trade_rejection_reason(
+                direction, entry_price, sl_price, tp1_price, rt_cost,
+            )
+            _key = f"crt_economics_{_reason}"
+            rej[_key] = rej.get(_key, 0) + 1
+            continue
+        gross_tp1 = econ["gross_tp1"]
+        gross_sl  = econ["gross_sl"]
+        net_tp1   = econ["net_tp1"]
+        net_tp2   = econ["net_tp2"]
+        net_tp3   = econ["net_tp3"]
+        net_sl    = econ["net_sl"]
+        rr1       = econ["rr1"]
+        net_rr1   = econ["net_rr1"]
+        _real_r   = econ["realized_r"]
+        _bew      = econ["breakeven_wr"]
+
+        # Timestamp string from entry bar (ts already computed above for session check)
+        ts_str = ts.strftime("%Y-%m-%d %H:%M:%S")
+
+        # Option E fixes (audit cycle-7 2026-05-27):
+        # - M-4 quality / M-CRT2-4: confidence derived from MSS+FVG quality
+        # - M-2 bias: breakeven_wr computed (was hardcoded 0.0)
+        _mss_q = setup.get("mss_quality", "NONE")
+        _fvg_q = (setup["confluence"]["details"].get("quality", "NONE")
+                  if setup["confluence"]["type"] == "FVG" else "NONE")
+        # NEW-4 fix (Option H 2026-05-27): use moved helper
+        _crt_conf = crt_quality_to_confidence(_mss_q, _fvg_q)
+
+        # Phase B (2026-05-28): CRT tier classification (hoisted from the
+        # signal-append below to avoid double-evaluating). See live path at
+        # crypto_alert.py for the symmetric call.
+        _crt_bt_features = {
+            "direction":       direction,
+            "confluence_type": setup['confluence']['type'],
+            "mss_quality":     _mss_q,
+            "wyckoff_phase":   wyckoff_context,
+            "bias_4h":         bias_4h,
+            "session":         _utc_to_session(ts.hour),
+        }
+        _crt_bt_matches = evaluate_crt_templates(_crt_bt_features)
+        _crt_bt_best    = next((m for m in _crt_bt_matches if m.is_match), None)
+        _crt_bt_tmpl_id     = _crt_bt_best.template_id if _crt_bt_best else "NONE"
+        _crt_bt_tmpl_scores = json.dumps({
+            m.template_id: round(m.score, 4) for m in _crt_bt_matches
+        })
+
+        # ── F-1 fix (ict-logic-validator 2026-05-28): SMT divergence ──
+        # Time-anchored lookup: at the entry bar's timestamp, take the
+        # BTC 5M sub-window of the last (lookback + reference_horizon)
+        # bars. Mirrors the 5M_SWEEP path at line 908-926. No-lookahead:
+        # bisect_right(times, ts_ms - 1) returns the index of the last
+        # BTC bar that closed at-or-before the entry bar's time.
+        _crt_smt_result = {"smt_confirmed": False, "smt_type": "NONE",
+                           "reason": "no BTC reference"}
+        if btc5m_ind_crt:
+            _ts_ms_entry = c5m["times"][entry_bar]
+            _idx_smt = bisect.bisect_right(btc5m_ind_crt["times"], _ts_ms_entry - 1) - 1
+            _n_smt   = min(_idx_smt + 1, ICT_SMT_LOOKBACK + ICT_SMT_REF_HORIZON)
+            if _n_smt >= ICT_SMT_LOOKBACK + ICT_SMT_REF_HORIZON:
+                _i0_smt = _idx_smt + 1 - _n_smt
+                _sweep_for_smt = setup["type"].replace("_CRT", "")  # SSL_CRT → SSL
+                _crt_smt_result = detect_smt_divergence(
+                    _sweep_for_smt,
+                    ref_h=btc5m_ind_crt["highs"][_i0_smt : _idx_smt + 1],
+                    ref_l=btc5m_ind_crt["lows"][_i0_smt  : _idx_smt + 1],
+                    lookback=ICT_SMT_LOOKBACK, reference_horizon=ICT_SMT_REF_HORIZON,
+                )
+            else:
+                _crt_smt_result = {"smt_confirmed": False, "smt_type": "NONE",
+                                   "reason": "insufficient BTC data"}
+
+        # ── F-2 / dr_location wiring (2026-05-28) ──
+        # Use h4_end as the no-lookahead upper bound: only bars ≤ h4_end-1
+        # are visible (matches the C-3 / H-NEW-2 invariant).
+        _crt_dr_4h = {"location": "UNKNOWN", "midpoint": 0.0}
+        try:
+            _c4h_for_dr_highs = c4h["highs"][:h4_end]
+            _c4h_for_dr_lows  = c4h["lows"][:h4_end]
+            if _c4h_for_dr_highs and _c4h_for_dr_lows and entry_price > 0:
+                _crt_dr_4h = compute_dealing_range(
+                    _c4h_for_dr_highs, _c4h_for_dr_lows, entry_price)
+        except Exception:
+            pass
+
+        signals.append({
+            "token":           token,
+            "signal":          direction,
+            "price":           round(entry_price, 6),
+            "ts":              ts_str,
+            "regime":          _crt_regime,  # CY12-REGIME fix 2026-05-29: was hardcoded "UNKNOWN" — now classified per 1H window same as 5M_SWEEP path
+            # H-CY12-1 fix (audit 2026-05-29 cycle-12): mirror live formula
+            # at crypto_alert.py:1245. Pre-fix, BT stored _crt_conf unchanged
+            # while live applied confidence + 10*(funding+btc_corr bonuses)
+            # clamped [0,10]. Resulted in different confidence values for
+            # the same setup between signals (live) and backtest_signals (BT).
+            "confidence":      max(0, min(10, int(round(
+                                   _crt_conf + 10 * (_funding_bonus_bt + _btc_corr_bonus_bt))))),
+            "confidence_base": _crt_conf,
+            "confidence_funding_bonus":  round(10 * _funding_bonus_bt, 2),
+            "confidence_btc_corr_bonus": round(10 * _btc_corr_bonus_bt, 2),
+            "wscore":          0.0,
+            "margin":          rr1,
+            "conflict":        "LOW",
+            "tp1_pct":         round(gross_tp1, 2),
+            "sl_pct":          round(gross_sl, 2),
+            "rr1":             rr1,
+            "net_tp1_pct":     net_tp1,
+            "net_tp2_pct":     net_tp2,
+            "net_tp3_pct":     net_tp3,
+            "net_sl_pct":      net_sl,
+            "net_rr1":         net_rr1,
+            "breakeven_wr":    _bew,
+            "tp_reached":      tp_reached,
+            "outcome":         outcome,
+            # CRT-specific provenance fields (map onto existing column schema).
+            # 2026-05-28 EQH/EQL CRT wiring: append cluster tag when C1's
+            # swept extreme was part of a >=2-swing cluster. Tagging only —
+            # no gate effect. Mirrors crypto_alert.py:1119+ for live/BT parity.
+            "sweep_type":      setup["type"] + (
+                f"_{setup.get('c1_cluster_type')}"
+                if (setup.get("c1_cluster_size") or 1) >= 2 else ""
+            ),
+            "c1_cluster_size": setup.get("c1_cluster_size", 1),
+            # OTE overlay (2026-05-28) — tagging only, no gate.
+            "ote_zone":        _ote.get("ote_zone", "OTE_UNDEFINED"),
+            "ote_fib_pct":     _ote.get("ote_fib_pct"),
+            # T1.2 funding overlay (2026-05-29) — Stage B: historical lookup.
+            # Live ↔ BT parity ACHIEVED via preload_historical_funding() at
+            # run_backtest() entry + per-signal O(log N) bisect lookup at
+            # entry_bar timestamp. Rate stored as float fraction × 100 for
+            # human readability (0.01 = 0.01%/8h), matching live format.
+            "funding_rate_pct":         round(_funding_rate_bt * 100, 4),
+            "funding_classification":   _funding_cls_bt,
+            # T1.3 BTC correlation overlay (2026-05-29) — full parity with
+            # live path (same compute_btc_correlation function on same window
+            # length, sliced at mss_bar_abs to avoid lookahead).
+            "btc_corr_strength":       (round(_btc_corr_bt, 4) if _btc_corr_bt is not None else None),
+            "btc_corr_classification": _btc_corr_cls_bt,
+            "fvg_pct":         0.0,
+            # H-3 fix (audit cycle-8 2026-05-27): use computed _trend_1h
+            # (always computed above when c1h is available) instead of the
+            # hardcoded NEUTRAL stub. bootstrap_from_backtest reads this
+            # column to drive OGD's trend_strength feature; the stub broke
+            # adaptive learning attribution for all CRT signals.
+            "trend_1h":        _trend_1h,
+            # H-CRT2-4 fix: surface the actual 4H bias that gated this signal
+            "bias_4h":         bias_4h,
+            "ifvg_present":    0,
+            "ifvg_direction":  "",
+            "ifvg_age_bars":   0,
+            "ifvg_5m_used":    0,
+            # F-2 / DR wiring (2026-05-28): real 4H DR location replaces
+            # the hardcoded UNKNOWN stub. Informational, no gate.
+            "dr4h_location":   _crt_dr_4h.get("location", "UNKNOWN"),
+            "mss_quality":     _mss_q,
+            "fvg_quality":     _fvg_q,
+            # entry_type encodes confluence + Wyckoff context for retroactive
+            # per-context analysis via SQL (no schema migration needed).
+            # Format: H4_CRT_<FVG|OB>_<ACCUMULATION|DISTRIBUTION|MARKUP|MARKDOWN|TRANSITION>
+            "entry_type":      f"H4_CRT_{setup['confluence']['type']}_{wyckoff_context}",
+            # F-1 fix (2026-05-28): real SMT divergence replaces the dead
+            # 0/NONE stub. Enables the +0.10 SMT bonus in tier scoring +
+            # per-tier WR cross-analysis by smt_confirmed.
+            "smt_confirmed":   1 if _crt_smt_result.get("smt_confirmed") else 0,
+            "smt_type":        _crt_smt_result.get("smt_type", "NONE"),
+            "tp1_target_type": "C1_OPPOSITE_EXTREME",
+            "tp2_target_type": f"RR_{CRT_TP2_RR}",
+            "session":         _utc_to_session(ts.hour),
+            "day_of_week":     ts.weekday(),
+            "hour_utc":        ts.hour,
+            # Phase B (2026-05-28): classify CRT signal into Tier A/B/C
+            # using evaluate_crt_templates (same classifier as live path at
+            # crypto_alert.py:scan_h4_crt_for_token). Without this, backtest
+            # CRT signals would all carry matched_template_id=NONE →
+            # tier-calibrator agent would have nothing to validate.
+            # The actual call is hoisted above to _crt_bt_tmpl_id /
+            # _crt_bt_tmpl_scores to avoid double-evaluating.
+            "matched_template_id":  _crt_bt_tmpl_id,
+            "template_scores_json": _crt_bt_tmpl_scores,
+            "mfe_pct":         _mfe_pct,
+            "mae_pct":         _mae_pct,
+            "realized_r":      _real_r,
+            "tb_bin":          _tb["bin"],
+            "tb_touch":        _tb["touch"],
+            "tb_ret":          _tb["ret"],
+            "tb_t1":           _tb["t1"],
+            "source":          "H4_CRT",  # ← KEY tag for per-source attribution
+        })
+
+    # H-4 fix: return (signals, rejection_counts) tuple so main loop can
+    # aggregate CRT rejections into _GLOBAL_REJECTIONS — matches the
+    # contract of run_backtest_token() at line 1251.
+    return signals, rej
 
 
 # ══════════════════════════════════════════════════════════
@@ -1895,6 +2601,27 @@ def init_backtest_db():
         ("tb_touch",  "TEXT"),
         ("tb_ret",    "REAL"),
         ("tb_t1",     "INTEGER"),
+        # CRT v1 Session 2 (audit cycle-7 2026-05-27): signal source tag for
+        # per-source performance attribution. Existing rows backfill to the
+        # default '5M_SWEEP' (the canonical ICT sweep model). H4_CRT signals
+        # from crt_engine.py carry source='H4_CRT'.
+        ("source",    "TEXT DEFAULT '5M_SWEEP'"),
+        # OTE overlay (2026-05-28) — tagging only, no gate.
+        ("ote_zone",      "TEXT"),
+        ("ote_fib_pct",   "REAL"),
+        # T1.2 funding overlay (2026-05-29) — see CRT scan comment for known
+        # live/backtest divergence (backtest uses NEUTRAL until Stage B ships).
+        ("funding_rate_pct",      "REAL"),
+        ("funding_classification","TEXT"),
+        # T1.3 BTC correlation overlay (2026-05-29) — full live/BT parity.
+        ("btc_corr_strength",      "REAL"),
+        ("btc_corr_classification","TEXT"),
+        # H-CY12-1 fix (cycle-12 audit 2026-05-29) — confidence-bonus
+        # attribution columns; mirror live `signals` schema so analytics
+        # can decompose confidence drift between live and backtest.
+        ("confidence_base",            "INTEGER"),
+        ("confidence_funding_bonus",   "REAL"),
+        ("confidence_btc_corr_bonus",  "REAL"),
     ]:
         try:
             conn.execute(f"ALTER TABLE backtest_signals ADD COLUMN {col} {typ}")
@@ -1919,6 +2646,11 @@ def build_summary(all_signals):
     by_sweep   = defaultdict(list)
     by_trend   = defaultdict(list)
     by_session = defaultdict(list)
+    # CRT v1 (2026-05-27): per-source breakdown so the tracker dashboard
+    # can surface the 5M_SWEEP / H4_CRT mix on mixed-source backtest runs.
+    # Without this split, the headline WR silently blends two strategies
+    # (e.g. Run-143 = 29 SWEEP @ 82% + 285 CRT @ 53% = headline 55.7%).
+    by_source  = defaultdict(list)
     for s in all_signals:
         by_token[s["token"]].append(s)
         by_regime[s["regime"]].append(s)
@@ -1927,6 +2659,7 @@ def build_summary(all_signals):
         by_sweep[s.get("sweep_type", "?")].append(s)
         by_trend[s.get("trend_1h", "NEUTRAL")].append(s)
         by_session[s.get("session", "OVERNIGHT")].append(s)
+        by_source[s.get("source", "5M_SWEEP")].append(s)
 
     def tok_entry(sigs):
         total   = len(sigs)
@@ -1955,6 +2688,9 @@ def build_summary(all_signals):
             "wr":      _wr(sigs),
         }
 
+    # by_source uses tok_entry's richer shape (signals, wins, partial, losses,
+    # expired, wr, avg_net_rr, net_expectancy, avg_conf) so the Backtest tab
+    # can render per-source net_expectancy + avg_rr alongside the headline mix.
     return {
         "by_token":   {k: tok_entry(v)         for k, v in by_token.items()},
         "by_regime":  {k: simple_entry(v)       for k, v in by_regime.items()},
@@ -1963,6 +2699,7 @@ def build_summary(all_signals):
         "by_sweep":   {k: simple_entry(v)       for k, v in by_sweep.items()},
         "by_trend":   {k: simple_entry(v)       for k, v in by_trend.items()},
         "by_session": {k: simple_entry(v)       for k, v in by_session.items()},
+        "by_source":  {k: tok_entry(v)         for k, v in by_source.items()},
         "cost_model": {
             "slippage_pct":     round(SLIPPAGE_PCT * 100, 3),
             "fee_per_side_pct": round(FEE_PCT * 100, 2),
@@ -2792,7 +3529,24 @@ def generate_recommendations(all_signals, _train_sigs=None):
     for sweep_type, sigs in by_sweep.items():
         if len(sigs) < 3: continue
         w = _wr(sigs)
-        label = f"{'BSL (SELL)' if sweep_type == 'BSL' else 'SSL (BUY)'}"
+        # Option E M-3 bias fix (audit cycle-7 2026-05-27): handle CRT
+        # sweep_type variants (SSL_CRT / BSL_CRT) alongside the 5M-sweep
+        # BSL / SSL labels. Without this, recommendation messages mis-
+        # labeled CRT bearish sweeps as "SSL (BUY)".
+        # 2026-05-28: tolerate optional EQH/EQL suffix
+        # (e.g. "BSL_CRT_EQH" / "SSL_CRT_EQL") added by CRT cluster tagging.
+        _st_base = sweep_type.replace("_EQH", "").replace("_EQL", "")
+        _eq_suffix = " [EQ-cluster]" if sweep_type != _st_base else ""
+        if _st_base == "BSL":
+            label = "BSL (SELL)" + _eq_suffix
+        elif _st_base == "SSL":
+            label = "SSL (BUY)" + _eq_suffix
+        elif _st_base == "BSL_CRT":
+            label = "BSL_CRT (SELL, H4-CRT)" + _eq_suffix
+        elif _st_base == "SSL_CRT":
+            label = "SSL_CRT (BUY, H4-CRT)" + _eq_suffix
+        else:
+            label = sweep_type or "?"
         if w < 45:
             recs.append({"type": "WARNING", "area": "Sweep Type",
                 "title":  f"{label} sweep underperforming",
@@ -2858,6 +3612,86 @@ def generate_recommendations(all_signals, _train_sigs=None):
             "action": "Try Design B (drop MSS requirement) or widen FVG min gap filter"})
 
     return recs
+
+
+# Option E M-6 quality fix (audit cycle-7 2026-05-27): canonical column
+# tuple for the backtest_signals INSERT. Adding a new column to
+# backtest_signals schema migration requires adding it HERE too (and a
+# corresponding lookup in _backtest_signal_to_row below). The pair
+# eliminates the hand-counted "?" placeholder string + value-tuple
+# ordering footgun that scaled poorly past the 47→48 column transition.
+_BACKTEST_SIGNALS_COLS = (
+    "run_id", "token", "signal", "price", "ts",
+    "regime", "confidence", "wscore", "margin",
+    "conflict", "tp1_pct", "sl_pct", "rr1",
+    "net_tp1_pct", "net_tp2_pct", "net_tp3_pct", "net_sl_pct", "net_rr1",
+    "breakeven_wr", "sweep_type", "fvg_pct", "trend_1h",
+    "bias_4h", "ifvg_present", "ifvg_direction", "ifvg_age_bars",
+    "ifvg_5m_used", "session", "hour_utc", "day_of_week",
+    "dr_location", "mss_quality", "fvg_quality", "smt_type",
+    "smt_confirmed", "entry_type",
+    "tp_reached", "outcome",
+    "matched_template_id", "template_scores_json",
+    "mfe_pct", "mae_pct", "realized_r",
+    "tb_bin", "tb_touch", "tb_ret", "tb_t1",
+    "source",  # CRT v1 Session 2 — '5M_SWEEP' or 'H4_CRT'
+    # OTE overlay (2026-05-28) — tagging only, no gate.
+    "ote_zone", "ote_fib_pct",
+    # T1.2 funding overlay (2026-05-29) — Stage B parity via historical bisect.
+    "funding_rate_pct", "funding_classification",
+    # T1.3 BTC correlation overlay (2026-05-29) — full parity with live.
+    "btc_corr_strength", "btc_corr_classification",
+    # H-CY12-1 (2026-05-29 cycle-12) — confidence-bonus attribution.
+    "confidence_base", "confidence_funding_bonus", "confidence_btc_corr_bonus",
+)
+
+
+def _backtest_signal_to_row(s, run_id):
+    """Map a signal dict to the value tuple matching _BACKTEST_SIGNALS_COLS.
+
+    Tuple length and ordering MUST track _BACKTEST_SIGNALS_COLS exactly.
+    Field-level back-compat handled via dict.get() defaults so pre-
+    Session-2 callers (no 'source' key) keep working.
+    """
+    return (
+        run_id, s["token"], s["signal"], s["price"], s["ts"],
+        s["regime"], s["confidence"], s["wscore"], s["margin"],
+        s["conflict"], s["tp1_pct"], s["sl_pct"], s["rr1"],
+        s["net_tp1_pct"], s.get("net_tp2_pct"), s.get("net_tp3_pct"),
+        s["net_sl_pct"], s["net_rr1"],
+        s["breakeven_wr"],
+        s.get("sweep_type", "?"),
+        s.get("fvg_pct", 0.0), s.get("trend_1h", "NEUTRAL"),
+        s.get("bias_4h", "NEUTRAL"), s.get("ifvg_present", 0),
+        s.get("ifvg_direction", ""), s.get("ifvg_age_bars", 0),
+        s.get("ifvg_5m_used", 0),
+        s.get("session", "OVERNIGHT"), s.get("hour_utc", 0), s.get("day_of_week", 0),
+        s.get("dr4h_location", "UNKNOWN"),   # signal dict key → DB column rename
+        s.get("mss_quality", "NONE"),
+        s.get("fvg_quality", "NONE"), s.get("smt_type", "NONE"),
+        s.get("smt_confirmed", 0),
+        s.get("entry_type", "ZONE_TOUCH"),
+        s["tp_reached"], s["outcome"],
+        s.get("matched_template_id", "NONE"),
+        s.get("template_scores_json", None),
+        s.get("mfe_pct", None), s.get("mae_pct", None), s.get("realized_r", None),
+        s.get("tb_bin", None), s.get("tb_touch", None),
+        s.get("tb_ret", None), s.get("tb_t1", None),
+        s.get("source", "5M_SWEEP"),
+        # OTE overlay (2026-05-28) — tagging only, no gate.
+        s.get("ote_zone", "OTE_UNDEFINED"),
+        s.get("ote_fib_pct", None),
+        # T1.2 funding overlay (2026-05-29) — backtest writes NEUTRAL until Stage B.
+        s.get("funding_rate_pct", 0.0),
+        s.get("funding_classification", "NEUTRAL"),
+        # T1.3 BTC correlation overlay (2026-05-29) — full parity with live.
+        s.get("btc_corr_strength", None),
+        s.get("btc_corr_classification", "UNKNOWN"),
+        # H-CY12-1 (2026-05-29 cycle-12) — confidence-bonus attribution.
+        s.get("confidence_base", s.get("confidence", 0)),
+        s.get("confidence_funding_bonus", 0.0),
+        s.get("confidence_btc_corr_bonus", 0.0),
+    )
 
 
 def save_to_db(all_signals, days=90, config_hash=None):
@@ -2932,45 +3766,17 @@ def save_to_db(all_signals, days=90, config_hash=None):
              len(all_signals), _wr(all_signals), avg_rr, "DONE",
              json.dumps(summary), json.dumps(recs), config_hash))
         run_id = cur.lastrowid
+        # Option E M-6 quality fix (audit cycle-7 2026-05-27): programmatic
+        # INSERT placeholder + column list to prevent hand-count drift. The
+        # value tuple builder (_backtest_signal_to_row) iterates the same
+        # column-name tuple, so adding a column to BACKTEST_SIGNALS_COLS
+        # automatically updates both the INSERT clause and the placeholder
+        # string. Source tag back-compat preserved via s.get default.
+        _placeholders = ",".join(["?"] * len(_BACKTEST_SIGNALS_COLS))
+        _sql = (f"INSERT INTO backtest_signals "
+                f"({','.join(_BACKTEST_SIGNALS_COLS)}) VALUES ({_placeholders})")
         for s in all_signals:
-            conn.execute(
-                """INSERT INTO backtest_signals
-                   (run_id,token,signal,price,ts,regime,confidence,wscore,margin,
-                    conflict,tp1_pct,sl_pct,rr1,
-                    net_tp1_pct,net_tp2_pct,net_tp3_pct,net_sl_pct,net_rr1,breakeven_wr,
-                    sweep_type,fvg_pct,trend_1h,
-                    bias_4h,ifvg_present,ifvg_direction,ifvg_age_bars,ifvg_5m_used,
-                    session,hour_utc,day_of_week,
-                    dr_location,mss_quality,fvg_quality,smt_type,smt_confirmed,entry_type,
-                    tp_reached,outcome,matched_template_id,template_scores_json,
-                    mfe_pct,mae_pct,realized_r,
-                    tb_bin,tb_touch,tb_ret,tb_t1)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (run_id, s["token"], s["signal"], s["price"], s["ts"],
-                 s["regime"], s["confidence"], s["wscore"], s["margin"],
-                 s["conflict"], s["tp1_pct"], s["sl_pct"], s["rr1"],
-                 s["net_tp1_pct"], s.get("net_tp2_pct"), s.get("net_tp3_pct"),  # Fix #16
-                 s["net_sl_pct"], s["net_rr1"], s["breakeven_wr"],
-                 s.get("sweep_type","?"), s.get("fvg_pct", 0.0), s.get("trend_1h","NEUTRAL"),
-                 s.get("bias_4h","NEUTRAL"), s.get("ifvg_present",0),
-                 s.get("ifvg_direction",""), s.get("ifvg_age_bars", 0),
-                 s.get("ifvg_5m_used", 0),
-                 s.get("session","OVERNIGHT"), s.get("hour_utc",0), s.get("day_of_week",0),
-                 s.get("dr4h_location","UNKNOWN"),  # signal dict key: dr4h_location → DB column: dr_location
-                 s.get("mss_quality","NONE"),
-                 s.get("fvg_quality","NONE"), s.get("smt_type","NONE"),
-                 s.get("smt_confirmed", 0),
-                 s.get("entry_type","ZONE_TOUCH"),
-                 s["tp_reached"], s["outcome"],
-                 s.get("matched_template_id", "NONE"),
-                 s.get("template_scores_json", None),
-                 s.get("mfe_pct",    None),
-                 s.get("mae_pct",    None),
-                 s.get("realized_r", None),
-                 s.get("tb_bin",   None),
-                 s.get("tb_touch", None),
-                 s.get("tb_ret",   None),
-                 s.get("tb_t1",    None)))
+            conn.execute(_sql, _backtest_signal_to_row(s, run_id))
         conn.commit(); conn.close()
         print(f"\n[DB] Run #{run_id} saved — {len(all_signals)} signals, {_wr(all_signals)}% WR")
         return run_id
@@ -3011,6 +3817,27 @@ def _compute_run_config_hash() -> str:
         "ICT_FVG_MIN_GAP":        ICT_FVG_MIN_GAP,
         "ICT_MAX_SETUP_AGE_BARS": ICT_MAX_SETUP_AGE_BARS,
         "ICT_MSS_DISP_MAX_GAP":   ICT_MSS_DISP_MAX_GAP,
+        # CR-CY11-1 fix (audit 2026-05-28): ICT_MIN_RR_GATE is env-overridable,
+        # consumed by both 5M_SWEEP path (backtest.py:1094) and CRT path
+        # (crt_engine.py:722, 826). Default changed 1.5 → 1.3 in cycle-9.
+        # Two runs differing only on this knob were colliding on config_hash,
+        # undercounting DSR's n_trials selection-bias denominator. Same fix
+        # pattern as M-H ESCALATED (cyc-4), B-CRT-S2-C2 (cyc-7), H-4 (cyc-8).
+        "ICT_MIN_RR_GATE":        os.environ.get("ICT_MIN_RR_GATE", "1.3"),
+        # T1.2 funding overlay knobs (2026-05-29) — affect confidence which
+        # affects tier classification which affects signal pool composition.
+        # Without these in the hash, two trials differing only on funding
+        # tuning would collide (same M-H ESCALATED collision pattern).
+        "FUNDING_GATE_ENABLED":   os.environ.get("FUNDING_GATE_ENABLED", "1"),
+        "FUNDING_EXTREME_LONG_THRESH":  os.environ.get("FUNDING_EXTREME_LONG_THRESH",  "-0.0003"),
+        "FUNDING_EXTREME_SHORT_THRESH": os.environ.get("FUNDING_EXTREME_SHORT_THRESH", "0.0003"),
+        "FUNDING_BONUS_PCT":      os.environ.get("FUNDING_BONUS_PCT", "0.05"),
+        # T1.3 BTC correlation overlay knobs (2026-05-29) — same collision risk.
+        "BTC_CORR_WINDOW_MIN":    os.environ.get("BTC_CORR_WINDOW_MIN", "60"),
+        "BTC_CORR_HIGH_THRESH":   os.environ.get("BTC_CORR_HIGH_THRESH", "0.7"),
+        "BTC_CORR_LOW_THRESH":    os.environ.get("BTC_CORR_LOW_THRESH",  "0.3"),
+        "BTC_CORR_BONUS_PCT":     os.environ.get("BTC_CORR_BONUS_PCT", "0.0"),
+        "BTC_CORR_GATE_ENABLED":  os.environ.get("BTC_CORR_GATE_ENABLED", "1"),
         "ENTRY_REACTION_LOOKBACK": ENTRY_REACTION_LOOKBACK,
         "ROUND_TRIP_COST_PCT":    ROUND_TRIP_COST_PCT,
         "FEE_PCT":                FEE_PCT,
@@ -3031,6 +3858,72 @@ def _compute_run_config_hash() -> str:
         "OGD_DSR_GATE":           os.environ.get("OGD_DSR_GATE", "soft").lower(),
         "OGD_FREEZE_MODE":        os.environ.get("OGD_FREEZE_MODE", "shadow").lower(),
         "OGD_WARMUP_FLOOR":       _ogd_warmup_floor_for_hash(),
+        # CRT v1 Session 2 B-CRT-S2-C2 fix (audit cycle-7 2026-05-27): CRT
+        # env knobs MUST be in the config_hash. Otherwise a CRT-enabled run
+        # and a CRT-disabled run on the same ICT params collide on hash →
+        # DSR n_trials undercount, Pareto archive collision, checkpoint
+        # collision. Same failure mode as the cycle-4 M-H ESCALATED fix.
+        "ENABLE_H4_CRT":          os.environ.get("ENABLE_H4_CRT", "0"),
+        "H4_CRT_DISABLED_TOKENS": ",".join(sorted(
+            t.strip().upper() for t in
+            os.environ.get("H4_CRT_DISABLED_TOKENS", "").split(",")
+            if t.strip()
+        )),
+        "H4_CRT_C2_LOOKBACK":     os.environ.get("H4_CRT_C2_LOOKBACK", "10"),
+        "H4_CRT_MSS_HORIZON":     os.environ.get("H4_CRT_MSS_HORIZON", "30"),
+        "H4_CRT_VALIDATION_SCHOOL": os.environ.get("H4_CRT_VALIDATION_SCHOOL", "flexible").lower(),
+        # NEW-1 fix (Session 2 Option H audit 2026-05-27): catches two
+        # env-overridable knobs missed by the Option B + Option E batches.
+        # Without these, runs differing only on CRT_FORWARD_BARS (e.g.
+        # 288 vs 576) or on H4_CRT_OB_SCAN_LOOKBACK (e.g. 20 vs 40)
+        # collide on config_hash → DSR n_trials undercount, Pareto
+        # archive collision. Same failure mode as B-CRT-S2-C2.
+        "CRT_FORWARD_BARS":         os.environ.get("CRT_FORWARD_BARS", "576"),
+        "H4_CRT_OB_SCAN_LOOKBACK":  os.environ.get("H4_CRT_OB_SCAN_LOOKBACK", "20"),
+        # v2 Wyckoff phase filter (Option KK, audit cycle-7 2026-05-27).
+        # The single biggest WR booster per the article's calibration; the
+        # explorer or operator can flip between off/loose/strict and these
+        # MUST produce distinct config_hashes for honest DSR n_trials.
+        "WYCKOFF_PHASE_FILTER":     os.environ.get("WYCKOFF_PHASE_FILTER", "off").lower(),
+        # CRT Pro v1.1 (2026-05-27): TP1-mode + quality gates + 1H-trend
+        # knobs MUST contribute to config_hash so honest DSR n_trials counts
+        # CRT Pro variants as distinct configs (not aliases of the default).
+        "CRT_TP1_MODE":             os.environ.get("CRT_TP1_MODE", "dynamic").lower(),
+        "CRT_APPLY_QUALITY_GATES":  os.environ.get("CRT_APPLY_QUALITY_GATES", "0"),
+        "CRT_FVG_MIN_QUALITY":      os.environ.get("CRT_FVG_MIN_QUALITY", "HIGH").upper(),
+        "CRT_MSS_MIN_QUALITY":      os.environ.get("CRT_MSS_MIN_QUALITY", "MEDIUM").upper(),
+        "CRT_REQUIRE_1H_TREND":     os.environ.get("CRT_REQUIRE_1H_TREND", "0"),
+        # H-4 fix (audit cycle-8 2026-05-27): CRT_TP2_RR + CRT_TP3_RR are
+        # env-overridable AND in the explorer's CRT search space (TP2 1.2-2.5,
+        # TP3 1.8-3.5). Without them in config_hash, two trials differing
+        # ONLY on the TP cascade hash identically → DSR n_trials undercount
+        # (selection-bias correction under-applied → DSR overstated) AND
+        # Pareto archive silently overwrites entries. Same M-H ESCALATED /
+        # B-CRT-S2-C2 collision pattern.
+        "CRT_TP2_RR":               os.environ.get("CRT_TP2_RR", "1.5"),
+        "CRT_TP3_RR":               os.environ.get("CRT_TP3_RR", "2.0"),
+        # Cycle-12 unexplored axes (2026-05-29): FVG probe width + mitigation TTL.
+        # Both default to baseline-preserving values (W=2 reproduces H-3 fix
+        # exactly; TTL=0 = never expire). MUST contribute to config_hash so
+        # explorer trials sweeping these are counted as distinct DSR n_trials.
+        # Same M-H collision pattern guard as B-CRT-S2-C2 / H-4.
+        "H4_CRT_FVG_PROBE_WIDTH":    os.environ.get("H4_CRT_FVG_PROBE_WIDTH", "2"),
+        "H4_CRT_MITIGATION_TTL_H":   os.environ.get("H4_CRT_MITIGATION_TTL_H", "0"),
+        # Cycle-12 extended axes (added 2026-05-29 post explorer audit). All
+        # 6 are env-overridable in their source modules; defaults preserve
+        # Run-1749 baseline EXACTLY. MUST contribute to config_hash so DSR
+        # n_trials counts these sweeps as distinct configs (M-H collision
+        # guard pattern).
+        "MIN_TP1_MULT":              os.environ.get("MIN_TP1_MULT", "1.5"),
+        "ICT_SL_BUFFER_PCT":         os.environ.get("ICT_SL_BUFFER_PCT", "0.003"),
+        "SIGNAL_COOLDOWN":           os.environ.get("SIGNAL_COOLDOWN", "40"),
+        # Note: H4_CRT_MSS_HORIZON, H4_CRT_OB_SCAN_LOOKBACK already present
+        # above (lines 3846, 3855). ICT_FVG_MIN_GAP is in 5M_SWEEP space
+        # already. No duplicate adds needed for those 3.
+        # Per-scanner kill-switch (2026-05-27): 5M_SWEEP toggle. Must
+        # contribute to config_hash so honest DSR pool counts 5M-only,
+        # CRT-only, and both-on configs as DISTINCT n_trials.
+        "ENABLE_5M_SWEEP":          os.environ.get("ENABLE_5M_SWEEP", "1"),
     })
 
 
@@ -3148,6 +4041,17 @@ def main():
     btc_c5m_ref: dict = {}
     btc_c4h_ref: dict = {}
 
+    # T1.2 Stage B (2026-05-29) — preload historical funding rates ONCE for
+    # all tokens before the per-token sim loop. Per-signal lookup at run time
+    # is then an O(log N) bisect on the in-memory cache. ~5s one-time cost
+    # buys full live↔BT funding parity for the 365-day backtest window.
+    if ENABLE_H4_CRT and os.environ.get("FUNDING_GATE_ENABLED", "1") == "1":
+        print(f"[FUNDING] preloading historical /fundingRate for "
+              f"{len(BINANCE_TOKENS)} tokens (Stage B parity)...", end=" ", flush=True)
+        _t_fund_start = time.time()
+        _n_loaded = _bt_preload_funding(list(BINANCE_TOKENS.keys()))
+        print(f"{_n_loaded}/{len(BINANCE_TOKENS)} in {time.time() - _t_fund_start:.1f}s")
+
     for token, symbol in BINANCE_TOKENS.items():
         # On resume, every subsequent token needs BTC reference candles for
         # SMT divergence — always refetch BTC if it's the first token or if we
@@ -3183,20 +4087,52 @@ def main():
             btc_c5m_ref = c5m
             btc_c4h_ref = c4h
 
-        print(f"[{token}] Simulating ICT signals...", end=" ", flush=True)
-        sigs, _tok_rejections = run_backtest_token(
-            token, c5m, c1h, c4h,
-            btc_c1h=None if token == "BTC" else btc_c1h_ref,
-            btc_c5m=None if token == "BTC" else btc_c5m_ref,
-            config=ACTIVE_CONFIG,
-            ogd_weights=_bt_ogd_weights,
-        )
-        print(f"{len(sigs)} signals generated")
-        all_signals.extend(sigs)
-        # D2 diagnostic — accumulate token-level rejections into a global pool
-        # so print_report can surface structural patterns
-        for _r_k, _r_v in _tok_rejections.items():
-            _GLOBAL_REJECTIONS[_r_k] = _GLOBAL_REJECTIONS.get(_r_k, 0) + _r_v
+        # ── 5M_SWEEP scanner (Run-168 canonical baseline) ─────────
+        # Per-scanner kill switch: ENABLE_5M_SWEEP=0 (env) disables the
+        # original 5M-sweep detection path so operator can run CRT-only
+        # backtests for isolated attribution. Default ON for back-compat.
+        if ENABLE_5M_SWEEP:
+            print(f"[{token}] Simulating ICT signals...", end=" ", flush=True)
+            sigs, _tok_rejections = run_backtest_token(
+                token, c5m, c1h, c4h,
+                btc_c1h=None if token == "BTC" else btc_c1h_ref,
+                btc_c5m=None if token == "BTC" else btc_c5m_ref,
+                config=ACTIVE_CONFIG,
+                ogd_weights=_bt_ogd_weights,
+            )
+            print(f"{len(sigs)} signals generated")
+            all_signals.extend(sigs)
+            # D2 diagnostic — accumulate token-level rejections into a global pool
+            # so print_report can surface structural patterns
+            for _r_k, _r_v in _tok_rejections.items():
+                _GLOBAL_REJECTIONS[_r_k] = _GLOBAL_REJECTIONS.get(_r_k, 0) + _r_v
+        else:
+            print(f"[{token}] 5M_SWEEP scanner DISABLED (ENABLE_5M_SWEEP=0)")
+
+        # CRT v1 Session 2 (cycle-7 audit 2026-05-27): parallel H4-CRT scan.
+        # No-op when ENABLE_H4_CRT=0 (default — production behavior unchanged).
+        # When enabled, emits source='H4_CRT' signals alongside the 5M_SWEEP
+        # signals above, enabling per-source attribution in the DB and
+        # downstream honest-metrics layer.
+        # CRT Pro v1.1 (2026-05-27): pass c1h so the optional 1H trend gate
+        # (CRT_REQUIRE_1H_TREND=1) can reuse the same _lookup_trend helper as
+        # the 5M_SWEEP path. c1h is None-safe inside the function.
+        if ENABLE_H4_CRT:
+            print(f"[{token}] Running H4-CRT scan...", end=" ", flush=True)
+            crt_sigs, _crt_rej = run_backtest_token_h4_crt(
+                token, c5m, c4h, c1h=c1h, config=ACTIVE_CONFIG,
+                # F-1 fix (2026-05-28): pass BTC 5M for SMT divergence.
+                # None for BTC's own scan (cannot SMT against self).
+                btc_c5m=None if token == "BTC" else btc_c5m_ref,
+            )
+            print(f"{len(crt_sigs)} H4-CRT signals")
+            all_signals.extend(crt_sigs)
+            # H-4: aggregate CRT-specific rejections into the D2 diagnostic
+            # pool so print_report can surface structural CRT gate patterns
+            # (e.g., "100% of CRT candidates fail bias_gate_blocked").
+            for _r_k, _r_v in _crt_rej.items():
+                _GLOBAL_REJECTIONS[_r_k] = _GLOBAL_REJECTIONS.get(_r_k, 0) + _r_v
+
         completed_tokens.add(token)
         # Persist progress after every token so a kill mid-run loses at most one token's work.
         if save_checkpoint(_run_config_hash, completed_tokens, all_signals, started_at=started_at):
@@ -3301,6 +4237,30 @@ def main():
             _candidate = max(_candidate, _cumulative_min_trials)
             if _candidate > 1:
                 _n_trials_dsr = int(_candidate)
+            # H-NEW-1 fix (audit 2026-05-28): persist the new max so future
+            # post-wipe reads recover the honest historic count. Pre-fix this
+            # key was only READ — never written — so after any DB wipe the
+            # seed stayed 0 and selection-bias correction silently dropped to
+            # the no-op level. Writes are idempotent (max preserves) and run
+            # regardless of WRITE_CPCV_VERDICT — the trial count is a real
+            # distinct-config observation, even for explorer runs.
+            try:
+                if _n_trials_dsr is not None and _n_trials_dsr > _cumulative_min_trials:
+                    _cm_conn = sqlite3.connect(BT_DB_PATH, timeout=10)
+                    _cm_conn.execute(
+                        "INSERT OR REPLACE INTO bot_state(key,value) VALUES(?,?)",
+                        ("cumulative_min_trials",
+                         json.dumps({"value": int(_n_trials_dsr),
+                                     "updated_at": datetime.now(timezone.utc)
+                                                  .strftime("%Y-%m-%d %H:%M:%S"),
+                                     "source": "backtest.cpcv_pool"})),
+                    )
+                    _cm_conn.commit(); _cm_conn.close()
+                    print(f"[CPCV] cumulative_min_trials persisted: "
+                          f"{_cumulative_min_trials} → {_n_trials_dsr}")
+            except Exception as _cm_exc:
+                print(f"[CPCV] cumulative_min_trials write skipped — "
+                      f"{type(_cm_exc).__name__}: {_cm_exc}")
         except Exception:
             _n_trials_dsr = None
         _cpcv = cpcv_summary(

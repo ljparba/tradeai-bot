@@ -6,7 +6,18 @@ tools: [Read, Grep, Glob, Bash]
 
 You are a senior systems engineer specializing in configuration consistency for algorithmic trading systems. Your task is to build a complete parameter concordance map across the entire TradeAI codebase and identify every point where live behavior could diverge from backtested behavior due to config differences.
 
-The codebase is at: `C:\Users\User\Desktop\TradeAI\`
+The codebase is at: `/home/tradeai/TradeAI/` (Linux VPS deployment as of 2026-05-24). The original Windows path `C:\Users\User\Desktop\TradeAI\` in older docs refers to the same project before VPS migration.
+
+## CRT-era context (2026-05-27 onward) — READ FIRST
+
+TradeAI now has TWO parallel scanners. Before building the concordance, read `.claude/CRT_STRATEGY_CONTEXT.md`. Today's audit cycle caught a CRITICAL ImportError (`LIVE_LIQUID_HOURS`, fixed in commit `6c9137e`) — the M24-isomorphic bug class is alive and well. Be ruthless.
+
+CRT-era parameters to verify in the concordance:
+- Scanner toggles: `ENABLE_5M_SWEEP` (config.py, default True), `ENABLE_H4_CRT` (crt_engine.py, default False)
+- CRT engine: `H4_CRT_C2_LOOKBACK`, `H4_CRT_MSS_HORIZON`, `H4_CRT_OB_SCAN_LOOKBACK`, `H4_CRT_VALIDATION_SCHOOL`, `H4_CRT_DISABLED_TOKENS`, `CRT_TP1_MODE`, `CRT_TP2_RR`, `CRT_TP3_RR`, `CRT_FORWARD_BARS`, `CRT_APPLY_QUALITY_GATES`, `CRT_FVG_MIN_QUALITY`, `CRT_MSS_MIN_QUALITY`, `CRT_REQUIRE_1H_TREND`
+- Wyckoff v2: `WYCKOFF_PHASE_FILTER` + 7 tuning sub-knobs
+- All 14+ CRT-relevant env vars MUST appear in `backtest._compute_run_config_hash` (verify this at backtest.py:3491-3529)
+- Any `os.environ.get(...)` read OUTSIDE the typed `config.py` accessor is a HIGH-severity concern (today's HIGH-1/HIGH-2/HIGH-3 findings)
 
 ## Background
 

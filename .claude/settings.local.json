@@ -67,7 +67,44 @@
       "Bash(echo \"[2026-05-22] | tradeai-audit | overall=7.53/10 | Backtest dim 5→6 \\(+1.0\\) | GO paper-trading per auditor | Cycle 5: Wilson CIs + Bonferroni verified\" >> \".claude/reports/HISTORY.md\")",
       "Bash(echo \"[2026-05-22] | tradeai-audit | overall=7.66/10 | Backtest dim 6→7 \\(+1.0\\) | Cycle 6 Fix #16: canonical split-exit P&L model\" >> \".claude/reports/HISTORY.md\")",
       "WebSearch",
-      "Bash(cat >> *)"
+      "Bash(cat >> *)",
+      "Bash(grep -n \"n_seen\\\\|reward == 0.0\\\\|outcome.*PARTIAL\\\\|_n_seen\" /home/tradeai/TradeAI/adaptive_engine.py | head -20; echo \"---\"; ls /home/tradeai/TradeAI/.claude/reports/adaptive-learning-code-reviewer/ 2>/dev/null; mkdir -p /home/tradeai/TradeAI/.claude/reports/adaptive-learning-code-reviewer/)",
+      "Bash(mkdir -p /home/tradeai/TradeAI/.claude/reports/tracker-frontend-audit)",
+      "Bash(mkdir -p /home/tradeai/TradeAI/.claude/reports/signal-performance)",
+      "Bash(ls -la /home/tradeai/TradeAI/.claude/reports/ 2>&1 | head -20 && mkdir -p /home/tradeai/TradeAI/.claude/reports/backtest-explorer-audit && wc -l /home/tradeai/TradeAI/scripts/autonomous_explorer.py /home/tradeai/TradeAI/scripts/promote_baseline.py /home/tradeai/TradeAI/scripts/compute_cross_config_sr_std.py /home/tradeai/TradeAI/deploy/tradeai-explorer.service /home/tradeai/TradeAI/.env.explorer 2>&1)",
+      "Bash(mkdir -p /home/tradeai/TradeAI/.claude/reports/adaptive-learning-code-reviewer 2>&1)",
+      "WebFetch(domain:tradingwyckoff.com)",
+      "Bash(mkdir -p /home/tradeai/TradeAI/.claude/reports/ict-logic-validator && ls /home/tradeai/TradeAI/.claude/reports/ict-logic-validator/)",
+      "Bash(mkdir -p /home/tradeai/TradeAI/.claude/reports/professional-code-quality-reviewer && ls /home/tradeai/TradeAI/.claude/reports/professional-code-quality-reviewer/ 2>/dev/null)",
+      "Bash(mkdir -p /home/tradeai/TradeAI/.claude/reports/live-backtest-consistency-checker/ && wc -l /home/tradeai/TradeAI/crt_engine.py /home/tradeai/TradeAI/backtest.py /home/tradeai/TradeAI/crypto_alert.py)",
+      "Bash(mkdir -p /home/tradeai/TradeAI/.claude/reports/ict-logic-validator)",
+      "Bash(mkdir -p /home/tradeai/TradeAI/.claude/reports/backtest-bias-detector)",
+      "Bash(mkdir -p /home/tradeai/TradeAI/.claude/reports/live-backtest-consistency-checker)",
+      "Bash(mkdir -p /home/tradeai/TradeAI/.claude/reports/professional-code-quality-reviewer && ls /home/tradeai/TradeAI/.claude/reports/professional-code-quality-reviewer/)",
+      "Bash(mkdir -p /home/tradeai/TradeAI/.claude/reports/backtest-bias-detector/)",
+      "Bash(touch /home/tradeai/TradeAI/.claude/reports/live-backtest-consistency-checker/2026-05-27_crt_v1_cumulative_reaudit.md)",
+      "Bash(cat > *)",
+      "Bash(mkdir -p /home/tradeai/TradeAI/.claude/reports/full-project-audit-crt-only && ls /home/tradeai/TradeAI/.claude/reports/full-project-audit-crt-only)",
+      "Bash(mkdir -p /home/tradeai/TradeAI/.claude/reports/config-consistency-validator *)",
+      "Bash(mkdir -p /home/tradeai/TradeAI/.claude/reports/telegram-audit && ls -la /home/tradeai/TradeAI/.claude/reports/telegram-audit/)",
+      "Bash(mkdir -p /home/tradeai/TradeAI/.claude/reports/backtest-bias-detector && echo \"dir ready\")",
+      "Bash(mkdir -p /home/tradeai/TradeAI/.claude/reports/template-tier-calibrator 2>&1; ls /home/tradeai/TradeAI/.claude/reports/template-tier-calibrator/ 2>&1)",
+      "Bash(mkdir -p /home/tradeai/TradeAI/.claude/reports/ogd-weight-inspector && ls /home/tradeai/TradeAI/.claude/reports/ogd-weight-inspector/)",
+      "Bash(mkdir -p /home/tradeai/TradeAI/.claude/reports/risk-management-auditor)",
+      "Bash(mkdir -p /home/tradeai/TradeAI/.claude/reports/crash-recovery-auditor 2>&1; ls -la /home/tradeai/TradeAI/.claude/reports/crash-recovery-auditor 2>&1)",
+      "Bash(mkdir -p /home/tradeai/TradeAI/.claude/reports/config-consistency-validator)",
+      "Bash(mkdir -p /home/tradeai/TradeAI/.claude/reports/data-pipeline-validator/)",
+      "Bash(echo \"[2026-05-27] | tradeai-audit | overall=9.00/10 | CRITICAL=3 HIGH=5 | NO-GO | C-1 live CRT scanner silently inert \\(0 signals in 24h+\\) + C-2 forming-bar repaint + C-3 Wyckoff lookahead in backtest\" >> /home/tradeai/TradeAI/.claude/reports/HISTORY.md *)",
+      "Bash(mkdir -p /home/tradeai/TradeAI/.claude/reports/crash-recovery-auditor/ && ls /home/tradeai/TradeAI/.claude/reports/crash-recovery-auditor/)",
+      "Bash(mkdir -p /home/tradeai/TradeAI/.claude/reports/ict-logic-validator && echo \"dir ready\")",
+      "Bash(mkdir -p /home/tradeai/TradeAI/.claude/reports/template-tier-calibrator && echo \"ok\")",
+      "Bash(mkdir -p /home/tradeai/TradeAI/.claude/reports/honest-metrics-reviewer)",
+      "Bash(mkdir -p /home/tradeai/TradeAI/.claude/reports/adaptive-learning-code-reviewer/)",
+      "Bash(mkdir -p /home/tradeai/TradeAI/.claude/reports/tradeai-audit && ls /home/tradeai/TradeAI/.claude/reports/tradeai-audit/ | tail -3)",
+      "Read(//tmp/**)",
+      "Bash(echo \"[2026-05-29] | tradeai-audit | overall=9.25/10 \\(11 dims\\) | CRITICAL=0 HIGH=3 MEDIUM=10 LOW=13 | GO \\(paper\\) / NO-GO \\(LIVE\\) | cycle-12 post Run-1749 + T1.2/T1.3/Stage B wave: slight regression -0.05 from cycle-11 ATH \\(9.30\\). 3 convergent HIGH all M24-class around confidence-bonus arithmetic asymmetry — H-CY12-1 live applies funding+btc_corr confidence bonus, backtest doesn't \\(3 agents converge: config + live-BT + template\\); H-CY12-2 classify_btc_corr vocab mismatch \\(expects STRONG_BULL, gets BULLISH from bias_4h → ALIGNED_HIGH unreachable\\); H-CY12-3 Tier A inverted under Run-338 TP geometry \\(post-T-1 cumulative n=803: B=62.2% > C=58.9% > A=58.3%\\). ICT 9.6→9.7 \\(+0.1: EQH/EQL canonical, OTE faithful\\), OGD 9.4→9.5 \\(+0.1: Run #1749 bootstrap clean 0 degenerate\\), Honest Metrics 9.25→9.30 \\(+0.05: Run #1749 figures honest\\), Resilience 9.7 flat \\(watchdog 1s fresh, fapi can't crash\\). Templates 8.7→8.5 \\(-0.2: Tier A inversion\\), Config 9.85→9.45 \\(-0.40: 9-knob payload clean but bonus formula asymmetric\\), Live/BT 9.4→9.3 \\(-0.1: Stage B funding parity ✓ but bonus drift NEW\\), Data 9.3→9.2 \\(-0.1: BTC vocab mismatch + fapi 429 not distinguished\\). T1.1 portfolio risk STILL NOT STARTED \\(only Tier 1 LIVE blocker\\). All 23+ cycle-11 fixes VERIFIED INTACT via multi-agent convergence; Run #1749 reproduces Run-1056 byte-identical \\(different config_hash only\\); DSR pool n=7 with 2 duplicate-strategy pairs \\(Runs 1749/1056 + 576/338\\) slightly understates sr_std → DSR overstated ~1.7pp. Highest-impact fix: H-CY12-1 mirror bonus in backtest.py:1770 \\(~15 LoC + schema + parity test\\) closes M24-isomorphic asymmetry. ~100min total for Patches 1-6 closes 2 HIGH + 4 MED + 1 LOW. Bot healthy PID 296881 cycle 4336+ paper-soak unaffected \\(bonus dormant at defaults\\).\" >> /home/tradeai/TradeAI/.claude/reports/HISTORY.md && echo \"HISTORY appended\"; tail -1 /home/tradeai/TradeAI/.claude/reports/HISTORY.md | head -c 250)",
+      "Bash(echo \"═══ Append to HISTORY.md ═══\" *)",
+      "Bash(DATE=$\\(date +%Y-%m-%d\\) *)"
     ],
     "additionalDirectories": [
       "C:\\Users\\User\\Desktop\\TradeAI\\.claude\\reports",
@@ -75,7 +112,31 @@
       "C:\\Users\\User\\Desktop\\TradeAI\\.claude\\reports\\tradeai-backtest",
       "C:\\Users\\User\\Desktop\\TradeAI\\.claude\\reports\\tradeai-config-validate",
       "c:\\Users\\User\\Desktop\\TradeAI\\.claude\\reports",
-      "C:\\Users\\User\\AppData\\Local\\Temp\\claude"
+      "C:\\Users\\User\\AppData\\Local\\Temp\\claude",
+      "/home/tradeai/TradeAI/.claude/reports",
+      "/home/tradeai/TradeAI/.claude/reports/adaptive-learning-code-reviewer",
+      "/home/tradeai/TradeAI/.claude/reports/tracker-frontend-audit",
+      "/home/tradeai/TradeAI/.claude/reports/ict-logic-validator",
+      "/home/tradeai/TradeAI/.claude/reports/live-backtest-consistency-checker",
+      "/home/tradeai/TradeAI/.claude/reports/professional-code-quality-reviewer",
+      "/home/tradeai/TradeAI/.claude/reports/backtest-bias-detector",
+      "/home/tradeai/TradeAI/.claude/reports/config-consistency-validator",
+      "/home/tradeai/TradeAI/.claude/reports/template-tier-calibrator",
+      "/home/tradeai/TradeAI/.claude/reports/crash-recovery-auditor",
+      "/home/tradeai/TradeAI/.claude/reports/risk-management-auditor",
+      "/home/tradeai/TradeAI/.claude/reports/tradeai-audit"
     ]
+  },
+  "mcpServers": {
+    "codegraph": {
+      "command": "/home/tradeai/.local/bin/codegraph",
+      "args": [
+        "serve",
+        "--mcp",
+        "--path",
+        "/home/tradeai/TradeAI"
+      ],
+      "env": {}
+    }
   }
 }

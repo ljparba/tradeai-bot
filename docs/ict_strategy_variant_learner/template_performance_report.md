@@ -1,8 +1,8 @@
 # ICT Strategy Variant Learner — Template Performance Report
 
-**Generated:** 2026-05-26 07:02  
+**Generated:** 2026-05-29 10:31  
 **Strategy Version:** v2  
-**Total signals:** 35 (Train: 15, Holdout: 20)  
+**Total signals:** 95 (Train: 39, Holdout: 56)  
 **Holdout from:** 2025-11-03  
 
 > Grouping: **Best Match Only** — each signal assigned to its highest-tier matching template.
@@ -17,8 +17,8 @@
 
 | Template | N (all) | Train WR% | Holdout WR% | WF Gap | Avg MFE% | Avg MAE% | Avg realR | Status |
 |----------|---------|-----------|-------------|--------|----------|----------|-----------|--------|
-| Tier A — Strict | 12 | 83.3% | 83.3% | +0.0% | +5.7650% | +0.6081% | +1.3786R | OK |
-| Tier B — Balanced | 23 | 77.8% | 85.7% | -7.9% | +2.2946% | +0.6038% | +1.0682R | OK |
+| Tier A — Strict | 0 | — | — | — | — | — | — | — |
+| Tier B — Balanced | 0 | — | — | — | — | — | — | — |
 | Tier C — Exploratory (paper-only) | 0 | — | — | — | — | — | — | — |
 | No Template Match | 0 | — | — | — | — | — | — | — |
 
@@ -30,116 +30,12 @@ _4/5 required confluences — live trading allowed_
 
 | Set | N | WR% | wWR% | Avg P&L% | Avg RR | Max DD% | Avg MFE% | Avg MAE% | Avg realR | Med realR | Reliability |
 |-----|---|-----|------|----------|--------|---------|----------|----------|-----------|-----------|-------------|
-| Train (80%) | 6 | 83.3% | 83.0% | +2.4902% | 1.57 | 1.4800% | +5.7650% | +0.6081% | +1.3786R | +1.8988R | Insufficient |
-| Holdout (20%) | 6 | 83.3% | 80.1% | +1.6642% | 1.53 | 2.4200% | +2.6036% | +1.4460% | +0.7991R | +1.0244R | Insufficient |
+| Train (80%) | 0 | — | — | — | — | — | — | — | — | — | — |
+| Holdout (20%) | 0 | — | — | — | — | — | — | — | — | — | — |
 
 ### Warnings
 
-> **WARN:** [TIER_A] n=12 - insufficient sample (<30), treat as noise
-
-### Dimension Breakdowns (Training Set)
-
-#### Direction
-
-| Value | N | WR% | Avg P&L% | Avg Conf | Avg RR | Avg MFE% | Avg MAE% | Avg realR |
-|-------|---|-----|----------|----------|--------|----------|----------|----------|
-| SELL | 3 ⚠ | 100.0% | +3.5707% | 10.0 | 1.50 | +9.6194% | +0.1793% | +1.9279R |
-| BUY | 3 ⚠ | 66.7% | +1.4097% | 10.0 | 1.63 | +1.9107% | +1.0370% | +0.8293R |
-
-> **WARN:** [TIER_A][Direction=SELL] n=3 - insufficient sample (<30), treat as noise
-> **WARN:** [TIER_A][Direction=SELL] regime concentration: 3/3 (100%) in 'TRENDING_BEAR' - may not generalize
-> **WARN:** [TIER_A][Direction=BUY] n=3 - insufficient sample (<30), treat as noise
-> **WARN:** [TIER_A][Direction=BUY] regime concentration: 3/3 (100%) in 'TRENDING_BULL' - may not generalize
-
-#### Regime
-
-| Value | N | WR% | Avg P&L% | Avg Conf | Avg RR | Avg MFE% | Avg MAE% | Avg realR |
-|-------|---|-----|----------|----------|--------|----------|----------|----------|
-| TRENDING_BEAR | 3 ⚠ | 100.0% | +3.5707% | 10.0 | 1.50 | +9.6194% | +0.1793% | +1.9279R |
-| TRENDING_BULL | 3 ⚠ | 66.7% | +1.4097% | 10.0 | 1.63 | +1.9107% | +1.0370% | +0.8293R |
-
-> **WARN:** [TIER_A][Regime=TRENDING_BEAR] n=3 - insufficient sample (<30), treat as noise
-> **WARN:** [TIER_A][Regime=TRENDING_BULL] n=3 - insufficient sample (<30), treat as noise
-
-#### Session
-
-| Value | N | WR% | Avg P&L% | Avg Conf | Avg RR | Avg MFE% | Avg MAE% | Avg realR |
-|-------|---|-----|----------|----------|--------|----------|----------|----------|
-| LONDON_KZ | 3 ⚠ | 100.0% | +3.8847% | 10.0 | 1.50 | +9.9317% | +0.4282% | +1.9692R |
-| ASIA_KZ | 1 ⚠ | 100.0% | +1.6370% | 10.0 | 1.50 | +1.4645% | +0.2450% | +1.7052R |
-| NY_AM_KZ | 2 ⚠ | 50.0% | +0.8250% | 10.0 | 1.70 | +1.6653% | +1.0596% | +0.3294R |
-
-> **WARN:** [TIER_A][Session=LONDON_KZ] n=3 - insufficient sample (<30), treat as noise
-> **WARN:** [TIER_A][Session=ASIA_KZ] n=1 - insufficient sample (<30), treat as noise
-> **WARN:** [TIER_A][Session=ASIA_KZ] regime concentration: 1/1 (100%) in 'TRENDING_BEAR' - may not generalize
-> **WARN:** [TIER_A][Session=NY_AM_KZ] n=2 - insufficient sample (<30), treat as noise
-> **WARN:** [TIER_A][Session=NY_AM_KZ] regime concentration: 2/2 (100%) in 'TRENDING_BULL' - may not generalize
-
-#### FVG Quality
-
-| Value | N | WR% | Avg P&L% | Avg Conf | Avg RR | Avg MFE% | Avg MAE% | Avg realR |
-|-------|---|-----|----------|----------|--------|----------|----------|----------|
-| HIGH | 6 ⚠ | 83.3% | +2.4902% | 10.0 | 1.57 | +5.7650% | +0.6081% | +1.3786R |
-
-> **WARN:** [TIER_A][FVG Quality=HIGH] n=6 - insufficient sample (<30), treat as noise
-
-#### MSS Quality
-
-| Value | N | WR% | Avg P&L% | Avg Conf | Avg RR | Avg MFE% | Avg MAE% | Avg realR |
-|-------|---|-----|----------|----------|--------|----------|----------|----------|
-| HIGH | 6 ⚠ | 83.3% | +2.4902% | 10.0 | 1.57 | +5.7650% | +0.6081% | +1.3786R |
-
-> **WARN:** [TIER_A][MSS Quality=HIGH] n=6 - insufficient sample (<30), treat as noise
-
-#### DR Location
-
-| Value | N | WR% | Avg P&L% | Avg Conf | Avg RR | Avg MFE% | Avg MAE% | Avg realR |
-|-------|---|-----|----------|----------|--------|----------|----------|----------|
-| DISCOUNT | 3 ⚠ | 100.0% | +3.5707% | 10.0 | 1.50 | +9.6194% | +0.1793% | +1.9279R |
-| PREMIUM | 3 ⚠ | 66.7% | +1.4097% | 10.0 | 1.63 | +1.9107% | +1.0370% | +0.8293R |
-
-> **WARN:** [TIER_A][DR Location=DISCOUNT] n=3 - insufficient sample (<30), treat as noise
-> **WARN:** [TIER_A][DR Location=DISCOUNT] regime concentration: 3/3 (100%) in 'TRENDING_BEAR' - may not generalize
-> **WARN:** [TIER_A][DR Location=PREMIUM] n=3 - insufficient sample (<30), treat as noise
-> **WARN:** [TIER_A][DR Location=PREMIUM] regime concentration: 3/3 (100%) in 'TRENDING_BULL' - may not generalize
-
-#### Entry Type
-
-| Value | N | WR% | Avg P&L% | Avg Conf | Avg RR | Avg MFE% | Avg MAE% | Avg realR |
-|-------|---|-----|----------|----------|--------|----------|----------|----------|
-| REACTION_CONFIRMED | 1 ⚠ | 100.0% | +1.6370% | 10.0 | 1.50 | +1.4645% | +0.2450% | +1.7052R |
-| MIDPOINT_RECLAIM | 5 ⚠ | 80.0% | +2.6608% | 10.0 | 1.58 | +6.6251% | +0.6808% | +1.3133R |
-
-> **WARN:** [TIER_A][Entry Type=REACTION_CONFIRMED] n=1 - insufficient sample (<30), treat as noise
-> **WARN:** [TIER_A][Entry Type=REACTION_CONFIRMED] regime concentration: 1/1 (100%) in 'TRENDING_BEAR' - may not generalize
-> **WARN:** [TIER_A][Entry Type=REACTION_CONFIRMED] session concentration: 1/1 (100%) in 'ASIA_KZ' - session-dependent edge
-> **WARN:** [TIER_A][Entry Type=MIDPOINT_RECLAIM] n=5 - insufficient sample (<30), treat as noise
-
-### Excursion Analysis (MFE / MAE / realized_R by Dimension)
-
-> MFE = max favorable move from entry (before SL/TP1).  
-> MAE = max adverse move from entry (before SL/TP1).  
-> realR = result in R-multiples (WIN/PARTIAL uses TP1 exit).  
-
-##### Session
-
-| Value | N | Avg MFE% | Avg MAE% | Avg realR | Med realR | WR% |
-|-------|---|----------|----------|-----------|-----------|-----|
-| ASIA_KZ | 1 ⚠ | +1.4645% | +0.2450% | +1.7052R | +1.7052R | 100.0% |
-| LONDON_KZ | 3 ⚠ | +9.9317% | +0.4282% | +1.9692R | +2.0364R | 100.0% |
-| NY_AM_KZ | 2 ⚠ | +1.6653% | +1.0596% | +0.3294R | +0.3294R | 50.0% |
-
-##### FVG Quality
-
-| Value | N | Avg MFE% | Avg MAE% | Avg realR | Med realR | WR% |
-|-------|---|----------|----------|-----------|-----------|-----|
-| HIGH | 6 ⚠ | +5.7650% | +0.6081% | +1.3786R | +1.8988R | 83.3% |
-
-##### MSS Quality
-
-| Value | N | Avg MFE% | Avg MAE% | Avg realR | Med realR | WR% |
-|-------|---|----------|----------|-----------|-----------|-----|
-| HIGH | 6 ⚠ | +5.7650% | +0.6081% | +1.3786R | +1.8988R | 83.3% |
+> **WARN:** [TIER_A] n=0 - insufficient sample (<30), treat as noise
 
 ---
 
@@ -149,120 +45,12 @@ _3/5 required confluences — live trading allowed_
 
 | Set | N | WR% | wWR% | Avg P&L% | Avg RR | Max DD% | Avg MFE% | Avg MAE% | Avg realR | Med realR | Reliability |
 |-----|---|-----|------|----------|--------|---------|----------|----------|-----------|-----------|-------------|
-| Train (80%) | 9 | 77.8% | 84.0% | +1.5758% | 1.57 | 1.8800% | +2.2946% | +0.6038% | +1.0682R | +1.8380R | Insufficient |
-| Holdout (20%) | 14 | 85.7% | 89.9% | +2.3564% | 1.72 | 1.4000% | +3.3356% | +0.9564% | +1.1487R | +1.4030R | Insufficient |
+| Train (80%) | 0 | — | — | — | — | — | — | — | — | — | — |
+| Holdout (20%) | 0 | — | — | — | — | — | — | — | — | — | — |
 
 ### Warnings
 
-> **WARN:** [TIER_B] n=23 - insufficient sample (<30), treat as noise
-
-### Dimension Breakdowns (Training Set)
-
-#### Direction
-
-| Value | N | WR% | Avg P&L% | Avg Conf | Avg RR | Avg MFE% | Avg MAE% | Avg realR |
-|-------|---|-----|----------|----------|--------|----------|----------|----------|
-| SELL | 6 ⚠ | 83.3% | +2.1133% | 10.0 | 1.60 | +2.4668% | +0.3870% | +1.4494R |
-| BUY | 3 ⚠ | 66.7% | +0.5007% | 9.7 | 1.50 | +1.9500% | +1.0375% | +0.3060R |
-
-> **WARN:** [TIER_B][Direction=SELL] n=6 - insufficient sample (<30), treat as noise
-> **WARN:** [TIER_B][Direction=SELL] regime concentration: 6/6 (100%) in 'TRENDING_BEAR' - may not generalize
-> **WARN:** [TIER_B][Direction=SELL] session concentration: 6/6 (100%) in 'OVERNIGHT' - session-dependent edge
-> **WARN:** [TIER_B][Direction=BUY] n=3 - insufficient sample (<30), treat as noise
-> **WARN:** [TIER_B][Direction=BUY] regime concentration: 3/3 (100%) in 'TRENDING_BULL' - may not generalize
-
-#### Regime
-
-| Value | N | WR% | Avg P&L% | Avg Conf | Avg RR | Avg MFE% | Avg MAE% | Avg realR |
-|-------|---|-----|----------|----------|--------|----------|----------|----------|
-| TRENDING_BEAR | 6 ⚠ | 83.3% | +2.1133% | 10.0 | 1.60 | +2.4668% | +0.3870% | +1.4494R |
-| TRENDING_BULL | 3 ⚠ | 66.7% | +0.5007% | 9.7 | 1.50 | +1.9500% | +1.0375% | +0.3060R |
-
-> **WARN:** [TIER_B][Regime=TRENDING_BEAR] n=6 - insufficient sample (<30), treat as noise
-> **WARN:** [TIER_B][Regime=TRENDING_BEAR] session concentration: 6/6 (100%) in 'OVERNIGHT' - session-dependent edge
-> **WARN:** [TIER_B][Regime=TRENDING_BULL] n=3 - insufficient sample (<30), treat as noise
-
-#### Session
-
-| Value | N | WR% | Avg P&L% | Avg Conf | Avg RR | Avg MFE% | Avg MAE% | Avg realR |
-|-------|---|-----|----------|----------|--------|----------|----------|----------|
-| LONDON_KZ | 1 ⚠ | 100.0% | +0.9150% | 10.0 | 1.50 | +2.3204% | +1.4413% | +0.5980R |
-| OVERNIGHT | 8 ⚠ | 75.0% | +1.6584% | 9.9 | 1.57 | +2.2913% | +0.4991% | +1.1270R |
-
-> **WARN:** [TIER_B][Session=LONDON_KZ] n=1 - insufficient sample (<30), treat as noise
-> **WARN:** [TIER_B][Session=LONDON_KZ] regime concentration: 1/1 (100%) in 'TRENDING_BULL' - may not generalize
-> **WARN:** [TIER_B][Session=OVERNIGHT] n=8 - insufficient sample (<30), treat as noise
-> **WARN:** [TIER_B][Session=OVERNIGHT] regime concentration: 6/8 (75%) in 'TRENDING_BEAR' - may not generalize
-
-#### FVG Quality
-
-| Value | N | WR% | Avg P&L% | Avg Conf | Avg RR | Avg MFE% | Avg MAE% | Avg realR |
-|-------|---|-----|----------|----------|--------|----------|----------|----------|
-| HIGH | 9 ⚠ | 77.8% | +1.5758% | 9.9 | 1.57 | +2.2946% | +0.6038% | +1.0682R |
-
-> **WARN:** [TIER_B][FVG Quality=HIGH] n=9 - insufficient sample (<30), treat as noise
-> **WARN:** [TIER_B][FVG Quality=HIGH] session concentration: 8/9 (89%) in 'OVERNIGHT' - session-dependent edge
-
-#### MSS Quality
-
-| Value | N | WR% | Avg P&L% | Avg Conf | Avg RR | Avg MFE% | Avg MAE% | Avg realR |
-|-------|---|-----|----------|----------|--------|----------|----------|----------|
-| HIGH | 9 ⚠ | 77.8% | +1.5758% | 9.9 | 1.57 | +2.2946% | +0.6038% | +1.0682R |
-
-> **WARN:** [TIER_B][MSS Quality=HIGH] n=9 - insufficient sample (<30), treat as noise
-> **WARN:** [TIER_B][MSS Quality=HIGH] session concentration: 8/9 (89%) in 'OVERNIGHT' - session-dependent edge
-
-#### DR Location
-
-| Value | N | WR% | Avg P&L% | Avg Conf | Avg RR | Avg MFE% | Avg MAE% | Avg realR |
-|-------|---|-----|----------|----------|--------|----------|----------|----------|
-| UNKNOWN | 1 ⚠ | 100.0% | +0.9150% | 10.0 | 1.50 | +2.3204% | +1.4413% | +0.5980R |
-| DISCOUNT | 6 ⚠ | 83.3% | +2.1133% | 10.0 | 1.60 | +2.4668% | +0.3870% | +1.4494R |
-| PREMIUM | 2 ⚠ | 50.0% | +0.2935% | 9.5 | 1.50 | +1.7648% | +0.8356% | +0.1600R |
-
-> **WARN:** [TIER_B][DR Location=UNKNOWN] n=1 - insufficient sample (<30), treat as noise
-> **WARN:** [TIER_B][DR Location=UNKNOWN] regime concentration: 1/1 (100%) in 'TRENDING_BULL' - may not generalize
-> **WARN:** [TIER_B][DR Location=UNKNOWN] session concentration: 1/1 (100%) in 'LONDON_KZ' - session-dependent edge
-> **WARN:** [TIER_B][DR Location=DISCOUNT] n=6 - insufficient sample (<30), treat as noise
-> **WARN:** [TIER_B][DR Location=DISCOUNT] regime concentration: 6/6 (100%) in 'TRENDING_BEAR' - may not generalize
-> **WARN:** [TIER_B][DR Location=DISCOUNT] session concentration: 6/6 (100%) in 'OVERNIGHT' - session-dependent edge
-> **WARN:** [TIER_B][DR Location=PREMIUM] n=2 - insufficient sample (<30), treat as noise
-> **WARN:** [TIER_B][DR Location=PREMIUM] regime concentration: 2/2 (100%) in 'TRENDING_BULL' - may not generalize
-> **WARN:** [TIER_B][DR Location=PREMIUM] session concentration: 2/2 (100%) in 'OVERNIGHT' - session-dependent edge
-
-#### Entry Type
-
-| Value | N | WR% | Avg P&L% | Avg Conf | Avg RR | Avg MFE% | Avg MAE% | Avg realR |
-|-------|---|-----|----------|----------|--------|----------|----------|----------|
-| MIDPOINT_RECLAIM | 9 ⚠ | 77.8% | +1.5758% | 9.9 | 1.57 | +2.2946% | +0.6038% | +1.0682R |
-
-> **WARN:** [TIER_B][Entry Type=MIDPOINT_RECLAIM] n=9 - insufficient sample (<30), treat as noise
-> **WARN:** [TIER_B][Entry Type=MIDPOINT_RECLAIM] session concentration: 8/9 (89%) in 'OVERNIGHT' - session-dependent edge
-
-### Excursion Analysis (MFE / MAE / realized_R by Dimension)
-
-> MFE = max favorable move from entry (before SL/TP1).  
-> MAE = max adverse move from entry (before SL/TP1).  
-> realR = result in R-multiples (WIN/PARTIAL uses TP1 exit).  
-
-##### Session
-
-| Value | N | Avg MFE% | Avg MAE% | Avg realR | Med realR | WR% |
-|-------|---|----------|----------|-----------|-----------|-----|
-| LONDON_KZ | 1 ⚠ | +2.3204% | +1.4413% | +0.5980R | +0.5980R | 100.0% |
-| OVERNIGHT | 8 ⚠ | +2.2913% | +0.4991% | +1.1270R | +1.9115R | 75.0% |
-
-##### FVG Quality
-
-| Value | N | Avg MFE% | Avg MAE% | Avg realR | Med realR | WR% |
-|-------|---|----------|----------|-----------|-----------|-----|
-| HIGH | 9 ⚠ | +2.2946% | +0.6038% | +1.0682R | +1.8380R | 77.8% |
-
-##### MSS Quality
-
-| Value | N | Avg MFE% | Avg MAE% | Avg realR | Med realR | WR% |
-|-------|---|----------|----------|-----------|-----------|-----|
-| HIGH | 9 ⚠ | +2.2946% | +0.6038% | +1.0682R | +1.8380R | 77.8% |
+> **WARN:** [TIER_B] n=0 - insufficient sample (<30), treat as noise
 
 ---
 
@@ -304,16 +92,16 @@ _Signals that matched no ICT template_
 
 | Template | Train N | Train WR% | Holdout N | Holdout WR% | Avg MFE% | Avg MAE% | Avg realR |
 |----------|---------|-----------|-----------|-------------|----------|----------|----------|
-| Tier A — Strict | 6 | 83.3% | 6 | 83.3% | +5.7650% | +0.6081% | +1.3786R |
-| Tier B — Balanced | 15 | 80.0% | 20 | 85.0% | +3.6827% | +0.6055% | +1.1924R |
-| Tier C — Exploratory (paper-only) | 15 | 80.0% | 20 | 85.0% | +3.6827% | +0.6055% | +1.1924R |
+| Tier A — Strict | 1 | 100.0% | 0 | — | +1.9422% | +0.4065% | +1.2900R |
+| Tier B — Balanced | 13 | 61.5% | 13 | 61.5% | +2.6756% | +1.1159% | +0.5654R |
+| Tier C — Exploratory (paper-only) | 11 | 54.5% | 11 | 54.5% | +2.0992% | +0.9206% | +0.3336R |
 
 ---
 
 ## Overfitting & Data Quality Warnings
 
-- **WARN:** [TIER_A] n=12 - insufficient sample (<30), treat as noise
-- **WARN:** [TIER_B] n=23 - insufficient sample (<30), treat as noise
+- **WARN:** [TIER_A] n=0 - insufficient sample (<30), treat as noise
+- **WARN:** [TIER_B] n=0 - insufficient sample (<30), treat as noise
 - **WARN:** [TIER_C] n=0 - insufficient sample (<30), treat as noise
 - **WARN:** [NONE] n=0 - insufficient sample (<30), treat as noise
 
@@ -348,19 +136,19 @@ _Concentration threshold: >= 70% of signals in one regime or session_
 - `EXECUTION_MODE` = `PAPER` (set in crypto_alert.py)
 - `TEMPLATE_MIN_SAMPLE` = 50 closed trades  
 - `CIRCUIT_BREAKER_LOOKBACK` = 20 trades, min WR = 55%  
-- `BLOCK_RANGING_LIVE` = True, templates = ['NONE', 'TIER_B']  
-- `TIER_DAILY_LIVE_CAPS` = {'TIER_A': 3, 'TIER_B': 2, 'TIER_C': 0, 'NONE': 1}
+- `BLOCK_RANGING_LIVE` = True, templates = ['CRT_B_FVG_RELAXED', 'CRT_B_OB_HIGH_MSS', 'NONE', 'TIER_B']  
+- `TIER_DAILY_LIVE_CAPS` = {'TIER_A': 3, 'TIER_B': 2, 'TIER_C': 0, 'NONE': 1, 'CRT_A_FVG_ALIGNED': 3, 'CRT_B_OB_HIGH_MSS': 2, 'CRT_B_FVG_RELAXED': 2, 'CRT_C_OB_DEFAULT': 0}
 
 | Safety Rule | Trigger Condition | Signals Blocked | % of All |
 |------------|-------------------|-----------------|----------|
 | PAPER_ONLY — Tier C | `matched_template_id == TIER_C` | 0 | 0.0% |
-| PAPER_ONLY — cap=0 | Tier ['TIER_C'] daily cap = 0 | 0 | 0.0% |
-| BLOCKED_BY_REGIME_SAFETY | RANGING + template in ['NONE', 'TIER_B'] | 0 | 0.0% |
+| PAPER_ONLY — cap=0 | Tier ['TIER_C', 'CRT_C_OB_DEFAULT'] daily cap = 0 | 16 | 16.8% |
+| BLOCKED_BY_REGIME_SAFETY | RANGING + template in ['CRT_B_FVG_RELAXED', 'CRT_B_OB_HIGH_MSS', 'NONE', 'TIER_B'] | 37 | 38.9% |
 | INSUFFICIENT_SAMPLE | < 50 closed trades per template | **requires live DB** | — |
 | PAUSED_BY_CIRCUIT_BREAKER | Rolling 20-trade WR < 55% | **requires live DB** | — |
 | DAILY_CAP_REACHED | Daily live count ≥ cap per tier | **requires live DB** | — |
 
-**Subtotal (simulatable rules):** 0 / 35 signals (0.0%) would be blocked before reaching live execution.
+**Subtotal (simulatable rules):** 53 / 95 signals (55.8%) would be blocked before reaching live execution.
 
 ### Regime Safety — RANGING Breakdown by Template
 

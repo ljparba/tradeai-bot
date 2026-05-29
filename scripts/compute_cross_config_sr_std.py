@@ -122,10 +122,29 @@ def _load_signals_for_run(conn: sqlite3.Connection, run_id: int) -> list[dict]:
     return out
 
 
-def _list_distinct_configs(conn: sqlite3.Connection, min_signals: int) -> list[tuple[str, int, int]]:
+def _list_distinct_configs(conn: sqlite3.Connection, min_signals: int,
+                           scanner_mode: str = "any") -> list[tuple[str, int, int]]:
     """Return [(config_hash, latest_run_id, n_signals), ...] sorted by run_id DESC.
 
     Uses LATEST run per hash (MAX(id)) to get the freshest snapshot of that config.
+
+    Fix D-2 (explorer audit 2026-05-27): added `scanner_mode` filter to scope
+    the cross-config std to comparable strategies. Without scoping, CRT-only
+    runs (1H, OB-heavy, different signal-shape) get folded into the same std
+    as 5M_SWEEP-only runs (5M, FVG-strict, very different shape). The
+    resulting std measures strategy heterogeneity, not parameter heterogeneity
+    — which falsely trips the explorer's `sr_trial_std_jump` guard.
+
+    scanner_mode:
+      "any"      — original behavior, all configs (back-compat default)
+      "5m_only"  — runs with ENABLE_5M_SWEEP=1 AND ENABLE_H4_CRT=0 signature
+      "crt_only" — runs with ENABLE_5M_SWEEP=0 AND ENABLE_H4_CRT=1 signature
+      "both_on"  — both scanners enabled
+
+    Detection: scans signals in each candidate run for source distribution.
+    A run is "5m_only" if all signals are source='5M_SWEEP' (or NULL=back-
+    compat); "crt_only" if all are 'H4_CRT'; "both_on" if mixed; "empty" if
+    no signals.
     """
     rows = conn.execute(
         """
@@ -142,32 +161,123 @@ def _list_distinct_configs(conn: sqlite3.Connection, min_signals: int) -> list[t
             "SELECT COUNT(*) FROM backtest_signals WHERE run_id = ?",
             (latest_id,),
         ).fetchone()[0]
-        if n >= min_signals:
-            result.append((cfg_hash, latest_id, n))
+        if n < min_signals:
+            continue
+        if scanner_mode != "any":
+            # Determine the run's scanner mode from its signal source distribution
+            src_counts = dict(conn.execute(
+                "SELECT COALESCE(source, '5M_SWEEP'), COUNT(*) "
+                "FROM backtest_signals WHERE run_id = ? GROUP BY source",
+                (latest_id,),
+            ).fetchall())
+            has_5m  = src_counts.get("5M_SWEEP", 0) > 0
+            has_crt = src_counts.get("H4_CRT", 0)  > 0
+            if scanner_mode == "5m_only" and not (has_5m and not has_crt):
+                continue
+            if scanner_mode == "crt_only" and not (has_crt and not has_5m):
+                continue
+            if scanner_mode == "both_on" and not (has_5m and has_crt):
+                continue
+        result.append((cfg_hash, latest_id, n))
     # Sort latest first
     result.sort(key=lambda r: r[1], reverse=True)
     return result
 
 
-def compute_and_persist(min_signals: int = 30, dry_run: bool = False) -> dict:
+# ── M-CY12-2 fix (audit 2026-05-29 cycle-12): dedup tolerance ─────────────────
+# Two pool entries with OOS Sharpe within this fractional tolerance are treated
+# as the same strategy — they may differ only in metadata config_hash payload
+# (e.g., T1.2/T1.3 Stage B knobs that don't affect backtest signal generation
+# at default bonus=0). Independent-trial assumption of Bailey/LdP 2014 requires
+# distinct strategy variants; duplicates artificially cluster the distribution
+# and understate sr_std.
+_DEDUP_SHARPE_TOL = 0.0001
+
+
+def _dedup_pool_by_oos_sharpe(per_config_rows: list, tol: float = _DEDUP_SHARPE_TOL):
+    """Group pool entries by OOS Sharpe within tolerance; keep largest-n per group.
+
+    Returns (deduped_sharpes, deduped_per_config_rows, dedup_groups).
+
+    `dedup_groups` is a list of {"representative": cfg, "duplicates": [cfg, ...]}
+    so the persisted blob documents which entries were merged.
+    """
+    # Sort by sharpe so consecutive entries with similar sharpe are easy to group
+    sorted_rows = sorted(per_config_rows, key=lambda r: r["oos_sharpe_mean"])
+    groups: list[list[dict]] = []
+    for row in sorted_rows:
+        sr = row["oos_sharpe_mean"]
+        # Find existing group within tolerance
+        placed = False
+        for group in groups:
+            # Compare against representative (largest-n entry in group)
+            if abs(group[0]["oos_sharpe_mean"] - sr) <= tol:
+                group.append(row)
+                placed = True
+                break
+        if not placed:
+            groups.append([row])
+    # Per group: pick representative = largest n_signals (most independent data)
+    deduped_rows: list[dict] = []
+    dedup_groups: list[dict] = []
+    for group in groups:
+        # Sort so largest n is first
+        group_sorted = sorted(group, key=lambda r: -r["n_signals"])
+        representative = group_sorted[0]
+        deduped_rows.append(representative)
+        if len(group_sorted) > 1:
+            dedup_groups.append({
+                "representative_run_id":   representative["latest_run_id"],
+                "representative_n":        representative["n_signals"],
+                "representative_sharpe":   representative["oos_sharpe_mean"],
+                "duplicate_run_ids":       [r["latest_run_id"] for r in group_sorted[1:]],
+                "rationale": (
+                    "OOS Sharpe within ±%.4f — assumed same strategy under "
+                    "different metadata config_hash payload (e.g., T1.2/T1.3 "
+                    "Stage B knobs that don't affect backtest signal generation "
+                    "at default bonus=0)." % tol
+                ),
+            })
+    deduped_sharpes = [r["oos_sharpe_mean"] for r in deduped_rows]
+    return deduped_sharpes, deduped_rows, dedup_groups
+
+
+def compute_and_persist(min_signals: int = 30, dry_run: bool = False,
+                        scanner_mode: str = "any",
+                        dedup: bool = True) -> dict:
     """Compute cross-config sr_trial_std and (optionally) persist to bot_state.
 
     Returns the result blob (whether or not it was persisted).
+
+    Fix D-2 (explorer audit 2026-05-27): added `scanner_mode` to optionally
+    scope the cross-config std to comparable strategies. Default "any"
+    preserves back-compat behavior; "5m_only" / "crt_only" / "both_on"
+    restrict the pool when the operator wants honest std within a single
+    strategy family.
+
+    M-CY12-2 fix (audit 2026-05-29 cycle-12): added `dedup=True` to group
+    pool entries with OOS Sharpe within ±_DEDUP_SHARPE_TOL. Bailey/LdP
+    independent-trial assumption requires distinct strategy variants;
+    duplicate entries (e.g., Run-1749/1056 sharing 0.4340) artificially
+    cluster the distribution and understate sr_std → overstate DSR.
+    Pass dedup=False to compute the legacy raw std (back-compat).
     """
     if not _DB_PATH.exists():
         print(f"[ERROR] DB not found at {_DB_PATH}")
         sys.exit(2)
 
     conn = sqlite3.connect(str(_DB_PATH))
-    configs = _list_distinct_configs(conn, min_signals=min_signals)
+    configs = _list_distinct_configs(conn, min_signals=min_signals,
+                                      scanner_mode=scanner_mode)
 
     if len(configs) < 2:
-        print(f"[ERROR] Need >= 2 distinct configs with >= {min_signals} signals; found {len(configs)}")
+        print(f"[ERROR] Need >= 2 distinct configs with >= {min_signals} signals "
+              f"(scanner_mode={scanner_mode}); found {len(configs)}")
         conn.close()
         sys.exit(3)
 
     print(f"Computing CPCV mean Sharpe across {len(configs)} distinct configs "
-          f"(min_signals={min_signals})...\n")
+          f"(min_signals={min_signals}, scanner_mode={scanner_mode})...\n")
 
     sharpes: list[float] = []
     per_config_rows: list[dict] = []
@@ -189,6 +299,16 @@ def compute_and_persist(min_signals: int = 30, dry_run: bool = False) -> dict:
 
     conn.close()
 
+    # M-CY12-2 fix: dedup pool entries with same OOS Sharpe (within tolerance)
+    # before computing std. They represent the same strategy under different
+    # metadata config_hash payloads — not independent trials.
+    raw_n_configs = len(sharpes)
+    raw_sharpes = list(sharpes)
+    raw_sr_std = _safe_std(raw_sharpes)
+    dedup_groups: list = []
+    if dedup:
+        sharpes, per_config_rows, dedup_groups = _dedup_pool_by_oos_sharpe(per_config_rows)
+
     sr_std  = _safe_std(sharpes)
     sr_mean = sum(sharpes) / len(sharpes)
     sr_min  = min(sharpes)
@@ -203,11 +323,21 @@ def compute_and_persist(min_signals: int = 30, dry_run: bool = False) -> dict:
         "min_oos_sharpe":    round(sr_min, 4),
         "max_oos_sharpe":    round(sr_max, 4),
         "per_config":        per_config_rows,
+        # M-CY12-2 audit trail (cycle-12 2026-05-29).
+        "dedup_applied":     dedup,
+        "n_configs_raw":     raw_n_configs,
+        "sr_std_raw":        round(raw_sr_std, 6) if dedup else None,
+        "dedup_groups":      dedup_groups,
         "note": (
             "Cross-config sr_trial_std (FIX 1 Part 2, 2026-05-23). "
             "Std of OOS CPCV mean Sharpe across all distinct config_hash entries "
-            "in backtest_runs with >= min_signals_floor signals. Use as the honest "
-            "Bailey/LdP 2014 sr_trial_std input — bypasses the within-fold proxy."
+            "in backtest_runs with >= min_signals_floor signals. M-CY12-2 fix "
+            "(2026-05-29 cycle-12): pool entries with OOS Sharpe within ±0.0001 "
+            "are deduped (kept the largest-n representative) — they represent "
+            "the same strategy under metadata-only config_hash changes (e.g. "
+            "T1.2/T1.3 Stage B knobs that don't affect signal generation at "
+            "default bonus=0). Bailey/LdP independent-trial assumption requires "
+            "distinct strategy variants. Use as the honest sr_trial_std input."
         ),
     }
 
@@ -274,13 +404,25 @@ def main() -> int:
                    help="Compute and print, but don't persist to bot_state")
     p.add_argument("--show", action="store_true",
                    help="Print the currently persisted value and exit")
+    p.add_argument("--scanner-mode", choices=("any", "5m_only", "crt_only", "both_on"),
+                   default="any",
+                   help="Scope std to a scanner family (Fix D-2, 2026-05-27). "
+                        "'any' (default, back-compat) folds all configs into one "
+                        "pool. Use '5m_only' / 'crt_only' / 'both_on' to compute "
+                        "an apples-to-apples std within one strategy family.")
+    p.add_argument("--no-dedup", action="store_true",
+                   help="DISABLE M-CY12-2 dedup (back-compat). Default: dedup "
+                        "ON — pool entries with OOS Sharpe within ±0.0001 are "
+                        "merged, keeping the largest-n representative.")
     args = p.parse_args()
 
     if args.show:
         show_current()
         return 0
 
-    compute_and_persist(min_signals=args.min_signals, dry_run=args.dry_run)
+    compute_and_persist(min_signals=args.min_signals, dry_run=args.dry_run,
+                         scanner_mode=args.scanner_mode,
+                         dedup=not args.no_dedup)
     return 0
 
 

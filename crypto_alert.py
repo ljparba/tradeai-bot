@@ -35,6 +35,19 @@ def _h(value) -> str:
     """
     return html.escape(str(value))
 
+# Visual section divider used across all Telegram messages (signal, exit
+# suggestion, heartbeat, startup). Same width everywhere for consistency.
+_TG_HR = "━" * 22
+
+# CY12-SIGNAL-SMTP fix (full audit 2026-05-29 resilience M-RES-1):
+# module-global signal alerter, initialized to None and set to the
+# MultiChannelAlerter instance in main(). When set, send_signal_msg
+# routes through the alerter so SMTP fallback catches Telegram outages
+# on actual signals (heartbeats already had this). When None (early
+# startup, tests), falls back to direct send_telegram. The alerter
+# self-tests both channels every ~24h.
+_signal_alerter = None
+
 # Load .env / .env.vault BEFORE any other module reads os.environ.
 # secrets_loader is the bot's centralized secrets entry point (Phase A item #4).
 from secrets_loader import load_env as _load_env
@@ -70,7 +83,9 @@ from adaptive_engine import (
 )
 from strategy_engine import LIVE_CONFIG, evaluate_setup, meets_quality
 from strategy_templates import (evaluate_confluences_vs_templates, seed_templates_table,
-                                validate_tier_hierarchy)
+                                validate_tier_hierarchy,
+                                # Phase B (2026-05-28) — CRT tier classifier
+                                evaluate_crt_templates, CRT_TEMPLATE_IDS)
 from indicators import (
     ema, calculate_rsi, calculate_atr, calculate_roc,
     get_trend, get_macd, detect_regime,
@@ -87,6 +102,54 @@ from ict_engine import (
     detect_fvg_entry_reaction, get_ict_4h_bias, compute_dealing_range,
     compute_liquidity_targets, detect_smt_divergence, detect_ict_ifvg,
     detect_5m_ifvg_entry, compute_ict_trade_plan,
+    # CRT v1 Session 3 (audit cycle-7 2026-05-27): SL buffer used by CRT
+    # scanner — must match backtest's ICT_SL_BUFFER_PCT exactly.
+    ICT_SL_BUFFER_PCT,
+)
+
+# CRT v1 Session 3 (audit cycle-7 2026-05-27): live H4-CRT signal source.
+# Default OFF (ENABLE_H4_CRT=0 in crt_engine.py). When enabled, the per-token
+# scan loop runs a SECOND detection pass via crt_engine.detect_h4_crt() and
+# emits signals tagged source='H4_CRT' alongside the canonical 5M sweep
+# signals tagged source='5M_SWEEP'.
+#
+# Live/backtest parity by construction: ALL helpers + constants imported
+# from crt_engine, NOT redefined here. Backtest's run_backtest_token_h4_crt
+# uses the same imports — guaranteed byte-identical signal generation for
+# identical OHLCV inputs.
+from crt_engine import (
+    detect_h4_crt, ENABLE_H4_CRT, H4_CRT_DISABLED_TOKENS,
+    H4_CRT_C2_LOOKBACK, H4_CRT_MSS_HORIZON,
+    compute_crt_trade_economics, crt_quality_to_confidence,
+    crt_trade_rejection_reason,
+    CRT_TP2_RR, CRT_TP3_RR,
+    # v2 Wyckoff phase context (Option KK, audit cycle-7 2026-05-27)
+    detect_wyckoff_context, is_crt_phase_aligned, WYCKOFF_PHASE_FILTER,
+    # CRT Pro v1.1 — TP1 mode + 1H trend gate (2026-05-27)
+    adjust_crt_tp1, CRT_TP1_MODE, CRT_REQUIRE_1H_TREND,
+    # M-NEW-9 fix (cycle-9 audit 2026-05-28): import CRT_FORWARD_BARS so the
+    # live expiry tracks the backtest outcome window (was hardcoded 48h).
+    CRT_FORWARD_BARS,
+    # OTE overlay (2026-05-28) — tagging only, no gate.
+    compute_ote_overlay,
+    # Cycle-12 unexplored axes (2026-05-29): FVG probe width + mitigation TTL.
+    H4_CRT_FVG_PROBE_WIDTH, H4_CRT_MITIGATION_TTL_H,
+    prune_consumed_zones,
+)
+# T1.2 — Funding rate overlay (2026-05-29, ENHANCEMENT_ROADMAP.md)
+from funding_rate_client import (
+    get_funding_rate,
+    classify_funding_extreme,
+    funding_confidence_bonus,
+    is_funding_fetch_failed,
+    FUNDING_BONUS_PCT as _FUNDING_BONUS_PCT,
+)
+# T1.3 — BTC correlation overlay (2026-05-29, ENHANCEMENT_ROADMAP.md)
+from btc_correlation import (
+    compute_btc_correlation,
+    classify_btc_corr,
+    btc_corr_confidence_bonus,
+    BTC_CORR_WINDOW_MIN as _BTC_CORR_WIN,
 )
 
 _ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -105,7 +168,7 @@ DB_PATH        = os.path.join(_ROOT, "data", "signals.db")
 from config import (
     # universe + cadence
     BINANCE_TOKENS, TIMEFRAMES, STRATEGY_VERSION, CHECK_INTERVAL,
-    STALE_CANDLE_THRESHOLD,
+    STALE_CANDLE_THRESHOLD, BTC_STALE_FEED_S,
     # indicator params
     RSI_PERIOD, RSI_OVERSOLD, RSI_OVERBOUGHT,
     ATR_PERIOD, ATR_SL_MULT, ROC_PERIOD, VOLUME_SPIKE,
@@ -120,6 +183,10 @@ from config import (
     API_RETRIES, API_DELAY, DOM_FETCH_INTERVAL, DOM_THRESHOLD,
     # template safety (Phase 5A)
     EXECUTION_MODE,
+    # per-scanner kill switches (2026-05-27)
+    ENABLE_5M_SWEEP,
+    # Phase A — Limit-order fill window + slippage thresholds (2026-05-28)
+    CRT_LIMIT_FILL_WINDOW_MIN, CRT_SLIPPAGE_WARN_PCT, CRT_SLIPPAGE_CRIT_PCT,
     TEMPLATE_MIN_SAMPLE, CIRCUIT_BREAKER_LOOKBACK, CIRCUIT_BREAKER_MIN_WR,
     TIER_DAILY_LIVE_CAPS, BLOCK_RANGING_LIVE, BLOCK_RANGING_TEMPLATES,
     # exit intelligence
@@ -151,7 +218,20 @@ def new_state():
         "last_24h":          {},     # cached 24h price/volume data from last fetch
         "last_fetched_at":    0.0,   # unix timestamp of last successful candle refresh (any TF)
         "last_5m_fetched_at": 0.0,  # unix timestamp of last successful 5m candle refresh
+        # M-NEW-5 fix (cycle-9 audit 2026-05-28): per-TF stale tracking. The
+        # CRT scanner consumes 4H candles directly — without this tracker, a
+        # silent stale-4H scenario (5M fetches succeed, 4H fetches fail) would
+        # let the bot generate CRT signals from a frozen H4 candle range. The
+        # generic last_fetched_at is updated when ANY TF succeeds, masking
+        # per-TF failure modes.
+        "last_4h_fetched_at": 0.0,  # unix timestamp of last successful 4h candle refresh
+        "last_1h_fetched_at": 0.0,  # unix timestamp of last successful 1h candle refresh
         "consumed_sweeps":   set(),  # (bar_idx, round(level,6)) pairs already used for signals
+        # CRT v1 Session 3 (LBC-H-2 close): one-shot mitigation set for H4 CRT.
+        # Keyed on (c1_time, round(c1_high, 6), round(c1_low, 6)) — c1_time is
+        # the H4 candle's TIMESTAMP so the entry survives cache rotation and
+        # bot restart (persisted to state_store every cycle below).
+        "consumed_h4_crt":   set(),
         "data_gap_bars":     0,      # H19: worst-case 5M gap bars from last fetch; >=3 skips signal
         "data_gap_bars_1h":  0,      # LOW #5: worst-case 1H gap bars; >=2 skips signal (2h blind spot)
         "data_gap_bars_4h":  0,      # LOW #5: worst-case 4H gap bars; >=1 skips signal (4h blind spot)
@@ -343,7 +423,75 @@ def init_db():
                      # Phase 5A: template safety status
                      ("template_status",       "TEXT"),
                      ("template_live_allowed", "INTEGER"),
-                     ("template_block_reason", "TEXT")]:
+                     ("template_block_reason", "TEXT"),
+                     # CRT v1 Session 3 (audit cycle-7 2026-05-27): source tag
+                     # parity with backtest. Default '5M_SWEEP' so all
+                     # historical signals back-fill correctly. H4-CRT signals
+                     # from crt_engine.detect_h4_crt carry source='H4_CRT'
+                     # for independent per-source attribution. LBC-H-1 close.
+                     ("source",                "TEXT DEFAULT '5M_SWEEP'"),
+                     # Phase A — Slippage + Fillability tracking (2026-05-28)
+                     # Operator chose Option 1 (limit orders at entry_price) as
+                     # the live execution discipline. These columns measure:
+                     #   actual_entry_price   — live market tick at save_signal time
+                     #                          (vs `entry_price` which is the bot's
+                     #                          theoretical entry from MSS-bar open)
+                     #   slippage_pct         — (entry - actual_entry) / actual_entry * 100
+                     #                          NEGATIVE = market filled WORSE than bot's ref
+                     #   limit_fillable       — NULL=⏳WAITING, 1=✅FILLED, 0=❌MISSED
+                     #                          1 = price retouched entry within window
+                     #                          0 = window closed without retrace
+                     #   fillable_check_at    — UTC timestamp when window evaluated
+                     ("actual_entry_price",    "REAL"),
+                     ("slippage_pct",          "REAL"),
+                     ("limit_fillable",        "INTEGER"),
+                     ("fillable_check_at",     "TEXT"),
+                     # OTE overlay (2026-05-28) — Optimal Trade Entry tag.
+                     # Tagging only, no gate. ote_zone ∈ {IN_OTE, BELOW_OTE,
+                     # ABOVE_OTE, OTE_UNDEFINED}. ote_fib_pct = retracement
+                     # percentage of entry within the C2-wick → MSS-extreme
+                     # leg (0.0 = at wick, 1.0 = at MSS extreme).
+                     ("ote_zone",              "TEXT"),
+                     ("ote_fib_pct",           "REAL"),
+                     # T1.2 — Funding rate overlay (2026-05-29) — captures
+                     # the 8h-funding-rate at signal time and the classification
+                     # vs signal direction. Tagging + optional confidence
+                     # bonus controlled by FUNDING_BONUS_PCT env var.
+                     # funding_rate_pct = float fraction × 100 (display-friendly).
+                     # funding_classification ∈ {
+                     #   EXTREME_COUNTER_LONG, EXTREME_COUNTER_SHORT,
+                     #   EXTREME_AGAINST, NEUTRAL, DISABLED
+                     # }
+                     ("funding_rate_pct",      "REAL"),
+                     ("funding_classification","TEXT"),
+                     # T1.3 — BTC correlation overlay (2026-05-29) — rolling
+                     # Pearson r between BTC and token log-returns over
+                     # BTC_CORR_WINDOW_MIN 5M bars. Classification + optional
+                     # confidence bonus via BTC_CORR_BONUS_PCT.
+                     # btc_corr_strength ∈ [-1.0, +1.0] or NULL if insufficient data.
+                     # btc_corr_classification ∈ {
+                     #   ALIGNED_HIGH, ALIGNED_LOW, DIVERGENT, AMBIGUOUS,
+                     #   UNKNOWN, DISABLED
+                     # }
+                     ("btc_corr_strength",      "REAL"),
+                     ("btc_corr_classification","TEXT"),
+                     # H-CY13-1 fix (audit cycle-13 2026-05-29): cycle-12
+                     # promised bonus-attribution parity between live and
+                     # backtest, but only the backtest_signals schema got
+                     # the 3 columns. Live signals built the keys in the
+                     # `result` dict at crypto_alert.py:1299-1301 but the
+                     # migration + INSERT silently dropped them — so the
+                     # tracker Reports tab + any explorer post-hoc analysis
+                     # couldn't compute live bonus attribution. Now matched.
+                     # confidence_base = pre-bonus confidence (0-10 integer)
+                     # confidence_funding_bonus = funding overlay contribution
+                     #   to the final confidence (rounded float, signed)
+                     # confidence_btc_corr_bonus = BTC correlation overlay
+                     #   contribution to the final confidence (rounded float,
+                     #   signed)
+                     ("confidence_base",            "INTEGER"),
+                     ("confidence_funding_bonus",   "REAL"),
+                     ("confidence_btc_corr_bonus",  "REAL")]:
 
         if col not in existing:
             try:
@@ -627,6 +775,18 @@ def save_signal(token, price, result, plan, regime):
     try:
         conn = _connect()
         _now = datetime.now(timezone.utc)
+        # Phase A (2026-05-28) — capture live market tick + compute slippage.
+        # For CRT signals, `price` is the theoretical entry from a 5M bar that
+        # closed 5-15 min before this call. The live current market may be
+        # significantly different. Compare to STATE[token]'s freshest tick
+        # (set by update_token_state each scan cycle).
+        # Fallback: if STATE missing, slippage_pct=0 (treat `price` as the
+        # live tick — preserves 5M_SWEEP-era behavior where `price` IS live).
+        _live_tick = STATE.get(token, {}).get("last_24h", {}).get("price", price) or price
+        try:
+            _slippage_pct = round((price - _live_tick) / _live_tick * 100, 4) if _live_tick else 0.0
+        except (TypeError, ZeroDivisionError):
+            _slippage_pct = 0.0
         cur  = conn.execute("""INSERT INTO signals
             (token,signal,entry_price,sl,tp1,tp2,tp3,
              sl_pct,tp1_pct,tp2_pct,tp3_pct,rr1,rr2,rr3,
@@ -640,8 +800,14 @@ def save_signal(token, price, result, plan, regime):
              smt_type,entry_type,ev_score,ev_sample_n,ev_status,
              day_of_week,hour_utc,dist_daily_open_pct,dist_weekly_open_pct,
              strategy_version,matched_template_id,template_scores_json,
-             template_status,template_live_allowed,template_block_reason)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+             template_status,template_live_allowed,template_block_reason,
+             source,
+             actual_entry_price,slippage_pct,limit_fillable,fillable_check_at,
+             ote_zone,ote_fib_pct,
+             funding_rate_pct,funding_classification,
+             btc_corr_strength,btc_corr_classification,
+             confidence_base,confidence_funding_bonus,confidence_btc_corr_bonus)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (token,result["signal"],price,
              plan["sl"],plan["tp1"],plan["tp2"],plan["tp3"],
              plan["sl_pct"],plan["tp1_pct"],plan["tp2_pct"],plan["tp3_pct"],
@@ -658,8 +824,20 @@ def save_signal(token, price, result, plan, regime):
              result.get("btc_trend_4h","NEUTRAL"),result.get("btc_dom_dir","NEUTRAL"),
              result.get("wscore_buy",0.0),result.get("wscore_sell",0.0),
              result.get("conflict_level","LOW"),result.get("candle_pattern","NONE"),
+             # H-2 fix (audit cycle-8 2026-05-27) + M-NEW-9 fix (cycle-9
+             # audit 2026-05-28): CRT signals need an expiry window matching
+             # the backtest outcome window so trades that reach TP between
+             # the old 12h default and the real window aren't logged as
+             # EXPIRED (-0.25R) instead of WIN.
+             # Pre-M-NEW-9: hardcoded 48h that drifted from CRT_FORWARD_BARS
+             # the moment the explorer tuned the latter to 288 (24h) or
+             # 864 (72h). Now derived from CRT_FORWARD_BARS (5min bars × 5 ÷ 60).
+             # 5M_SWEEP path keeps its regime-aware expiry.
              (_now+timedelta(
-                 hours=EXPIRY_BY_REGIME.get(regime.get("regime","UNKNOWN"),12)
+                 hours=(
+                     (CRT_FORWARD_BARS * 5 / 60.0) if (result.get("source") == "H4_CRT")
+                     else EXPIRY_BY_REGIME.get(regime.get("regime","UNKNOWN"),12)
+                 )
              )).strftime("%Y-%m-%d %H:%M:%S"),
              result.get("feature_scores_json", None),
              result.get("sr_type",""),
@@ -681,21 +859,82 @@ def save_signal(token, price, result, plan, regime):
              result.get("template_scores_json", None),
              result.get("template_status", "UNKNOWN_TEMPLATE"),
              result.get("template_live_allowed", 0),
-             result.get("template_block_reason", None)))
+             result.get("template_block_reason", None),
+             # CRT v1 Session 3 (audit cycle-7 2026-05-27): source tag. Default
+             # '5M_SWEEP' for back-compat — pre-Session-3 callers don't set this
+             # key and must still write the canonical signal source.
+             result.get("source", "5M_SWEEP"),
+             # Phase A (2026-05-28) — Slippage + Fillability tracking.
+             # For CRT signals: `price` arg is the THEORETICAL entry (5M-bar
+             # open from MSS confirmation), which can be 5-15 min stale vs
+             # live market. _live_tick captures the actual current market
+             # price at save_signal time, so slippage_pct exposes the gap
+             # between bot's claimed entry and what would actually fill.
+             # For 5M_SWEEP signals: `price` IS the live tick (passed by main
+             # loop from current_prices), so slippage is naturally 0%.
+             _live_tick,
+             _slippage_pct,
+             None,   # limit_fillable: NULL = ⏳ WAITING (set by monitor cycle)
+             None,   # fillable_check_at: NULL until 30-min window evaluated
+             # OTE overlay (2026-05-28) — tagging only, no gate.
+             result.get("ote_zone", "OTE_UNDEFINED"),
+             result.get("ote_fib_pct", None),
+             # T1.2 — funding rate overlay (2026-05-29)
+             result.get("funding_rate_pct", None),
+             result.get("funding_classification", "NEUTRAL"),
+             # T1.3 — BTC correlation overlay (2026-05-29)
+             result.get("btc_corr_strength", None),
+             result.get("btc_corr_classification", "UNKNOWN"),
+             # H-CY13-1 fix (audit cycle-13 2026-05-29): write the 3
+             # attribution columns matching backtest_signals so the
+             # tracker Reports tab + explorer post-hoc analysis can
+             # decompose confidence into base + funding bonus + BTC-
+             # corr bonus. The live `result` dict has built these keys
+             # since the cycle-12 wave; only the persistence layer was
+             # half-shipped.
+             result.get("confidence_base", result.get("confidence", 0)),
+             result.get("confidence_funding_bonus", 0.0),
+             result.get("confidence_btc_corr_bonus", 0.0)))
         sig_id   = cur.lastrowid
         exp_h    = EXPIRY_BY_REGIME.get(regime.get("regime","UNKNOWN"), 12)
         conn.execute("INSERT INTO results (signal_id) VALUES (?)", (sig_id,))
-        # Phase I-2: persist per-template match detail
+        # Phase I-2: persist per-template match detail.
+        # CY12-SVM-DICT-OR-OBJ fix (full audit 2026-05-29 OGD HIGH-1 + adaptive
+        # M2): pre-fix the loop accessed `_tm.template_id` directly, which
+        # works for 5M_SWEEP path (TemplateMatch dataclass objects) but
+        # raised AttributeError for CRT path (which stores list-of-DICTS
+        # at crypto_alert.py:1366 with keys "id"/"score"/"matched").
+        # The exception was caught by the outer try/except, signal_variant_matches
+        # stayed empty for 100% of CRT signals → Phase 5B per-template OGD
+        # had zero learning substrate despite 5 closed CRT signals. Helper
+        # below duck-types both shapes so the table is populated for BOTH
+        # scanner paths.
         _best_tmpl_id = result.get("matched_template_id", "NONE")
+        def _svm_extract(tm):
+            """Return (template_id, score, confluences_matched, is_match)
+            tuple regardless of whether tm is a TemplateMatch dataclass
+            (5M_SWEEP) or a dict (CRT path)."""
+            if isinstance(tm, dict):
+                # CRT shape — keys: "id", "score", "matched"
+                return (tm.get("id", "NONE"),
+                        float(tm.get("score", 0.0)),
+                        tm.get("confluences_matched", {}),
+                        bool(tm.get("matched", False)))
+            # TemplateMatch dataclass — attribute access
+            return (getattr(tm, "template_id", "NONE"),
+                    float(getattr(tm, "score", 0.0)),
+                    getattr(tm, "confluences_matched", {}),
+                    bool(getattr(tm, "is_match", False)))
         for _tm in result.get("template_matches", []):
+            _tm_id, _tm_score, _tm_conf, _tm_match = _svm_extract(_tm)
             conn.execute(
                 """INSERT INTO signal_variant_matches
                    (signal_id, template_id, match_score,
                     confluences_matched_json, is_best_match)
                    VALUES (?, ?, ?, ?, ?)""",
-                (sig_id, _tm.template_id, _tm.score,
-                 json.dumps(_tm.confluences_matched),
-                 1 if _tm.template_id == _best_tmpl_id and _tm.is_match else 0))
+                (sig_id, _tm_id, _tm_score,
+                 json.dumps(_tm_conf),
+                 1 if _tm_id == _best_tmpl_id and _tm_match else 0))
         conn.commit(); conn.close()
         print(f"[DB] Saved ID:{sig_id} {token} {result['signal']} "
               f"[{regime.get('regime','?')}] expires {exp_h}H")
@@ -705,10 +944,533 @@ def save_signal(token, price, result, plan, regime):
 
 
 # ══════════════════════════════════════════════════════════
+# CRT v1 — LIVE H4 SCANNER (Session 3, audit cycle-7 2026-05-27)
+# ══════════════════════════════════════════════════════════
+#
+# Parallel to generate_signal() — uses the SAME c5m/c4h candle cache the
+# main loop already maintains, the SAME shared helpers from crt_engine.py
+# that backtest.py uses, and the SAME signal-write/Telegram pipeline.
+# Live/backtest parity by construction (LBC-H-3 close).
+#
+# Default-OFF: returns None immediately when ENABLE_H4_CRT=0 (the canonical
+# deployment state). Operator enables via ENABLE_H4_CRT=1 in env.
+#
+# H6 isolation: live OGD weights are NOT applied to CRT signals in this v1
+# (CRT signals carry their own confidence via crt_quality_to_confidence).
+# This matches the backtest's H6 isolation discipline.
+
+def scan_h4_crt_for_token(token, c5m, c4h, consumed, trend_1h="NEUTRAL",
+                           btc_c5m=None):
+    """Detect H4 CRT setup + build live signal result dict for the existing
+    save_signal / send_signal_msg pipeline. Mirrors backtest.py's
+    run_backtest_token_h4_crt economics + signal-dict construction.
+
+    Args:
+        token: token symbol (uppercase)
+        c5m, c4h: candle dicts (opens, highs, lows, closes, times in ms)
+        consumed: per-token mitigation set (mutated on signal emit)
+        trend_1h: optional 1H trend label (NEUTRAL / BULL / BEAR / STRONG_*)
+        btc_c5m: optional BTC 5M candle dict for SMT divergence detection.
+            When None (or missing highs/lows), SMT defaults to "NONE/False"
+            with reason "no BTC reference" — same fallback as 5M_SWEEP path.
+            Added 2026-05-28 to close ict-logic-validator finding F-1 (SMT
+            was permanently dormant in CRT — hardcoded stub).
+
+    Returns:
+        (result, plan, rej_reason) tuple. `result` and `plan` are non-None
+        on successful CRT setup; `rej_reason` is a string from the gate
+        that fired ("default_off", "blacklisted", "no_setup",
+        "outside_killzone", "bias_gate_blocked", "economics_*"). Caller
+        treats result=None as "skip this scan cycle for CRT."
+    """
+    if not ENABLE_H4_CRT:
+        return None, None, "default_off"
+    if token.upper() in H4_CRT_DISABLED_TOKENS:
+        return None, None, "blacklisted"
+
+    # Mitigation TTL — re-eligible zones whose C1 is older than the configured
+    # TTL. Default 0 = no-op (Run-1749 baseline preserved). Live uses wall-
+    # clock time; backtest path passes its current-bar time for parity.
+    if H4_CRT_MITIGATION_TTL_H > 0 and consumed:
+        try:
+            _now_ms_live = time.time() * 1000.0
+            _pruned = prune_consumed_zones(consumed, _now_ms_live,
+                                            H4_CRT_MITIGATION_TTL_H)
+            if _pruned:
+                print(f"[CRT-TTL] {token}: pruned {_pruned} consumed zones "
+                      f"older than {H4_CRT_MITIGATION_TTL_H}h")
+        except Exception:
+            pass
+
+    # Detection — uses shared module, identical to backtest path
+    setup = detect_h4_crt(c4h, c5m, token=token, consumed=consumed)
+    if setup is None:
+        return None, None, "no_setup"
+
+    # ── Entry timing ──────────────────────────────────────────────────────
+    # Entry = next 5M bar's open after MSS. In LIVE, that bar may not have
+    # closed yet — use the LATEST close as the entry price (the operator
+    # places the trade at the price the alert is sent at).
+    mss_bar_5m = setup["mss_bar_5m"]
+    n5 = len(c5m["closes"])
+    if mss_bar_5m + 1 >= n5:
+        return None, None, "no_post_mss_bar"  # MSS at very last bar — wait next cycle
+    entry_bar = mss_bar_5m + 1
+    entry_price = c5m["opens"][entry_bar]
+    direction = setup["direction"]
+    ts = datetime.utcfromtimestamp(c5m["times"][entry_bar] / 1000)
+
+    # ── Killzone filter (parity with backtest H-CRT2-3) ───────────────────
+    # LIVE_CONFIG.liquid_hours is the shared set — both live (here) and
+    # backtest path apply the same filter at the same place in the pipeline.
+    # CRITICAL-1 fix (config audit 2026-05-27): the previous import
+    # `from config import LIVE_LIQUID_HOURS` referenced a symbol that
+    # does NOT exist in config.py — would have ImportError'd the first
+    # time a CRT setup was detected, then crash-looped the bot. Replaced
+    # with the canonical pattern used elsewhere in crypto_alert.py:2069.
+    _liquid_hours = LIVE_CONFIG.liquid_hours
+    if _liquid_hours and ts.hour not in _liquid_hours:
+        return None, None, "outside_killzone"
+
+    # ── 4H bias gate (parity with backtest H-CRT2-4) ──────────────────────
+    # MEDIUM-1 fix (config audit 2026-05-27): slice to the last 210 bars
+    # before calling get_ict_4h_bias, matching backtest._lookup_4h_bias
+    # exactly. Previously the live path passed the full c4h cache (which
+    # can grow beyond 210 bars under the live fetcher's rolling window),
+    # producing a slightly different EMA50/200 result than the backtest's
+    # 210-bar slice — a silent live↔BT divergence on CRT setups.
+    _closes_full = c4h.get("closes", [])
+    if len(_closes_full) >= 200:
+        _N = min(len(_closes_full), 210)  # mirror _lookup_4h_bias slice size
+        bias_4h = get_ict_4h_bias(
+            _closes_full[-_N:],
+            c4h["highs"][-_N:],
+            c4h["lows"][-_N:],
+        )
+    else:
+        bias_4h = "NEUTRAL"
+    # MEDIUM-3 fix (config audit 2026-05-27): the stale comment claimed
+    # the backtest default for bias_4h_gate was 'loose' — actual default
+    # is 'none' (config.py:317). Comment removed to avoid future confusion.
+    from config import LIVE_BIAS_4H_GATE as _bias_gate
+    _want = "BULLISH" if direction == "BUY" else "BEARISH"
+    if _bias_gate == "strict" and bias_4h != _want:
+        consumed.add(setup["key"])  # mark zone consumed — bias gate is structural
+        return None, None, "bias_gate_blocked"
+    if _bias_gate == "loose" and bias_4h not in ("NEUTRAL", _want):
+        consumed.add(setup["key"])
+        return None, None, "bias_gate_blocked"
+
+    # ── CRT Pro v1.1 — optional 1H trend gate (2026-05-27) ────────────────
+    # When CRT_REQUIRE_1H_TREND=1, mirror 5M_SWEEP's trend_1h_gate logic.
+    # Default NEUTRAL when caller omits trend → gate is a no-op (NEUTRAL
+    # passes both directions). Mirrors backtest behavior at backtest.py
+    # for parity.
+    if CRT_REQUIRE_1H_TREND:
+        _bull_ok = trend_1h in ("BULL", "STRONG_BULL", "NEUTRAL")
+        _bear_ok = trend_1h in ("BEAR", "STRONG_BEAR", "NEUTRAL")
+        if (direction == "BUY" and not _bull_ok) or (direction == "SELL" and not _bear_ok):
+            consumed.add(setup["key"])
+            return None, None, "1h_trend_blocked"
+
+    # ── v2 Wyckoff phase filter (Option KK, audit cycle-7 2026-05-27) ─────
+    # Same logic as backtest path — phase context computed unconditionally
+    # (for entry_type tagging), phase-aligned check enforced only when the
+    # WYCKOFF_PHASE_FILTER env knob is "loose" or "strict".
+    wyckoff_context = detect_wyckoff_context(c4h)
+    if WYCKOFF_PHASE_FILTER != "off":
+        if not is_crt_phase_aligned(wyckoff_context, direction):
+            consumed.add(setup["key"])  # mark zone consumed — phase gate is structural
+            return None, None, f"wyckoff_{wyckoff_context.lower()}"
+
+    # ── Trade plan: SL = sweep wick ± buffer, TP1 = (per CRT_TP1_MODE), TP2/3 = RR cascade ──
+    # Parity with backtest H-CRT2-1 (SL buffer) and CRT_TP2_RR/CRT_TP3_RR ladder.
+    raw_wick = setup["sl"]
+    if direction == "BUY":
+        sl_price = raw_wick * (1.0 - ICT_SL_BUFFER_PCT)
+        # F-4 fix (ict-logic-validator audit 2026-05-28): WIDEN too-tight SL
+        # to MIN_SL_PCT floor — mirrors compute_ict_trade_plan at
+        # ict_engine.py:768. Pre-F-4 the economics gate REJECTED setups
+        # with sub-floor SL while the 5M_SWEEP path admitted the same setup
+        # with a widened SL. H-NEW-3 commit comment claimed "Mirrors
+        # 5M_SWEEP" — that's now actually true.
+        sl_price = min(sl_price, entry_price * (1.0 - MIN_SL_PCT))
+    else:
+        sl_price = raw_wick * (1.0 + ICT_SL_BUFFER_PCT)
+        sl_price = max(sl_price, entry_price * (1.0 + MIN_SL_PCT))
+    # CRT Pro TP1 override (2026-05-27): apply CRT_TP1_MODE policy.
+    # mode=dynamic (default) preserves the original C1 opposite logic; this
+    # call is a no-op then. fixed_1r and min_1r let us empirically test
+    # whether uncapping TP1 above the C1 opposite improves avg_R.
+    tp1_price = adjust_crt_tp1(
+        direction=direction,
+        entry_price=entry_price,
+        sl_price=sl_price,
+        c1_high=setup["c1_high"],
+        c1_low=setup["c1_low"],
+    )
+    risk_dist = abs(entry_price - sl_price)
+    if risk_dist <= 0:
+        return None, None, "zero_risk_dist"
+    if direction == "BUY":
+        tp2_price = entry_price + CRT_TP2_RR * risk_dist
+        tp3_price = entry_price + CRT_TP3_RR * risk_dist
+    else:
+        tp2_price = entry_price - CRT_TP2_RR * risk_dist
+        tp3_price = entry_price - CRT_TP3_RR * risk_dist
+
+    # ── Economics (shared helper from crt_engine) ─────────────────────────
+    rt_cost = TOKEN_RT_COST.get(token, ROUND_TRIP_COST_PCT) * 100
+    econ = compute_crt_trade_economics(
+        direction, entry_price, sl_price, tp1_price, tp2_price, tp3_price,
+        outcome=None,  # outcome unknown live — realized_r stays None
+        rt_cost_pct=rt_cost,
+    )
+    if econ is None:
+        _reason = crt_trade_rejection_reason(
+            direction, entry_price, sl_price, tp1_price, rt_cost,
+        )
+        consumed.add(setup["key"])  # mark zone consumed — gate is structural
+        return None, None, f"economics_{_reason}"
+
+    # ── Build the live result dict (save_signal contract) ─────────────────
+    # CRT-specific fields use sensible defaults; the 5M-sweep-specific
+    # fields default to NEUTRAL/0/NONE so downstream queries don't break.
+    _mss_q = setup.get("mss_quality", "NONE")
+    _fvg_q = (setup["confluence"]["details"].get("quality", "NONE")
+              if setup["confluence"]["type"] == "FVG" else "NONE")
+    confidence = crt_quality_to_confidence(_mss_q, _fvg_q)
+
+    # CRT OGD feature scoring (2026-05-27 — closes the adaptive-learning gap).
+    # Without these scores, _trigger_weight_update() bails out at "no
+    # feature_scores_json stored" and the per-token OGD weights freeze when
+    # ENABLE_5M_SWEEP=0. With them, every CRT trade close feeds the same
+    # 6-feature gradient pipeline the 5M_SWEEP path uses. Imported lazily
+    # from crt_engine to avoid a top-of-file circular import.
+    from crt_engine import compute_crt_feature_scores
+    from adaptive_engine import _utc_to_session
+    _crt_session = _utc_to_session(ts.hour)
+
+    # ── OTE overlay (2026-05-28) — Optimal Trade Entry tag ───────────────
+    # Impulse leg: C2 wick (sweep extreme) → MSS-bar extreme on 5M.
+    # For BUY  (SSL_CRT): wick=C2 low, MSS extreme = highest 5M high in
+    #          [sweep_5m_idx, mss_bar_5m] inclusive.
+    # For SELL (BSL_CRT): wick=C2 high, MSS extreme = lowest 5M low in
+    #          same window. Tagging only, no gate effect.
+    try:
+        _sweep_5m_idx = setup["sweep_5m_idx"]
+        _mss_bar_5m   = setup["mss_bar_5m"]
+        if direction == "BUY":
+            _mss_extreme = max(c5m["highs"][_sweep_5m_idx:_mss_bar_5m + 1])
+        else:
+            _mss_extreme = min(c5m["lows"][_sweep_5m_idx:_mss_bar_5m + 1])
+        _ote = compute_ote_overlay(
+            direction=direction,
+            sweep_wick=setup["sweep_wick"],
+            mss_extreme=_mss_extreme,
+            entry_price=entry_price,
+        )
+    except Exception:
+        _ote = {"ote_zone": "OTE_UNDEFINED", "ote_fib_pct": None}
+
+    # ── T1.2 Funding rate overlay (2026-05-29) ──────────────────────────
+    # Tag every CRT signal with the live 8h-funding rate + classification.
+    # Per ENHANCEMENT_ROADMAP.md T1.2: metadata + optional confidence bonus,
+    # NOT a direct OGD feature (preserves existing trained weights).
+    # Fetch is cached 5 min so this is cheap per scan cycle.
+    try:
+        _funding_rate = get_funding_rate(token)
+        # Pass the fetch_failed flag so classify can return FETCH_FAILED instead
+        # of NEUTRAL when the underlying API errored (LOW finding from T1.2 review).
+        _funding_failed = is_funding_fetch_failed(token)
+        _funding_cls  = classify_funding_extreme(
+            _funding_rate, direction, fetch_failed=_funding_failed,
+        )
+        _funding_bonus = funding_confidence_bonus(_funding_rate, direction)
+    except Exception as _fund_e:
+        _funding_rate = 0.0
+        _funding_cls  = "FETCH_FAILED"
+        _funding_bonus = 0.0
+        print(f"[FUNDING] {token} fetch error (continuing without overlay): {_fund_e}")
+
+    # ── T1.3 BTC correlation overlay (2026-05-29) ───────────────────────
+    # Compute rolling Pearson r between BTC and token 5M log-returns over
+    # the last BTC_CORR_WINDOW_MIN bars. Identical computation in live +
+    # backtest = perfect parity (no historical-data lookup divergence).
+    # Skipped when token == BTC (self-correlation is meaningless).
+    _btc_corr = None
+    _btc_corr_cls = "UNKNOWN"
+    _btc_corr_bonus = 0.0
+    try:
+        if (token.upper() != "BTC" and btc_c5m
+                and btc_c5m.get("closes") and btc_c5m.get("times")):
+            _tok_closes = c5m.get("closes", [])
+            _tok_times  = c5m.get("times", [])
+            _btc_closes = btc_c5m.get("closes", [])
+            _btc_times  = btc_c5m.get("times", [])
+            # HIGH-CY13-1 fix (audit cycle-13 2026-05-29): pre-fix this
+            # function applied `[:-1]` to BOTH sides — but the caller at
+            # crypto_alert.py:4595 passes `_c5m_closed` (the output of
+            # `_crt_closed_only`) which has ALREADY had the forming bar
+            # stripped. Double-slicing the token series therefore lost the
+            # latest CLOSED bar, leaving the token series exactly 1 bar
+            # shorter than the BTC series. With `BTC_CORR_BONUS_PCT=0.0`
+            # default this produced no signal corruption, but the
+            # ALIGNED_HIGH / DIVERGENT classification used a misaligned
+            # window — explorer Pareto promotions involving non-zero
+            # bonus values would have been INVALID. Now the token side
+            # is left untouched (c5m is already closed-only) while BTC
+            # side keeps its single strip (btc_c5m is raw / forming-bar-
+            # included; see CY12-BTC-CORR-KEY at crypto_alert.py:4740).
+            _tok_closed = _tok_closes
+            _btc_closed = _btc_closes[:-1] if len(_btc_closes) > 1 else _btc_closes
+            # Defensive timestamp alignment (LOW review item, 2026-05-29).
+            # Live's normal case has both series ending at the same wall-clock
+            # tick — trailing-window in compute_btc_correlation handles
+            # length differences correctly because both arrays end at "now."
+            # But if BTC's last 5M close ts != token's last 5M close ts
+            # (e.g., one series got a stale-fetch fallback), the trailing
+            # window would correlate misaligned timestamps. Truncate both
+            # series at the MIN of their last-closed-bar timestamps.
+            if _tok_times and _btc_times and len(_tok_closed) > 1 and len(_btc_closed) > 1:
+                _tok_end_ts = _tok_times[len(_tok_closed) - 1]
+                _btc_end_ts = _btc_times[len(_btc_closed) - 1]
+                if _tok_end_ts != _btc_end_ts:
+                    import bisect as _bisect
+                    _common_end_ts = min(_tok_end_ts, _btc_end_ts)
+                    # Truncate each series to last index whose ts <= common end
+                    _tok_idx = _bisect.bisect_right(_tok_times[:len(_tok_closed)], _common_end_ts) - 1
+                    _btc_idx = _bisect.bisect_right(_btc_times[:len(_btc_closed)], _common_end_ts) - 1
+                    if _tok_idx >= 0 and _btc_idx >= 0:
+                        _tok_closed = _tok_closed[:_tok_idx + 1]
+                        _btc_closed = _btc_closed[:_btc_idx + 1]
+            _btc_corr = compute_btc_correlation(
+                _btc_closed, _tok_closed, window=_BTC_CORR_WIN,
+            )
+            _btc_corr_cls = classify_btc_corr(_btc_corr, direction, bias_4h)
+            _btc_corr_bonus = btc_corr_confidence_bonus(
+                _btc_corr, direction, bias_4h,
+            )
+    except Exception as _bc_e:
+        _btc_corr = None
+        _btc_corr_cls = "UNKNOWN"
+        _btc_corr_bonus = 0.0
+        print(f"[BTC-CORR] {token} compute error (continuing without overlay): {_bc_e}")
+
+    # ── F-1 fix (ict-logic-validator audit 2026-05-28): SMT divergence ──
+    # Pre-fix the CRT path hardcoded smt_result = {NONE, False} → the
+    # +0.10 SMT bonus in tier scoring was permanently dead code (95/95
+    # signals in Run #146 had smt_confirmed=0). Now compute real SMT
+    # from BTC 5M reference. setup["type"] is "SSL_CRT" or "BSL_CRT" —
+    # strip the suffix for detect_smt_divergence's "SSL"/"BSL" contract.
+    _sweep_for_smt = setup["type"].replace("_CRT", "")
+    _smt_result = {"smt_confirmed": False, "smt_type": "NONE",
+                   "reason": "no BTC reference"}
+    if btc_c5m and btc_c5m.get("highs") and btc_c5m.get("lows"):
+        _btc_h5 = btc_c5m["highs"][:-1]  # exclude forming bar
+        _btc_l5 = btc_c5m["lows"][:-1]
+        _Nbtc = min(len(_btc_h5), ICT_SMT_LOOKBACK + ICT_SMT_REF_HORIZON)
+        if _Nbtc >= ICT_SMT_LOOKBACK + 2:
+            _smt_result = detect_smt_divergence(
+                _sweep_for_smt,
+                ref_h=_btc_h5[-_Nbtc:], ref_l=_btc_l5[-_Nbtc:],
+                lookback=ICT_SMT_LOOKBACK, reference_horizon=ICT_SMT_REF_HORIZON,
+            )
+        else:
+            _smt_result = {"smt_confirmed": False, "smt_type": "NONE",
+                           "reason": "insufficient BTC data"}
+
+    # ── ict-logic-validator F-2 / dr_location wiring (2026-05-28) ──
+    # Pre-fix dr_4h was hardcoded {location: UNKNOWN}. CRT path already
+    # has full c4h cache; computing DR location is informational (no
+    # gate) and gives the OGD adaptive engine a 6th real feature back
+    # (was dead in CRT-only mode).
+    _dr_4h_full = {"location": "UNKNOWN", "midpoint": 0.0}
+    try:
+        _c4h_highs = c4h.get("highs", [])
+        _c4h_lows  = c4h.get("lows",  [])
+        if _c4h_highs and _c4h_lows and entry_price > 0:
+            _dr_4h_full = compute_dealing_range(_c4h_highs, _c4h_lows, entry_price)
+    except Exception as _dr_exc:
+        print(f"[CRT-DR] {token}: compute_dealing_range failed — {_dr_exc}")
+
+    _crt_ogd_scores = compute_crt_feature_scores(
+        direction=direction,
+        mss_quality=_mss_q,
+        fvg_quality=_fvg_q,
+        confidence=confidence,
+        session=_crt_session,
+        trend_1h=trend_1h,
+        dr_location=_dr_4h_full.get("location", "UNKNOWN"),
+    )
+
+    plan = {
+        "sl":          round(sl_price, 8),
+        "tp1":         round(tp1_price, 8),
+        "tp2":         round(tp2_price, 8),
+        "tp3":         round(tp3_price, 8),
+        "sl_pct":      round(econ["gross_sl"], 2),
+        "tp1_pct":     round(econ["gross_tp1"], 2),
+        "tp2_pct":     round(econ["gross_tp2"], 2),
+        "tp3_pct":     round(econ["gross_tp3"], 2),
+        "rr1":         econ["rr1"],
+        "rr2":         round(CRT_TP2_RR, 1),
+        "rr3":         round(CRT_TP3_RR, 1),
+        # CRITICAL B-0 fix (telegram audit 2026-05-27): the Telegram renderer
+        # at crypto_alert.py:3192-3194 reads plan['net_tp1_pct'],
+        # plan['breakeven_wr'], plan['net_rr1'] directly (NOT via .get) — would
+        # KeyError on every CRT signal, falling into the outer cycle handler
+        # which sends "Bot ERROR" to operator instead of the signal alert.
+        # After 15 such errors, bot self-stops. Propagating econ -> plan now.
+        "net_tp1_pct": round(econ["net_tp1"], 2),
+        "net_rr1":     econ["net_rr1"],
+        "breakeven_wr": econ["breakeven_wr"],
+    }
+    result = {
+        "signal":           direction,
+        # Live integration needs the entry price separately from the plan
+        # for save_signal's `price` positional arg + Telegram alert formatting
+        "entry_price":      round(entry_price, 8),
+        # T1.2 + T1.3 confidence overlays applied to base. Clamped to [0, 10].
+        # Bonus magnitudes controlled by FUNDING_BONUS_PCT (default 0.05 → 0.5
+        # point swing) and BTC_CORR_BONUS_PCT (default 0.0 → disabled, explorer
+        # tunes via tier feedback). Both stored separately for attribution.
+        "confidence":       max(0, min(10, int(round(
+                                confidence + 10 * (_funding_bonus + _btc_corr_bonus))))),
+        "confidence_base":  confidence,  # pre-bonus, for attribution
+        "confidence_funding_bonus":  round(10 * _funding_bonus, 2),
+        "confidence_btc_corr_bonus": round(10 * _btc_corr_bonus, 2),
+        "mtf_bias":         bias_4h,
+        "mtf_conf":         0,
+        "rsi":              50.0,
+        "trend_4h":         bias_4h,
+        "trend_1h":         trend_1h,   # use real 1H trend passed by caller (was stub NEUTRAL)
+        "trend_5m":         "NEUTRAL",
+        # HIGH B-1 fix (telegram audit 2026-05-27): the renderer at
+        # crypto_alert.py:3102-3103 reads `ict_trend_1h` / `ict_bias_4h`
+        # (5M_SWEEP-era key names). Without these, CRT alerts always
+        # showed "4H NEUTRAL / 1H NEUTRAL" even when the bias gate
+        # explicitly required BULLISH/BEARISH alignment — confusing the
+        # operator. Mirror the canonical key shape.
+        "ict_trend_1h":     trend_1h,
+        "ict_bias_4h":      bias_4h,
+        "confirms":         0,
+        "atr":              0.0,
+        "roc":              0.0,
+        "vol_ratio":        1.0,
+        "reasons":          [f"H4_CRT_{setup['confluence']['type']}",
+                             f"MSS={_mss_q}", f"FVG={_fvg_q}",
+                             f"bias_4h={bias_4h}",
+                             f"wyckoff={wyckoff_context}"],
+        "plan":             plan,
+        # CRT OGD feature score vector — populated 2026-05-27 to enable
+        # adaptive learning on CRT signal closes. _trigger_weight_update()
+        # reads this JSON and passes it to weight_engine.update().
+        "feature_scores_json": json.dumps(_crt_ogd_scores),
+        # CRT-specific fields surfaced via existing schema.
+        # 2026-05-28: append EQH/EQL cluster tag when C1's swept extreme was
+        # part of a >=2-swing cluster (canonical ICT strong liquidity pool).
+        # Tagging only — no gate effect. Schema query path
+        # `sweep_type LIKE '%EQ%'` now lights up for clustered CRT setups.
+        "sr_type":          setup["type"] + (
+            f"_{setup.get('c1_cluster_type')}"
+            if (setup.get("c1_cluster_size") or 1) >= 2 else ""
+        ),
+        "c1_cluster_size":  setup.get("c1_cluster_size", 1),
+        # OTE overlay (2026-05-28) — tag only, no gate.
+        "ote_zone":         _ote.get("ote_zone", "OTE_UNDEFINED"),
+        "ote_fib_pct":      _ote.get("ote_fib_pct"),
+        # T1.2 — Funding rate overlay (2026-05-29). funding_rate_pct stored
+        # as float fraction × 100 for human readability (0.01 = 0.01%/8h).
+        "funding_rate_pct":  round(_funding_rate * 100, 4),
+        "funding_classification": _funding_cls,
+        "_funding_bonus":   _funding_bonus,  # consumed below if confidence is set
+        # T1.3 — BTC correlation overlay (2026-05-29).
+        # btc_corr_strength stored as Pearson r ∈ [-1, +1], or None when
+        # token is BTC itself or insufficient data (<window+1 bars).
+        "btc_corr_strength":      (round(_btc_corr, 4) if _btc_corr is not None else None),
+        "btc_corr_classification": _btc_corr_cls,
+        "_btc_corr_bonus":        _btc_corr_bonus,
+        "session":          _crt_session,      # was UNKNOWN — now proper KZ label
+        # F-2 / DR wiring (2026-05-28): real 4H DR location replaces
+        # the hardcoded UNKNOWN stub. Informational, no gate.
+        "dr_4h":            _dr_4h_full,
+        "mss_result":       {"quality": _mss_q},
+        "ict_fvg":          {"quality": _fvg_q},
+        # F-1 fix (2026-05-28): real SMT divergence replaces the dead stub.
+        # Enables the +0.10 SMT bonus in tier scoring + dashboard SMT column.
+        "smt_result":       _smt_result,
+        # Encode Wyckoff context into entry_type — parity with backtest path
+        "entry_type":       f"H4_CRT_{setup['confluence']['type']}_{wyckoff_context}",
+        "ev_score":         None,
+        "ev_sample_n":      None,
+        "ev_status":        "OBSERVE",
+        # Template tagging — Phase B (2026-05-28) replaces the pre-existing
+        # "always NONE" stub with real CRT tier classification. Live behavior
+        # is still gated by EXECUTION_MODE — flipping to LIVE will Telegram
+        # only Tier A / Tier B CRT signals; Tier C is paper-only.
+        # Set below from evaluate_crt_templates() result.
+        # KEY tag for per-source attribution (LBC-H-1 parity)
+        "source":           "H4_CRT",
+    }
+
+    # ── Phase B (2026-05-28): classify CRT signal into Tier A/B/C ─────────
+    _crt_tmpl_features = {
+        "direction":       direction,
+        "confluence_type": setup['confluence']['type'],   # "FVG" | "OB"
+        "mss_quality":     _mss_q,
+        "wyckoff_phase":   wyckoff_context,
+        "bias_4h":         bias_4h,
+        "session":         _crt_session,
+    }
+    _crt_matches = evaluate_crt_templates(_crt_tmpl_features)
+    _crt_best    = next((m for m in _crt_matches if m.is_match), None)
+    if _crt_best:
+        result["matched_template_id"]  = _crt_best.template_id
+        result["template_status"]      = "PROVISIONAL"  # Phase B = no historical WR yet
+        result["template_live_allowed"] = 1 if _crt_best.live_allowed else 0
+        result["template_block_reason"] = "" if _crt_best.live_allowed else "crt_tier_c_paper_only"
+        result["template_matches"]     = [
+            {"id": m.template_id, "score": m.score, "matched": m.is_match}
+            for m in _crt_matches
+        ]
+        result["template_scores_json"] = json.dumps(
+            {m.template_id: round(m.score, 4) for m in _crt_matches}
+        )
+    else:
+        # No tier matched — keep legacy "NONE" defaults so the renderer
+        # behaves identically to pre-Phase-B for unclassifiable setups.
+        result["matched_template_id"]  = "NONE"
+        result["template_status"]      = "UNKNOWN_TEMPLATE"
+        result["template_live_allowed"] = 0
+        result["template_block_reason"] = "crt_no_tier_match"
+        result["template_matches"]     = []
+    # RISK-GAP-NEW-2 fix (cycle-10 audit 2026-05-28): attach position-sizing
+    # recommendation to the CRT result dict — was empty pre-fix, causing
+    # the dashboard to show $0 notional for CRT signals and leaving the
+    # operator without a system-recommended size at LIVE flip time. Mirrors
+    # the 5M_SWEEP call at line 3013 exactly.
+    try:
+        _sl_pct_abs_crt = abs(entry_price - sl_price) / entry_price
+        result["sizing"] = compute_position_size(
+            YOUR_CAPITAL, RISK_PER_TRADE_PCT, _sl_pct_abs_crt, token=token,
+        )
+    except Exception as _sz_exc:
+        print(f"[CRT-SIZING] {token}: compute_position_size failed — {_sz_exc}")
+        result["sizing"] = {}
+    # Mark mitigated AFTER constructing result so a downstream failure
+    # doesn't leave a half-consumed zone. Caller commits via consumed.add().
+    consumed.add(setup["key"])
+    return result, plan, "ok"
+
+
+# ══════════════════════════════════════════════════════════
 # PHASE 5A — TEMPLATE SAFETY CONTROLS
 # ══════════════════════════════════════════════════════════
 
-_KNOWN_TEMPLATES = {"TIER_A", "TIER_B", "TIER_C", "NONE"}
+# Phase B (2026-05-28): widened to include CRT-specific tier IDs from
+# strategy_templates.CRT_TEMPLATE_IDS so Phase 5A validation accepts them.
+_KNOWN_TEMPLATES = {"TIER_A", "TIER_B", "TIER_C", "NONE"} | CRT_TEMPLATE_IDS
 
 def _tmpl_closed_count(conn, template_id: str) -> int:
     """Count all closed results for signals matched to this template."""
@@ -740,11 +1502,26 @@ def _tmpl_rolling_wr(conn, template_id: str, lookback: int) -> float:
 
 
 def _tmpl_daily_live_count(conn, template_id: str) -> int:
-    """Count today's ACTIVE live signals for this template (UTC calendar day)."""
+    """Count today's LIVE-eligible signals for this template (UTC calendar day).
+
+    H-CY11-3 fix (audit 2026-05-28 cycle-11): include PROVISIONAL+live_allowed=1
+    signals alongside ACTIVE. The CRT path saves with template_status='PROVISIONAL'
+    because Phase 5A evaluation runs AFTER save_signal() in the CRT LIVE block
+    (crypto_alert.py:~4509) and never writes the status back. Pre-fix, the
+    daily cap query strictly matched 'ACTIVE' and was therefore DEAD for every
+    CRT signal — a Tier A CRT signal could fire 6-10× per UTC day in LIVE
+    instead of the configured cap of 3. The (status='PROVISIONAL' AND
+    template_live_allowed=1) branch captures CRT signals where Phase 5A passed
+    but template_status stayed PROVISIONAL; 5M_SWEEP signals continue to be
+    counted via the ACTIVE branch unchanged.
+    """
     row = conn.execute("""
         SELECT COUNT(*) FROM signals
         WHERE matched_template_id = ?
-          AND template_status = 'ACTIVE'
+          AND (
+            template_status = 'ACTIVE'
+            OR (template_status = 'PROVISIONAL' AND template_live_allowed = 1)
+          )
           AND date(timestamp) = date('now', 'utc')
     """, (template_id,)).fetchone()
     return row[0] if row else 0
@@ -1035,6 +1812,101 @@ def update_signal_result(sig_id, price, tp1, tp2, tp3, sl, signal,
             _trigger_weight_update(sig_id, res)
     except Exception as e: print(f"[DB ERROR] update: {e}")
 
+
+def _check_limit_fill(sig: dict, live_price: float,
+                       candle_high=None, candle_low=None) -> None:
+    """Phase A (2026-05-28) — Check whether a limit order at the bot's
+    entry_price would have filled within CRT_LIMIT_FILL_WINDOW_MIN.
+
+    Called once per scan cycle for each open signal. Logic:
+      1. Skip if limit_fillable IS NOT NULL (already evaluated).
+      2. Compute signal age in minutes.
+      3. Detect retouch — check live_price + this cycle's 15M candle extremes:
+           SELL signal: any high  >= entry_price → filled
+           BUY signal:  any low   <= entry_price → filled
+         (Cached 15M extremes mirror the same logic update_signal_result uses
+          for TP/SL detection — same source of truth.)
+      4. State transition:
+           retouched=True               → limit_fillable=1, set fillable_check_at
+           retouched=False, age<window  → leave NULL (still ⏳ WAITING)
+           retouched=False, age>=window → limit_fillable=0, set fillable_check_at
+    """
+    # M10-12 fix (cycle-10 audit 2026-05-28): wrap all SQLite work in
+    # try/finally so an exception between _connect() and conn.close()
+    # cannot leak a file descriptor. Pre-fix each early-return path
+    # called conn.close() manually but raised exceptions on the UPDATE
+    # path or anywhere mid-function would leak. Single guard, deterministic.
+    sig_id     = sig.get("id")
+    entry      = sig.get("entry_price")
+    signal_dir = sig.get("signal", "")
+    ts_str     = sig.get("timestamp")
+    if entry is None or not ts_str or not signal_dir:
+        return
+    conn = None
+    try:
+        conn = _connect()
+        row = conn.execute(
+            "SELECT limit_fillable FROM signals WHERE id=?", (sig_id,)
+        ).fetchone()
+        if not row:
+            return
+        if row[0] is not None:
+            return  # already FILLED (1) or MISSED (0) — done
+
+        # Signal age in minutes
+        now = datetime.now(timezone.utc)
+        try:
+            ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        except Exception:
+            return
+        age_min = (now - ts).total_seconds() / 60.0
+
+        # The live monitor only inspects this cycle's candle extremes, so it
+        # can only honestly judge retouch while the signal's fill window is
+        # still recent. Beyond `window + grace`, the actual fill window has
+        # long since rolled past — checking current high/low at that point
+        # would produce a garbage verdict (we'd be measuring "did price
+        # retouch entry hours later," not "in the 30 min after the signal").
+        # Leave such rows NULL and let scripts/backfill_phase_a.py handle them
+        # using historical klines that cover the real window.
+        _grace = 15  # one extra 15M bar of slack for cycle timing / cold-starts
+        if age_min > (CRT_LIMIT_FILL_WINDOW_MIN + _grace):
+            return
+
+        # Detect retouch
+        hi = candle_high if (candle_high and candle_high > 0) else live_price
+        lo = candle_low  if (candle_low  and candle_low  > 0) else live_price
+        if signal_dir == "SELL":
+            retouched = hi >= entry  # price came back UP to entry → limit SELL fills
+        else:  # BUY
+            retouched = lo <= entry  # price came back DOWN to entry → limit BUY fills
+
+        # State transition
+        if retouched:
+            conn.execute(
+                "UPDATE signals SET limit_fillable=1, fillable_check_at=? WHERE id=?",
+                (now.strftime("%Y-%m-%d %H:%M:%S"), sig_id)
+            )
+            conn.commit()
+            print(f"[FILL] #{sig_id} {sig.get('token','?')} {signal_dir} "
+                  f"@ ${entry:.4f} → LIMIT FILLED (age {age_min:.1f} min)")
+        elif age_min >= CRT_LIMIT_FILL_WINDOW_MIN:
+            conn.execute(
+                "UPDATE signals SET limit_fillable=0, fillable_check_at=? WHERE id=?",
+                (now.strftime("%Y-%m-%d %H:%M:%S"), sig_id)
+            )
+            conn.commit()
+            print(f"[FILL] #{sig_id} {sig.get('token','?')} {signal_dir} "
+                  f"@ ${entry:.4f} → MISSED ({age_min:.1f}min elapsed, never retraced)")
+        # else: still WAITING — leave NULL, will re-check next cycle
+    except Exception as e:
+        print(f"[FILL] _check_limit_fill #{sig_id or '?'}: {e}")
+    finally:
+        if conn is not None:
+            try: conn.close()
+            except Exception: pass
+
+
 def mark_expired(sig_id, token):
     """Close an open signal that has passed its expiry time.
     OPEN result → EXPIRED. PARTIAL result → kept as PARTIAL (TP1 was real)."""
@@ -1137,8 +2009,16 @@ def _trigger_weight_update(sig_id: int, outcome: str):
         # regime is observation-only — NOT used to condition learning — and
         # is persisted to weight_history via update(snapshot=True) for future
         # regime-aware analysis.
+        #
+        # M-NEW-1 fix (cycle-9 audit 2026-05-28): also fetch limit_fillable to
+        # gate OGD learning on real-money fillability. Pre-fix, a signal that
+        # never retraced to entry within the LIMIT window (limit_fillable=0)
+        # would still feed its outcome into OGD — but the outcome belongs to a
+        # phantom trade that no operator could have actually entered. Trains
+        # the weights on a fictional signal stream and biases learning.
         row  = conn.execute(
-            "SELECT s.token, s.feature_scores_json, r.profit_pct, s.market_regime "
+            "SELECT s.token, s.feature_scores_json, r.profit_pct, "
+            "s.market_regime, s.limit_fillable "
             "FROM signals s LEFT JOIN results r ON r.signal_id = s.id "
             "WHERE s.id=?",
             (sig_id,)
@@ -1146,7 +2026,17 @@ def _trigger_weight_update(sig_id: int, outcome: str):
         conn.close()
         if not row:
             return
-        token, fs_json, profit_pct, regime = row
+        token, fs_json, profit_pct, regime, limit_fillable = row
+
+        # M-NEW-1: skip OGD learning when the LIMIT order would have missed.
+        # NULL = pre-Phase-A signal OR still inside fill window — both OK to
+        # train on (legacy signals have no fillability data; in-window signals
+        # haven't been evaluated yet but didn't miss). Only an explicit 0
+        # ("missed") suppresses learning.
+        if limit_fillable == 0:
+            print(f"[ADAPTIVE] #{sig_id} {token} — LIMIT order missed "
+                  f"(limit_fillable=0); skipping OGD update (phantom-trade gate)")
+            return
 
         if not fs_json:
             print(f"[ADAPTIVE] #{sig_id} — no feature_scores_json stored; skipping OGD update")
@@ -1336,46 +2226,49 @@ def send_exit_suggestion(sig, assessment, price):
     dir_arrow = "UP" if direction == "BUY" else "DOWN"
     pnl_sign  = "+" if pnl >= 0 else ""
 
+    # 2026-05-28 redesign — match the clean signal-alert visual style.
+    # Drop Conf/Regime (on dashboard), drop <pre> tables, use emoji bullets.
     if verdict == "TAKE_PROFIT":
-        header = "TAKE PROFIT"
-        note   = (f"Price reached {coverage:.0f}% of TP1 target - strong exit zone. "
-                  f"Consider closing full position or majority here.")
+        header_emoji = "\U0001F4B0"  # 💰
+        header_text  = "TAKE PROFIT"
+        note   = (f"Price reached <b>{coverage:.0f}%</b> of TP1 — strong exit zone. "
+                  f"Consider closing the full position or majority here.")
     elif verdict == "CONSIDER_PARTIAL":
-        header = "PARTIAL CLOSE"
-        note   = (f"Take 30-50% off the table here. "
-                  f"Let remainder run toward TP1 (${tp1:.4f}).")
+        header_emoji = "✂️"  # ✂️
+        header_text  = "PARTIAL CLOSE"
+        note   = (f"Take <b>30-50%</b> off the table here. "
+                  f"Let the remainder run toward TP1 (${tp1:.4f}).")
     else:
-        header = "WATCH CLOSELY"
-        note   = "No action required yet - conditions shifting. Monitor next few candles."
+        header_emoji = "\U0001F440"  # 👀
+        header_text  = "WATCH CLOSELY"
+        note   = "No action required yet — conditions shifting. Monitor the next few candles."
 
-    _time_str = f"{time_rem}h left" if time_rem is not None else ""
     msg = (
-        f"<b>{_h(header)}  -  {_h(token)} {_h(direction)} #{_h(sig_id)}</b>\n"
-        "\n<pre>"
-        f"Entry      ${entry:>11.4f}\n"
-        f"Now        ${price:>11.4f}\n"
-        f"TP1 cov    {coverage:>4.0f}%\n"
-        f"Float PnL  {pnl_sign}{pnl:.2f}%\n"
-        f"Conf       {_h(conf)}/10\n"
-        f"Regime     {_h(regime)}"
-        + (f"\nExpires    {_h(_time_str)}" if _time_str else "")
-        + "</pre>\n"
+        f"{header_emoji} <b>{_h(header_text)} — {_h(token)} "
+        f"{_h(direction)} #{_h(sig_id)}</b>\n"
+        f"\n{_TG_HR}\n"
+        f"\n\U0001F3AF <b>Entry:</b> ${entry:.4f}"
+        f"\n\U0001F4CA <b>Now:</b> ${price:.4f}"
+        f"\n\U0001F4C8 <b>Floating P&amp;L:</b> {pnl_sign}{pnl:.2f}%"
+        f"\n\U0001F4CD <b>TP1 coverage:</b> {coverage:.0f}%"
     )
+    if time_rem is not None:
+        msg += f"\n⏰ <b>Expires in:</b> {_h(time_rem)}h"
 
     if signals:
-        msg += f"\n<b>Exit signals firing ({_h(len(signals))}):</b>\n"
+        msg += f"\n\n{_TG_HR}\n\n⚠️ <b>Exit signals firing ({_h(len(signals))}):</b>"
         for s in signals:
-            msg += f"  - {_h(s)}\n"
+            msg += f"\n• {_h(s)}"
     else:
-        msg += "\n<i>No reversal signals - purely coverage-based.</i>\n"
+        msg += f"\n\n{_TG_HR}\n\n<i>No reversal signals — purely coverage-based.</i>"
 
     msg += (
-        f"\n<b>Verdict</b>\n{_h(note)}\n"
-        "\n<pre>"
-        f"TP1   ${tp1:.4f}\n"
-        f"TP2   ${tp2:.4f}"
-        "</pre>\n"
-        "\n<i>Analysis only. Your call.</i>"
+        f"\n\n{_TG_HR}\n"
+        f"\n✅ <b>Verdict:</b>\n{note}"
+        f"\n\n{_TG_HR}\n"
+        f"\n\U0001F3AF <b>TP1:</b> ${tp1:.4f}"
+        f"\n\U0001F3AF <b>TP2:</b> ${tp2:.4f}"
+        "\n\n<i>Analysis only. Your call.</i>"
     )
 
     if len(msg) > 4000:
@@ -1401,8 +2294,48 @@ def fetch_binance_candles(symbol, interval, limit):
             r = requests.get(f"{BINANCE_BASE}/klines",
                 params={"symbol":symbol,"interval":interval,"limit":limit},
                 headers=HEADERS, timeout=10)
+            # M-CY13-1 Data fix (audit cycle-13 2026-05-29): proactive
+            # 418/429 detection BEFORE raise_for_status, mirroring the
+            # funding_rate_client.py pattern. Pre-fix the same handler
+            # caught both via the except path, but if `requests.HTTPError`
+            # was raised by a wrapping library (SSL interceptor, proxy)
+            # `e.response` could be None, hiding the 418 from the alert
+            # logic. Now status_code is the explicit precondition.
+            _sc = getattr(r, "status_code", 0)
+            if _sc == 418:
+                print(f"[BINANCE-418] {symbol} {interval}: IP BANNED — aborting fetch")
+                try:
+                    send_telegram(
+                        f"<b>[BINANCE 418 BAN]</b>\n"
+                        f"<code>{symbol} {interval}</code> rejected with IP-ban "
+                        f"(418). Bot stops fetching this token until ban lifts."
+                    )
+                except Exception:
+                    pass
+                return {}
+            if _sc == 429:
+                _wait = min(
+                    int(getattr(r, "headers", {}).get("Retry-After", 30) or 30), 60,
+                )
+                print(f"[BINANCE-429] {symbol} {interval}: rate-limited, "
+                      f"sleeping {_wait}s before retry")
+                time.sleep(_wait)
+                continue
             r.raise_for_status(); raw=r.json()
             if not raw: return {}
+            # M-NEW-6 fix (cycle-9 audit 2026-05-28): Binance can return HTTP
+            # 200 OK with a JSON error body (e.g. {"code": -1121, "msg":
+            # "Invalid symbol."}). raise_for_status() only catches 4xx/5xx
+            # so the error body slips past, the for-loop below silently
+            # skips every "candle" (each "c" is a dict key string), and we
+            # return {} with no diagnostic. Log the error code/message so
+            # the operator can see WHICH symbol/interval Binance rejected.
+            if isinstance(raw, dict):
+                _code = raw.get("code", "?")
+                _msg  = raw.get("msg", str(raw))[:200]
+                print(f"[BINANCE-ERR] {symbol} {interval}: HTTP 200 with error "
+                      f"body code={_code} msg={_msg!r} — treating as no-data")
+                return {}
             # OHLCV field validation — reject candles with zero or invalid prices
             validated = []
             for c in raw:
@@ -1519,8 +2452,10 @@ def update_token_state(token):
                 state["last_5m_fetched_at"] = time.time()
             elif tf=="1h":
                 state["data_gap_bars_1h"] = data.get("max_gap_bars", 0)
+                state["last_1h_fetched_at"] = time.time()  # M-NEW-5
             elif tf=="4h":
                 state["data_gap_bars_4h"] = data.get("max_gap_bars", 0)
+                state["last_4h_fetched_at"] = time.time()  # M-NEW-5
         time.sleep(0.3)
     if any_ok:
         state["last_fetched_at"] = time.time()
@@ -1544,17 +2479,81 @@ def fetch_btc_state():
         c1h  = STATE["BTC"]["candles"]["1h"]["closes"]
         c15m = STATE["BTC"]["candles"]["15m"].get("closes", [])
         BTC_STATE["candles"]["5m"] = STATE["BTC"]["candles"].get("5m", {})
+        # CY12-BTC-STALE-GATE-IFBRANCH fix (round-2 audit 2026-05-29: 2 agents
+        # convergent — resilience N-RES-1 + data-pipeline NEW-1). Pre-fix
+        # the round-1 patch ONLY set last_candle_fetch_ok in the else-branch
+        # (BTC not monitored), so the operator's production config (BTC IS
+        # monitored) left the timestamp at 0.0 forever → stale gate's
+        # `_last_ok > 0` precondition stayed False → the gate was inert in
+        # the path that actually runs. Now we derive freshness from the
+        # per-token fetcher's already-tracked `last_1h_fetched_at` scalar
+        # (set at line 2387 by the main scan loop). If that timestamp is
+        # within STALE_CANDLE_THRESHOLD, the BTC cache is genuinely fresh
+        # and we record it; otherwise we leave last_candle_fetch_ok at its
+        # previous value so the stale gate downstream can fire correctly.
+        _btc_1h_fresh_ts = STATE["BTC"].get("last_1h_fetched_at", 0.0)
+        if _btc_1h_fresh_ts > 0 and (now - _btc_1h_fresh_ts) <= STALE_CANDLE_THRESHOLD:
+            BTC_STATE["last_candle_fetch_ok"] = now
     else:
+        # CY12-BTC-STALE-GATE fix (full audit 2026-05-29 resilience M-RES-2):
+        # track whether AT LEAST ONE TF fetched fresh data. Pre-fix the
+        # BTC_STATE["candles"][tf] dict was only OVERWRITTEN on a truthy
+        # `data` (line 2382-2383), so a 418/429 response that returned {}
+        # from fetch_binance_candles silently kept the previous cached
+        # payload — c1h stayed non-empty, feed_ok stayed True, no alert
+        # fired, and alt signals continued using stale BTC trend FOR HOURS.
+        # The fix flips an _any_fetch_ok flag only when ≥1 TF succeeds.
+        _any_fetch_ok = False
         for tf, limit in [("1h", 200), ("15m", 100), ("5m", 100)]:
             data = fetch_binance_candles(BTC_SYMBOL, tf, limit)
             if data:
                 BTC_STATE["candles"][tf] = data
+                _any_fetch_ok = True
             time.sleep(0.3)
+        if _any_fetch_ok:
+            BTC_STATE["last_candle_fetch_ok"] = now
         c1h  = BTC_STATE["candles"]["1h"].get("closes", [])
         c15m = BTC_STATE["candles"]["15m"].get("closes", [])
     BTC_STATE["trend_1h"]  = get_trend(c1h)  if c1h  else "NEUTRAL"
     BTC_STATE["trend_15m"] = get_trend(c15m) if c15m else "NEUTRAL"
     BTC_STATE["last_candle_fetch"] = now
+    # CY12-BTC-STALE-GATE part 2: even if c1h is non-empty (cached), check
+    # whether the cache is stale (>10min since last successful fetch).
+    # When BTC is a monitored token the STATE["BTC"] branch above is taken
+    # and fetch_binance_candles is called from the per-token scan loop;
+    # the "stale BTC cache" risk is therefore primarily for the else-branch
+    # (BTC not in monitored set). Defensive check both paths anyway.
+    # M-CY13-2/3 fix (audit cycle-13 2026-05-29): now reads from config.py
+    # so a single env knob controls the BTC-stale-cache threshold across
+    # all data-pipeline gates. Pre-fix this was a hardcoded local 600s.
+    _STALE_BTC_CACHE_S = BTC_STALE_FEED_S
+    _last_ok = BTC_STATE.get("last_candle_fetch_ok", 0.0)
+    if c1h and _last_ok > 0 and (now - _last_ok) > _STALE_BTC_CACHE_S:
+        # Silent stale-cache window — flip feed_ok off so downstream
+        # consumers treat BTC trend as unreliable. Alert path below
+        # already handles the operator notification with 1-hour dedup.
+        was_ok = BTC_STATE.get("feed_ok", True)
+        BTC_STATE["feed_ok"] = False
+        if was_ok:
+            print(f"[BTC FEED STALE] BTC candles cache is {(now - _last_ok)/60:.1f}min old "
+                  f"(>{_STALE_BTC_CACHE_S/60:.0f}min threshold) — flipping feed_ok=False")
+            _now_ts = now
+            _last_alert = BTC_STATE.get("feed_alert_ts", 0.0)
+            if _now_ts - _last_alert >= 3600.0:
+                BTC_STATE["feed_alert_ts"] = _now_ts
+                try:
+                    send_telegram(
+                        "<b>[BTC FEED STALE]</b>\n"
+                        f"BTC candles haven't refreshed in {(now - _last_ok)/60:.1f} minutes "
+                        "(Binance likely rate-limiting or banning). Macro filter is now "
+                        "BLOCKING all alt signals.\n\n"
+                        "<i>This alert auto-suppresses for 1 hour. Re-alerts if the feed "
+                        "recovers and goes stale again.</i>"
+                    )
+                except Exception:
+                    pass
+        # Treat as empty c1h for the downstream branch
+        c1h = []
     if not c1h:
         was_ok = BTC_STATE.get("feed_ok", True)
         BTC_STATE["feed_ok"] = False
@@ -1585,6 +2584,10 @@ def fetch_btc_state():
             BTC_STATE["feed_alert_ts"] = 0.0
         BTC_STATE["feed_ok"] = True
     print(f"[BTC] 1H:{BTC_STATE['trend_1h']} 15M:{BTC_STATE['trend_15m']} feed_ok={BTC_STATE['feed_ok']}")
+    # [ACTIVITY] feed — BTC macro context appears once per cycle in the
+    # dashboard's live AI feed so the operator knows the overall regime.
+    print(f"[ACTIVITY] BTC macro: 1H trend {BTC_STATE['trend_1h']}, "
+          f"15M trend {BTC_STATE['trend_15m']}")
 
     if now - BTC_STATE["last_dom_fetch"] >= DOM_FETCH_INTERVAL:
         try:
@@ -2814,115 +3817,139 @@ def send_signal_msg(token,price,ch24,result,plan,sig_id,regime):
     fvg_bot     = fvg.get("bottom", 0.0)
     fvg_top     = fvg.get("top",    0.0)
     fvg_size_pct = (fvg_top - fvg_bot) / max(price, 1e-10) * 100
-    ifvg_5m_found = ifvg_5m_r.get("ifvg_5m_found", False)
-    entry_zone_line = (
-        f"  Entry:  [{ifvg_5m_r['ifvg_5m_bottom']:.5f}–{ifvg_5m_r['ifvg_5m_top']:.5f}] (5M iFVG)"
-        if ifvg_5m_found
-        else f"  Entry:  [{fvg_bot:.5f}–{fvg_top:.5f}] (FVG zone)"
-    )
-    entry_label = "5M iFVG precision" if ifvg_5m_found else "FVG retracement"
-    ifvg_line   = (f"  IFVG:   [{ifvg_r['ifvg_bottom']:.5f}–{ifvg_r['ifvg_top']:.5f}] ✓"
-                   if ifvg_r.get("ifvg_present") else "  IFVG:   None")
+    # Note: 2026-05-28 redesign — entry_zone_line / entry_label / ifvg_line
+    # and template diagnostic fields (_tmpl_id, _tmpl_status, _exec_tag) were
+    # removed from the Telegram template per operator request. The data is
+    # still surfaced on the dashboard. Template + ICT raw fields above remain
+    # extracted so future template-tier work (Phase B) can reuse them.
 
-    # Phase 5A — template safety section
-    _tmpl_id     = result.get("matched_template_id", "NONE")
-    _tmpl_status = result.get("template_status", "UNKNOWN_TEMPLATE")
-    _tmpl_live   = result.get("template_live_allowed", 0)
-    _tmpl_reason = result.get("template_block_reason", "")
-    _exec_tag    = "LIVE-OK" if _tmpl_live else "PAPER"
+    # ── 2026-05-28 redesign (operator request): clean Telegram template.
+    # Keep only what's actionable for manual execution: pair, timeframe,
+    # entry, SL, TP1-3, 3-5 confluences, execution discipline, dashboard
+    # pointer. Everything else (ICT raw detail, BTC context, Regime/ADX,
+    # Size/Risk/Fees, Net economics, full reasons list, compound projection,
+    # template diagnostics) is on the dashboard and just clutters the
+    # Telegram alert at decision time.
+    #
+    # Parse source so we can label timeframe correctly and assemble the
+    # right confluences list for each scanner.
+    _src     = (result.get("source") or "5M_SWEEP").upper()
+    _et_full = str(result.get("entry_type") or "")
+    _is_crt  = _src == "H4_CRT" or _et_full.startswith("H4_CRT")
+    if _is_crt:
+        # Parse "H4_CRT_<FVG|OB>_<PHASE>"; default ? on missing parts
+        _parts = _et_full.split("_")
+        _conf  = _parts[2] if len(_parts) >= 3 else "?"
+        _phase = "_".join(_parts[3:]) if len(_parts) >= 4 else "?"
+        _timeframe_lbl = "H4 CRT"
+    else:
+        _conf  = ""
+        _phase = ""
+        _timeframe_lbl = "5M SWEEP"
 
-    # ── Title + header ──
-    ts_now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
-    msg = (
-        f"<b>{_h(token)} {_h(signal)}  signal #{_h(sig_id)}</b>\n"
-        f"{_h(ts_now)} UTC  -  price ${price:.4f}  (24h {ch24:+.2f}%)\n"
+    # ── Title ──
+    # Phase B (2026-05-28): prefix CRT tier label so operator sees quality
+    # bucket at the top of every alert. Tier A/B = LIVE-eligible (subject to
+    # EXECUTION_MODE), Tier C = paper-only.
+    _tmpl_id = result.get("matched_template_id", "NONE")
+    _tier_badge = ""
+    if _tmpl_id.startswith("CRT_A_"):
+        _tier_badge = "  •  \U0001F947 <b>TIER A</b>"     # gold medal
+    elif _tmpl_id.startswith("CRT_B_"):
+        _tier_badge = "  •  \U0001F948 <b>TIER B</b>"     # silver medal
+    elif _tmpl_id.startswith("CRT_C_"):
+        _tier_badge = "  •  \U0001F949 <b>TIER C</b>  <i>(paper-only)</i>"  # bronze medal
+    msg = f"\U0001F4E2 <b>POTENTIAL {_h(signal)} SIGNAL</b>  #{_h(sig_id)}{_tier_badge}\n"
+
+    # ── Header block ──
+    msg += (
+        f"\n\U0001F504 <b>Pair:</b> {_h(token)}/USDT"
+        f"\n⏰ <b>Timeframe:</b> {_h(_timeframe_lbl)}"
     )
 
     # ── Trade plan (Entry / SL / TP1-3) ──
     if plan:
         msg += (
-            "\n<pre>"
-            f"Entry  {price:>12.5f}\n"
-            f"SL     {plan['sl']:>12.5f}   {plan['sl_pct']:+6.2f}%\n"
-            f"TP1    {plan['tp1']:>12.5f}   {plan['tp1_pct']:+6.2f}%   R:R {plan['rr1']:>4}   close 40%\n"
-            f"TP2    {plan['tp2']:>12.5f}   {plan['tp2_pct']:+6.2f}%   R:R {plan['rr2']:>4}   close 40%\n"
-            f"TP3    {plan['tp3']:>12.5f}   {plan['tp3_pct']:+6.2f}%   R:R {plan['rr3']:>4}   close 20%"
-            "</pre>\n"
+            f"\n\n{_TG_HR}\n"
+            f"\n\U0001F4CD <b>Entry:</b> ${price:.4f}"
+            f"\n\U0001F6D1 <b>Stop Loss:</b> ${plan['sl']:.4f}   ({plan['sl_pct']:+.2f}%)"
+            f"\n\U0001F3AF <b>TP1:</b> ${plan['tp1']:.4f}   "
+            f"({plan['tp1_pct']:+.2f}% · R:R {plan['rr1']})"
+            f"\n\U0001F3AF <b>TP2:</b> ${plan['tp2']:.4f}   "
+            f"({plan['tp2_pct']:+.2f}% · R:R {plan['rr2']})"
+            f"\n\U0001F3AF <b>TP3:</b> ${plan['tp3']:.4f}   "
+            f"({plan['tp3_pct']:+.2f}% · R:R {plan['rr3']})"
         )
 
-    # ── At-a-glance summary line ──
-    msg += (
-        f"\n<b>Conf {_h(conf)}/10</b>   "
-        f"{_h(_tmpl_id)} {_h(_tmpl_status)} ({_h(_exec_tag)})\n"
-        f"Regime {_h(reg)}  ADX {_h(reg_adx)}  Eff {reg_eff:.2f}\n"
-        f"HTF    4H {_h(bias_4h)}   /   1H {_h(trend_1h)}\n"
-        f"BTC    4H {_h(btc_t4h)}   /   1H {_h(btc_t1h)}   /   Dom {btc_dom:.1f}%   /   {_h(btc_status)}\n"
-    )
+    # ── Confluences (scanner-aware) ──
+    # Keep to 4-5 bullets — the most decision-relevant features for each
+    # scanner. The dashboard carries the full reasons list, ICT raw data,
+    # and EV diagnostics for deeper review.
+    _conflu_lines = []
+    if _is_crt:
+        _conflu_lines.append(f"H4 CRT — {_h(_conf)} confluence")
+        if bias_4h and bias_4h != "?":
+            _conflu_lines.append(f"4H bias: {_h(bias_4h)}")
+        if mss_qual and mss_qual not in ("", "NONE"):
+            _conflu_lines.append(f"MSS quality: {_h(mss_qual)}")
+        if _phase and _phase != "?":
+            _conflu_lines.append(f"Wyckoff phase: {_h(_phase)}")
+    else:  # 5M_SWEEP
+        if sweep_type and sweep_type != "?":
+            _conflu_lines.append(f"Sweep: {_h(sweep_type)}")
+        if fvg_qual and fvg_qual not in ("", "NONE"):
+            _conflu_lines.append(f"FVG quality: {_h(fvg_qual)}")
+        if mss_qual and mss_qual not in ("", "NONE"):
+            _conflu_lines.append(f"MSS quality: {_h(mss_qual)}")
+        if bias_4h and bias_4h != "?":
+            _conflu_lines.append(f"4H bias: {_h(bias_4h)}")
+        if trend_1h and trend_1h != "?":
+            _conflu_lines.append(f"1H trend: {_h(trend_1h)}")
+    if session_lbl and session_lbl not in ("", "UNKNOWN"):
+        _conflu_lines.append(f"Session: {_h(session_lbl)}")
+    if _conflu_lines:
+        msg += f"\n\n{_TG_HR}\n\n✅ <b>Confluences:</b>"
+        for _c in _conflu_lines[:5]:  # cap at 5 bullets — keep it scannable
+            msg += f"\n• {_c}"
 
-    # ── ICT setup detail ──
-    if ifvg_5m_found:
-        _entry_line = (f"Entry    {ifvg_5m_r['ifvg_5m_bottom']:.5f} - {ifvg_5m_r['ifvg_5m_top']:.5f}  "
-                       f"(5M iFVG precision)")
-    else:
-        _entry_line = f"Entry    FVG retracement zone"
-    _smt_state = "confirmed" if smt_r.get("smt_confirmed") else "absent"
-    _ifvg_state = "matched" if ifvg_r.get("ifvg_present") else "none"
-    _ev_str = f"{ev_score:+.3f}%" if ev_score is not None else "N/A"
-    msg += (
-        "\n<pre>"
-        f"Sweep    {_h(sweep_type)} @ {sweep_lev:.5f}\n"
-        f"DR (4H)  {_h(dr_location)}  mid {dr_mid:.4f}\n"
-        f"FVG      {fvg_bot:.5f} - {fvg_top:.5f}  ({fvg_size_pct:.2f}%, {_h(fvg_qual)})\n"
-        f"{_entry_line}\n"
-        f"Reaction {_h(entry_tp)}\n"
-        f"MSS      {_h(mss_qual)}\n"
-        f"SMT      {_h(smt_type)}  ({_h(_smt_state)} vs BTC)\n"
-        f"iFVG     {_h(_ifvg_state)}\n"
-        f"Session  {_h(session_lbl)}\n"
-        f"EV       {_h(_ev_str)}  (n={_h(ev_sample_n)}, {_h(ev_status)})"
-        "</pre>\n"
-    )
-
-    # ── Size + net economics ──
+    # ── Execution discipline (LIMIT order, 30-min window) ──
     if plan:
-        sz_notional = sizing.get("notional_usd", 0.0)
-        sz_risk_pct = sizing.get("account_risk_pct", 0.0)
-        sz_max_loss = sizing.get("max_loss_usd", 0.0)
-        sz_fees     = sizing.get("fees_usd", 0.0)
         msg += (
-            f"\nSize ${sz_notional:,.0f}  -  "
-            f"Risk {sz_risk_pct:.1f}% (${sz_max_loss:.2f})  -  "
-            f"Fees ~${sz_fees:.2f}\n"
-            f"Net TP1 {plan['net_tp1_pct']:+.2f}%  -  "
-            f"BEW {plan['breakeven_wr']:.0%}  -  "
-            f"Net R:R {plan['net_rr1']}\n"
+            f"\n\n{_TG_HR}\n"
+            f"\n\U0001F4CB <b>LIMIT {_h(signal)} @ ${price:.4f}</b> "
+            f"— cancel if not filled in 30 min"
         )
 
-    # ── Template block reason (only if actually blocked) ──
-    if _tmpl_reason:
-        msg += f"\n<i>Template blocked: {_h(_tmpl_reason)}</i>\n"
-
-    # ── Why this signal (reasons list) ──
-    msg += "\n<b>Why this signal:</b>\n"
-    for r in result["reasons"]:
-        msg += f"  - {_h(r)}\n"
-
-    # ── Compound projection (optional) ──
-    if comp and len(comp) >= 5:
-        msg += (
-            f"\nCompound at {wr_live:.0%} WR:  "
-            f"${YOUR_CAPITAL:,.0f}  ->  "
-            f"5T ${comp[4]:,.0f}  ->  "
-            f"10T ${comp[9]:,.0f}\n"
-        )
-
+    # ── Footer ──
+    msg += f"\n\n{_TG_HR}\n"
+    msg += "\n\U0001F4CC Full details on the dashboard."
     msg += "\n<i>Analysis only. Your call.</i>"
 
     if len(msg) > 4000:
         msg = msg[:3980] + "...[trimmed]"
-    send_telegram(msg)
+    # CY12-SIGNAL-SMTP fix (full audit 2026-05-29 resilience M-RES-1):
+    # route through MultiChannelAlerter (heartbeat already uses it) so
+    # SMTP secondary channel catches Telegram outages on the actual
+    # signal alert — not just heartbeats. Operator-monetary-impact gap:
+    # pre-fix, a Telegram outage during signal emit meant the operator
+    # NEVER saw the signal even though the DB row was saved. The
+    # falls-back path (when _signal_alerter is None — e.g. tests, early
+    # startup, replay) is the same send_telegram() the function used
+    # before, so existing call sites keep working.
+    if _signal_alerter is not None:
+        try:
+            _signal_alerter.send("Signal", msg)
+        except Exception:
+            # Defensive — never let alert routing kill the bot loop.
+            # Fall back to the bare telegram path if the alerter raises.
+            try:
+                send_telegram(msg)
+            except Exception:
+                pass
+    else:
+        send_telegram(msg)
     ifvg_tag    = " IFVG" if ifvg_r.get("ifvg_present") else ""
-    ifvg_5m_tag = " 5M-iFVG" if ifvg_5m_found else ""
+    ifvg_5m_tag = " 5M-iFVG" if ifvg_5m_r.get("ifvg_5m_found") else ""
     print(f"[SIGNAL] {token} {signal} ${price:.4f} "
           f"Sweep:{sweep_type} FVG:{fvg_size_pct:.2f}%[{fvg_qual}]{ifvg_tag}{ifvg_5m_tag} "
           f"MSS:[{mss_qual}] Entry:{entry_tp} "
@@ -2966,15 +3993,50 @@ def monitor_open_signals(prices):
                 print(f"[STALE-MONITOR] {token}: candles {_tok_age:.0f}s old — using live price only for TP/SL")
                 candle_high = candle_low = None
             else:
-                # 15m candle extremes for TP/SL touch detection (matches signal entry TF)
+                # 15m candle extremes for TP/SL touch detection (matches signal entry TF).
+                #
+                # 2026-05-28 latency fix (operator-flagged LINK#1 case): pre-fix
+                # the monitor read ONLY the last closed 15M candle (`[-2]`) — so
+                # a TP hit in the first minute of the forming 15M candle wasn't
+                # detected until that candle closed (~14 min later) plus the
+                # next bot cycle (~70s). Worst-case detection latency: ~16 min.
+                #
+                # Fix: take the most extreme of three sources — closed 15M
+                # extreme, forming 15M extreme, and the live tick price. Lows
+                # don't unpaint within a forming bar (a printed low can only
+                # go lower or stay the same), so this is SAFE: it only
+                # accelerates detection of TPs that price genuinely touched;
+                # it never invents fake hits.
+                #
+                # SL detection is C6-protected: `if ns and not t1: LOSS` uses
+                # the PRIOR tp1_hit state, so a forming-bar dip through SL
+                # after TP1 was already booked correctly preserves the WIN.
                 candles_15m = STATE.get(token, {}).get("candles", {}).get("15m", {})
                 highs       = candles_15m.get("highs", [])
                 lows        = candles_15m.get("lows",  [])
-                candle_high = highs[-2] if len(highs) >= 2 else None  # skip forming candle
-                candle_low  = lows[-2]  if len(lows)  >= 2 else None
+                _hi_candidates = [price]
+                _lo_candidates = [price]
+                if len(highs) >= 2:
+                    _hi_candidates.append(highs[-2])  # last closed
+                    if highs[-1] is not None:
+                        _hi_candidates.append(highs[-1])  # forming (running high)
+                if len(lows) >= 2:
+                    _lo_candidates.append(lows[-2])
+                    if lows[-1] is not None:
+                        _lo_candidates.append(lows[-1])
+                candle_high = max(_hi_candidates) if _hi_candidates else None
+                candle_low  = min(_lo_candidates) if _lo_candidates else None
             update_signal_result(sig["id"], price,
                 sig["tp1"], sig["tp2"], sig["tp3"], sig["sl"], sig["signal"],
                 candle_high=candle_high, candle_low=candle_low)
+
+            # Phase A (2026-05-28) — Limit-order fillability check.
+            # For signals with limit_fillable=NULL (still in the 30-min waiting
+            # window), determine if the bot's entry_price has been retouched.
+            # If yes → mark FILLED (1). If 30+ min elapsed without retouch →
+            # mark MISSED (0). This measures the empirical fill rate of the
+            # operator's chosen limit-order discipline (Option 1).
+            _check_limit_fill(sig, price, candle_high, candle_low)
 
             # Exit intelligence — closed 5m bars only ([:-1] excludes the forming candle,
             # matching the convention used in the entry path at lines 2056-2060).
@@ -3017,26 +4079,53 @@ def maybe_send_daily_summary(prices):
         conn2.close()
     except: pass
 
+    # 2026-05-28 redesign — match the clean Telegram style used across the
+    # rest of the bot (signal alert, exit suggestion, heartbeat, watchdog,
+    # explorer). Drops <pre> blocks (no copy button), uses emoji-bulleted
+    # fields with ━━━ section dividers.
     token_rows = []
     for token in BINANCE_TOKENS:
-        price=prices.get(token,0.0)
-        if price<=0: continue
-        closes=STATE[token]["candles"]["15m"].get("closes",[])[:-1]  # exclude forming bar
-        rsi_v=calculate_rsi(closes) if closes else 50.0
-        mtf=get_mtf_bias(token)
-        reg=STATE[token]["last_regime"]
-        # Fall back to last DB regime if in-memory is still UNKNOWN
+        price = prices.get(token, 0.0)
+        if price <= 0:
+            continue
+        closes = STATE[token]["candles"]["15m"].get("closes", [])[:-1]  # exclude forming bar
+        rsi_v  = calculate_rsi(closes) if closes else 50.0
+        mtf    = get_mtf_bias(token)
+        reg    = STATE[token]["last_regime"]
         if reg == "UNKNOWN":
             reg = db_regimes.get(token, "UNKNOWN")
+        # Emoji prefix per MTF bias for at-a-glance scan
+        _mtf_b = mtf['bias']
+        _mtf_emoji = ("\U0001F4C8" if _mtf_b == "BULLISH"
+                      else "\U0001F4C9" if _mtf_b == "BEARISH"
+                      else "↔️")  # NEUTRAL or other
         token_rows.append(
-            f"{_h(token):<5} ${price:>10.4f}   RSI {_h(int(rsi_v)):>2}   "
-            f"MTF {_h(mtf['bias']):<10}   {_h(reg)}"
+            f"• <b>{_h(token)}</b>  ${price:.4f}  ·  RSI {_h(int(rsi_v))}  ·  "
+            f"{_mtf_emoji} {_h(_mtf_b)}  ·  {_h(reg)}"
         )
+
+    # Parse db_line into structured fields for the header card.
+    # Format: "{total} signals | {W}W/{P}P/{L}L/{E}E ({WR}% WR) | {opens} open"
+    try:
+        _stats_summary = (
+            f"\U0001F4CA <b>Signals:</b> {_h(total)} total · "
+            f"{_h(wins)}W / {_h(partial)}P / {_h(losses)}L / {_h(expired)}E"
+            f"\n\U0001F3AF <b>Win rate:</b> {_h(wr)}%"
+            f"\n\U0001F4CD <b>Open:</b> {_h(opens)}"
+        )
+    except Exception:
+        # Fallback to the parsed db_line if individual fields are missing
+        _stats_summary = f"\U0001F4CA {_h(db_line)}"
+
     msg = (
-        f"<b>Daily Summary  -  {_h(now.strftime('%Y-%m-%d'))}</b>\n\n"
-        f"<pre>{_h(db_line)}</pre>\n"
-        "<pre>" + "\n".join(token_rows) + "</pre>\n"
-        "<i>Analysis only. Your call.</i>"
+        f"\U0001F4C5 <b>Daily Summary — {_h(now.strftime('%Y-%m-%d'))}</b>\n"
+        f"\n{_TG_HR}\n"
+        f"\n{_stats_summary}"
+        f"\n\n{_TG_HR}\n"
+        f"\n\U0001F4CB <b>Per-Token Snapshot:</b>\n"
+        + "\n".join(token_rows)
+        + f"\n\n{_TG_HR}\n"
+        + "\n<i>Analysis only. Your call.</i>"
     )
     send_telegram(msg); print("[DAILY SUMMARY SENT]")
 
@@ -3120,8 +4209,33 @@ def main():
     import atexit as _atexit
     _atexit.register(_pid_guard.release)
 
-    init_db()
-    restore_cooldowns()
+    # CY12-INIT-DB-WRAP fix (full audit 2026-05-29 resilience M-RES-3):
+    # pre-fix init_db() / restore_cooldowns() raised on disk-full or
+    # permission errors with NO Telegram alert — systemd Restart=always
+    # then crash-looped silently and the operator never knew until the
+    # watchdog freeze alert fired (10+ min). Now any boot-time DB failure
+    # emits a CRITICAL Telegram before the process exits, so the operator
+    # has actionable diagnosis instead of "bot stopped, no idea why".
+    try:
+        init_db()
+        restore_cooldowns()
+    except Exception as _init_e:
+        _crit_msg = (f"<b>BOT BOOT FAILURE</b>\n\n"
+                     f"init_db() or restore_cooldowns() raised: "
+                     f"<code>{_h(type(_init_e).__name__)}</code>\n"
+                     f"<code>{_h(str(_init_e)[:300])}</code>\n\n"
+                     f"<i>Bot cannot start. Common causes: disk full, "
+                     f"signals.db corrupt, file permissions wrong, "
+                     f"WAL lock not released. systemd will Restart=always, "
+                     f"which will crash-loop until you fix the underlying "
+                     f"problem. ssh to VPS and check `df -h`, "
+                     f"`ls -la data/signals.db*`, and journalctl -u tradeai.</i>")
+        try:
+            send_telegram(_crit_msg)
+        except Exception:
+            pass
+        # Re-raise so systemd sees the non-zero exit + journalctl shows it
+        raise
 
     # H24: LIVE MODE alert moved to after init_db() + restore_cooldowns() so the operator
     # is only notified when the bot is fully ready — not before DB init can fail.
@@ -3164,9 +4278,18 @@ def main():
             logger.warning(f"[DRIFT-GATE] Could not read threshold for {_tok}: {_e}")
     _drift_note = ""
     if _drift_warnings:
-        _drift_note = ("\n\n⚠ DRIFT-GATE: ADX divergence from backtest baseline (25.0):\n"
-                       + "\n".join(f"  {w}" for w in _drift_warnings)
-                       + "\nRegime classification may differ from backtest.")
+        # 2026-05-28 — translate jargon into plain operator-readable English.
+        # ADX < baseline = markets calmer/less-trending than the historical
+        # period the strategy was tuned on. Not a block, just FYI.
+        _avg_delta = sum(float(w.split('(')[1].split(')')[0]) for w in _drift_warnings) / len(_drift_warnings)
+        if _avg_delta < 0:
+            _drift_note = (f"Markets are quieter than usual right now "
+                           f"(avg ADX {_avg_delta:+.1f} vs the historical baseline of 25). "
+                           f"Expect fewer/slower signals — not a problem, just heads-up.")
+        else:
+            _drift_note = (f"Markets are more volatile than usual right now "
+                           f"(avg ADX {_avg_delta:+.1f} vs the historical baseline of 25). "
+                           f"Expect more/faster signals — not a problem, just heads-up.")
 
     print("="*58)
     print("  CRYPTO SIGNAL BOT v13 — ICT MODE")
@@ -3183,19 +4306,172 @@ def main():
     print(weight_engine.summary())
     _tokens_str = " ".join(BINANCE_TOKENS.keys())
     _drift_note_clean = _drift_note.strip()
+    # CRT-aware startup message (telegram audit 2026-05-27 — C-1 followup):
+    # The old "ICT mode" title + 5M_SWEEP-only strategy line was misleading
+    # under the operator's current CRT-only config. Now reflects which
+    # scanner(s) are actually active so the operator's startup notification
+    # matches the bot's runtime behavior.
+    _5m_on  = bool(ENABLE_5M_SWEEP)
+    _crt_on = bool(ENABLE_H4_CRT)
+    if _5m_on and _crt_on:
+        _mode_title    = "DUAL mode (5M_SWEEP + H4_CRT)"
+        _strategy_line = "5M_SWEEP + H4_CRT (parallel scanners)"
+    elif _crt_on and not _5m_on:
+        _mode_title    = "CRT-only mode"
+        _strategy_line = "H4 Candle Range Theory (CRT)"
+    elif _5m_on and not _crt_on:
+        _mode_title    = "ICT mode (5M_SWEEP)"
+        _strategy_line = "ICT sweep + MSS + FVG retracement"
+    else:
+        # Both off — bot will emit zero signals; surface this as a warning
+        _mode_title    = "ALL SCANNERS DISABLED"
+        _strategy_line = "WARNING: ENABLE_5M_SWEEP=0 AND ENABLE_H4_CRT=0 — no signals will fire"
+
+    # ── 2026-05-28 STARTED-message redesign (operator request) ──
+    # Replace the dense <pre> table + raw DRIFT-GATE warnings with a clean,
+    # operator-readable status card. Keep only what's useful at startup:
+    # mode/scanner state, position + WR continuity, adaptive learning
+    # health, the most-tuned CRT knobs, and a plain-English market note.
+
+    # Adaptive learning health — count live-weighted vs bootstrap tokens
+    try:
+        _w_keys = list(weight_engine._weights.keys())
+        _w_live = sorted(t for t in _w_keys if weight_engine._n.get(t, 0) > 0)
+        _w_boot = sorted(t for t in _w_keys if weight_engine._n.get(t, 0) == 0)
+    except Exception:
+        _w_live, _w_boot = [], []
+
+    # State continuity at restart — open positions + WR resumed
+    try:
+        _port_st  = portfolio_layer.get_status()
+        _open_now = _port_st.get("total_open", 0)
+    except Exception:
+        _open_now = 0
+    try:
+        _wr_live = get_actual_win_rate()
+        _closed_n = _wr_live and 1  # placeholder for closed-count if we have it
+    except Exception:
+        _wr_live = 0.0
+    try:
+        import sqlite3 as _sql
+        _c = _sql.connect(DB_PATH); _c.row_factory = _sql.Row
+        _closed_n = _c.execute(
+            "SELECT COUNT(*) FROM results WHERE result IN "
+            "('WIN','LOSS','PARTIAL_TP1','PARTIAL_TP2','PARTIAL_TP3')"
+        ).fetchone()[0]
+        _c.close()
+    except Exception:
+        _closed_n = 0
+
+    # CRT key knobs — only when CRT is the active source
+    _crt_summary = ""
+    if _crt_on:
+        try:
+            from crt_engine import CRT_TP1_MODE as _ctm, WYCKOFF_PHASE_FILTER as _wpf
+            _bias = getattr(__import__('config'), 'LIVE_BIAS_4H_GATE', 'none')
+            _crt_summary = (
+                "\n\n⚙️ <b>Active CRT settings:</b>"
+                f"\n• TP1 mode: <b>{_h(_ctm)}</b>"
+                f"\n• Wyckoff filter: <b>{_h(_wpf)}</b>"
+                f"\n• 4H bias gate: <b>{_h(_bias)}</b>"
+            )
+        except Exception:
+            pass
+
+    _adaptive_line = ""
+    if _w_live or _w_boot:
+        _adaptive_line = "\n\n\U0001F9E0 <b>Adaptive learning:</b>"
+        if _w_live:
+            _adaptive_line += (
+                f"\n• Live ({len(_w_live)}): {_h(', '.join(_w_live))}"
+            )
+        if _w_boot:
+            _adaptive_line += (
+                f"\n• Warming up ({len(_w_boot)}): {_h(', '.join(_w_boot))}"
+            )
+
+    _wr_line = (
+        f"\n\U0001F3AF <b>Win rate so far:</b> {_wr_live:.0%}  "
+        f"({_closed_n} closed signal{'s' if _closed_n != 1 else ''})"
+        if _closed_n > 0 else
+        "\n\U0001F3AF <b>Win rate so far:</b> waiting for first closed signal"
+    )
+
+    # 2026-05-28 — operator template (image reference): card-style with
+    # unicode-line dividers between sections, emoji + bold section headers,
+    # 2-column token grid in <pre> (monospace alignment unavailable elsewhere
+    # in Telegram HTML — small block, not a dense data table).
+
+    _hr = _TG_HR  # shared divider — see module-level _TG_HR definition
+
+    # Token list — single comma-separated line (matches the Adaptive Learning
+    # "Live (n): A, B, C" style). Drops both the <pre> copy affordance and
+    # the 10-line vertical bullet list per operator preference (2026-05-28).
+    _tokens_inline = ", ".join(BINANCE_TOKENS.keys())
+
+    # Adaptive learning block — render as bullets under a section header
+    _adaptive_block = ""
+    if _w_live or _w_boot:
+        _adaptive_block = f"\n\n{_hr}\n\n\U0001F48E <b>Adaptive Learning</b>\n"
+        if _w_live:
+            _adaptive_block += (
+                f"\n✅ <b>Live ({len(_w_live)}):</b> {_h(', '.join(_w_live))}"
+            )
+        if _w_boot:
+            _adaptive_block += (
+                f"\n⏳ <b>Warming Up ({len(_w_boot)}):</b> "
+                f"{_h(', '.join(_w_boot))}"
+            )
+
+    # Status section — open positions + WR + closed-signal count
+    _status_block = (
+        f"\n\n{_hr}\n\n\U0001F4CA <b>Status</b>\n"
+        f"\n\U0001F4CB <b>Open Positions Resumed:</b> {_h(_open_now)} / "
+        f"{_h(MAX_OPEN_POSITIONS)}"
+    )
+    if _closed_n > 0:
+        _status_block += (
+            f"\n\U0001F3AF <b>Win Rate So Far:</b> {_wr_live:.0%}"
+            f"\n\U0001F4CC <b>Closed Signals:</b> {_h(_closed_n)}"
+        )
+    else:
+        _status_block += (
+            "\n\U0001F3AF <b>Win Rate So Far:</b> waiting for first closed signal"
+        )
+
+    # CRT settings section — only when CRT is the active source
+    _crt_block = ""
+    if _crt_on:
+        try:
+            from crt_engine import CRT_TP1_MODE as _ctm, WYCKOFF_PHASE_FILTER as _wpf
+            _bias = getattr(__import__('config'), 'LIVE_BIAS_4H_GATE', 'none')
+            _crt_block = (
+                f"\n\n{_hr}\n\n⚙️ <b>Active CRT Settings</b>\n"
+                f"\n• <b>TP1 Mode:</b> {_h(_ctm)}"
+                f"\n• <b>Wyckoff Filter:</b> {_h(str(_wpf).upper())}"
+                f"\n• <b>4H Bias Gate:</b> {_h(str(_bias).upper())}"
+            )
+        except Exception:
+            pass
+
+    # Market notice — translated DRIFT-GATE warning
+    _notice_block = ""
+    if _drift_note_clean:
+        _notice_block = (
+            f"\n\n{_hr}\n\n⚠️ <b>Market Notice</b>\n"
+            f"\n<i>{_h(_drift_note_clean)}</i>"
+        )
+
     send_telegram(
-        "<b>TradeAI v13 STARTED  -  ICT mode</b>\n\n"
-        "<pre>"
-        f"Mode       {_h(EXECUTION_MODE)}\n"
-        f"Tokens     {_h(len(BINANCE_TOKENS))}  ({_h(_tokens_str)})\n"
-        f"Strategy   ICT sweep + MSS + FVG retracement\n"
-        f"SL         0.3% beyond swept wick  (max {MAX_SL_PCT*100:.1f}%)\n"
-        f"TP         1H swing levels  (1.5R - 4R)\n"
-        f"Expiry     12h    Cooldown {_h(SIGNAL_COOLDOWN)} min\n"
-        f"BEW gate   {MAX_BREAKEVEN_WR:.0%}     RT cost {ROUND_TRIP_COST_PCT*100:.2f}%"
-        "</pre>"
-        + (f"\n<i>{_h(_drift_note_clean)}</i>" if _drift_note_clean else "")
-        + "\n\n<i>Analysis only. Your call.</i>"
+        f"\U0001F680 <b>BOT STARTED — {_h(_mode_title)}</b>\n"
+        f"\n⚙️ <b>Mode:</b> {_h(EXECUTION_MODE)}"
+        f"\n\U0001F300 <b>Strategy:</b> {_h(_strategy_line)}"
+        f"\n\n{_hr}\n\n\U0001F4D4 <b>Tokens Watched ({_h(len(BINANCE_TOKENS))}):</b>\n"
+        + _h(_tokens_inline)
+        + _adaptive_block
+        + _status_block
+        + _crt_block
+        + _notice_block
     )
     load_performance_state()
     # M26: Pre-flight Binance connectivity check — abort before entering the main loop
@@ -3233,6 +4509,10 @@ def main():
         load_counter=lambda: load_scalar_state("hb_selftest_counter", default=0),
         save_counter=lambda v: save_scalar_state("hb_selftest_counter", v),
     )
+    # CY12-SIGNAL-SMTP fix: wire the alerter as the module-global so
+    # send_signal_msg can route through it (SMTP fallback for signals).
+    global _signal_alerter
+    _signal_alerter = _hb_alerter
     if not _hb_alerter.secondary_configured:
         logger.warning(
             "[ALERT] SMTP secondary channel not configured — "
@@ -3250,6 +4530,11 @@ def main():
         "last_heartbeat_ts": 0.0,
         "last_cycle_ts_unix": 0.0,
         "restart_count": 0,
+        # CRT v1 Session 3 (LBC-H-2 fix): per-token consumed_h4_crt sets
+        # serialized as {token: [[c1_time, c1_high, c1_low], ...]}. Reloaded
+        # into STATE[token]["consumed_h4_crt"] below so mitigation memory
+        # survives bot restart.
+        "consumed_h4_crt": {},
     })
     _persisted["restart_count"] = int(_persisted.get("restart_count", 0)) + 1
     _state_store.save(_persisted)
@@ -3257,6 +4542,26 @@ def main():
         print(f"[STATE] Resumed from previous run — cycle={_persisted['cycle']} "
               f"consecutive_errors={_persisted['consecutive_errors']} "
               f"restart#{_persisted['restart_count']}")
+
+    # CRT v1 Session 3 (LBC-H-2 fix): rehydrate per-token consumed_h4_crt sets
+    # from the state_store snapshot. Stored as lists of 3-tuples; converted
+    # back to sets of tuples here. Bad/missing entries fail silently to empty
+    # set per token — defensive against state_store corruption.
+    _ch4 = _persisted.get("consumed_h4_crt", {}) or {}
+    for _tok, _entries in _ch4.items():
+        if _tok in STATE and isinstance(_entries, list):
+            try:
+                STATE[_tok]["consumed_h4_crt"] = {
+                    tuple(e) for e in _entries
+                    if isinstance(e, (list, tuple)) and len(e) == 3
+                }
+            except Exception:
+                STATE[_tok]["consumed_h4_crt"] = set()
+    _rehydrated = sum(len(STATE[t].get("consumed_h4_crt", set()))
+                      for t in BINANCE_TOKENS)
+    if _rehydrated > 0:
+        print(f"[STATE] Rehydrated {_rehydrated} mitigated CRT zones across "
+              f"{sum(1 for t in BINANCE_TOKENS if STATE[t].get('consumed_h4_crt'))} tokens")
 
     current_prices={}
     cycle = int(_persisted.get("cycle", 0))
@@ -3271,6 +4576,7 @@ def main():
         try:
             start=time.time(); cycle+=1
             print(f"\n[{datetime.now().strftime('%H:%M')}] === Cycle {cycle} ===")
+            print(f"[ACTIVITY] === Cycle {cycle} start — scanning 10 tokens for setups ===")
             if time.time() - _last_perf_load >= PERF_CHECK_INTERVAL:
                 load_performance_state(); _last_perf_load = time.time()
                 # R6 fix (master audit 2026-05-26): event-driven decay replaces
@@ -3315,17 +4621,25 @@ def main():
                 port_st  = portfolio_layer.get_status()
                 open_cnt = port_st["total_open"]
                 eff_thr  = SIGNAL_THRESHOLD + _signal_threshold_adj
+                # CRT-aware heartbeat (telegram audit 2026-05-27 — C-1 followup):
+                # surface scanner state so operator sees at a glance which
+                # source(s) the bot is currently watching for signals.
+                _hb_scanners = (
+                    ("5M_SWEEP" if ENABLE_5M_SWEEP else "") +
+                    (("+" if ENABLE_5M_SWEEP and ENABLE_H4_CRT else "") +
+                     ("H4_CRT" if ENABLE_H4_CRT else ""))
+                ) or "DISABLED"
                 _hb_alerter.send(
                     "Heartbeat",
-                    "<b>Heartbeat  -  bot alive</b>\n\n"
-                    "<pre>"
-                    f"Time      {_h(datetime.now().strftime('%Y-%m-%d %H:%M'))}\n"
-                    f"Cycle     {_h(cycle)}\n"
-                    f"Mode      {_h(EXECUTION_MODE)}\n"
-                    f"Open      {_h(open_cnt)} / {_h(MAX_OPEN_POSITIONS)}\n"
-                    f"WR        {wr_live:.0%}\n"
-                    f"Threshold {_h(eff_thr)}%"
-                    "</pre>",
+                    "\U0001F49A <b>Heartbeat BOT ALIVE</b>\n"
+                    f"\n{_TG_HR}\n"
+                    f"\n⏰ <b>Time:</b> {_h(datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M'))} UTC"
+                    f"\n\U0001F501 <b>Cycle:</b> {_h(cycle)}"
+                    f"\n⚙️ <b>Mode:</b> {_h(EXECUTION_MODE)}"
+                    f"\n\U0001F4E1 <b>Scanners:</b> {_h(_hb_scanners)}"
+                    f"\n\U0001F4CA <b>Open positions:</b> {_h(open_cnt)} / {_h(MAX_OPEN_POSITIONS)}"
+                    f"\n\U0001F3AF <b>Win rate:</b> {wr_live:.0%}"
+                    f"\n\U0001F6AA <b>Threshold:</b> {_h(eff_thr)}%",
                 )
                 _last_heartbeat = time.time()
             for token in BINANCE_TOKENS:
@@ -3341,32 +4655,450 @@ def main():
                     continue
                 pd=STATE[token].get("last_24h", {})   # reuse cached data — no extra fetch
                 ch24=pd.get("change_24h",0.0); vol24=pd.get("volume_24h",0.0)
-                result,regime=generate_signal(token,price,ch24,vol24)
-                if result:
-                    plan=result["plan"]
-                    sig_id=save_signal(token,price,result,plan,regime)
-                    if sig_id < 0:
-                        print(f"[ERROR] {token} signal DB save failed — no Telegram sent")
+                # ── 5M_SWEEP scanner (Run-168 canonical baseline) ─────────
+                # Per-scanner kill switch: ENABLE_5M_SWEEP=0 (env) disables
+                # the original 5M-sweep detection path so operator can run
+                # CRT-only paper trades. Default ON. The CRT scanner below
+                # is gated independently by ENABLE_H4_CRT.
+                if ENABLE_5M_SWEEP:
+                    result,regime=generate_signal(token,price,ch24,vol24)
+                    if result:
+                        plan=result["plan"]
+                        sig_id=save_signal(token,price,result,plan,regime)
+                        if sig_id < 0:
+                            print(f"[ERROR] {token} signal DB save failed — no Telegram sent")
+                            continue
+                        # Phase 5A: suppress Telegram in LIVE mode when template blocks live execution
+                        if EXECUTION_MODE == "LIVE" and not result.get("template_live_allowed", 0):
+                            print(f"[PHASE5A] LIVE BLOCK: {token} {result['signal']} "
+                                  f"template={result.get('matched_template_id','NONE')} "
+                                  f"status={result.get('template_status','?')} "
+                                  f"reason={result.get('template_block_reason','')} — signal saved, no Telegram")
+                        else:
+                            send_signal_msg(token,price,ch24,result,plan,sig_id,regime)
+
+                # CRT v1 Session 3 (audit cycle-7 2026-05-27): parallel H4-CRT
+                # scan path. No-op when ENABLE_H4_CRT=0 (default — production
+                # behavior unchanged). When enabled, emits source='H4_CRT'
+                # signals alongside the canonical 5M_SWEEP path above.
+                # Uses STATE[token]["consumed_h4_crt"] (persisted across
+                # restarts via state_store) for one-shot mitigation.
+                if ENABLE_H4_CRT:
+                    # M-NEW-5 fix (cycle-9 audit 2026-05-28): per-TF stale
+                    # guard for the CRT path. The 5M scanner already has its
+                    # stale gate at line 3996; the CRT path consumes 4H +
+                    # 1H directly so it needs its own. Without this, a frozen
+                    # 4H candle stream (5M fetches succeed, 4H fails) would
+                    # still let CRT signals fire from stale H4 data.
+                    _4h_age = time.time() - STATE[token].get("last_4h_fetched_at", 0.0)
+                    if STATE[token].get("last_4h_fetched_at", 0.0) > 0 and _4h_age > STALE_CANDLE_THRESHOLD:
+                        print(f"[STALE-4H] {token}: 4h candles {_4h_age:.0f}s old "
+                              f"(>{STALE_CANDLE_THRESHOLD}s) — skipping CRT scan")
                         continue
-                    # Phase 5A: suppress Telegram in LIVE mode when template blocks live execution
-                    if EXECUTION_MODE == "LIVE" and not result.get("template_live_allowed", 0):
-                        print(f"[PHASE5A] LIVE BLOCK: {token} {result['signal']} "
-                              f"template={result.get('matched_template_id','NONE')} "
-                              f"status={result.get('template_status','?')} "
-                              f"reason={result.get('template_block_reason','')} — signal saved, no Telegram")
+                    # M10-8 fix (cycle-10 audit 2026-05-28): 4H candle gap
+                    # guard. The 5M_SWEEP path has this at line 2663; CRT
+                    # did not. Without it, a 4H fetch that returned with
+                    # gaps (e.g. Binance partial response) would feed CRT
+                    # detection a discontinuous H4 stream → false C1/C2
+                    # relationships. ≥1 bar gap is enough to corrupt the
+                    # 2-bar CRT pattern.
+                    if STATE[token].get("data_gap_bars_4h", 0) >= 1:
+                        print(f"[SKIP-GAP-4H] {token}: 4H data gap "
+                              f"{STATE[token]['data_gap_bars_4h']} bars — skipping CRT scan")
+                        continue
+                    # M-CY11-3 fix (audit 2026-05-28 cycle-11): 1H stale +
+                    # gap guard for CRT scan path. CRT_REQUIRE_1H_TREND=1 is
+                    # active in operator's Run-338 .env, making 1H trend a
+                    # live signal gate. Pre-fix the CRT scan trusted whatever
+                    # was in c1h_live without a freshness check; a stale or
+                    # gap-corrupted 1H stream silently produced NEUTRAL (the
+                    # gate's permissive default), letting signals through
+                    # that should have been blocked. Mirrors the 4H guards
+                    # immediately above and the 5M_SWEEP path's 1H guards
+                    # at crypto_alert.py:2714.
+                    _1h_age = time.time() - STATE[token].get("last_1h_fetched_at", 0.0)
+                    if STATE[token].get("last_1h_fetched_at", 0.0) > 0 and _1h_age > STALE_CANDLE_THRESHOLD:
+                        print(f"[STALE-1H] {token}: 1h candles {_1h_age:.0f}s old "
+                              f"(>{STALE_CANDLE_THRESHOLD}s) — skipping CRT scan")
+                        continue
+                    if STATE[token].get("data_gap_bars_1h", 0) >= 2:
+                        print(f"[SKIP-GAP-1H] {token}: 1H data gap "
+                              f"{STATE[token]['data_gap_bars_1h']} bars — skipping CRT scan")
+                        continue
+                    _c5m = STATE[token]["candles"]["5m"]
+                    _c4h = STATE[token]["candles"]["4h"]
+                    _c1h_live = STATE[token]["candles"].get("1h", {})
+                    if _c5m and _c4h and len(_c5m.get("closes", [])) > 30 \
+                            and len(_c4h.get("closes", [])) > H4_CRT_C2_LOOKBACK + 2:
+                        # CRITICAL P1 fix (audit 2026-05-27 cycle-8):
+                        #   C-1: candle-key shape mismatch (3 agents converged).
+                        #        fetch_binance_candles returns dict keyed "timestamps"
+                        #        (plural). crt_engine.detect_h4_crt requires "times"
+                        #        (singular) and silently returns None on mismatch.
+                        #        Result: 0 CRT signals fired in 28h+ of paper soak.
+                        #   C-2: forming-bar repaint. 5M_SWEEP path applies [:-1] to
+                        #        drop the in-progress bar (crypto_alert.py:2450-2454);
+                        #        CRT path passed the raw STATE candles → the live
+                        #        4H + 5M arrays included a non-closed bar at [-1] →
+                        #        repaint violation + live/BT divergence.
+                        # Build NEW dicts (don't mutate STATE — other code paths may
+                        # rely on it). Strip forming bar from all OHLCV+time arrays.
+                        def _crt_closed_only(src_dict):
+                            """Return a copy keyed for crt_engine ('times' present)
+                            with the trailing forming bar removed from every series."""
+                            if not src_dict:
+                                return {}
+                            # Source candles use 'timestamps'; crt_engine wants 'times'
+                            _ts_src = src_dict.get("times") or src_dict.get("timestamps") or []
+                            return {
+                                "opens":  src_dict.get("opens",  [])[:-1],
+                                "highs":  src_dict.get("highs",  [])[:-1],
+                                "lows":   src_dict.get("lows",   [])[:-1],
+                                "closes": src_dict.get("closes", [])[:-1],
+                                "times":  list(_ts_src)[:-1],
+                            }
+                        _c5m_closed = _crt_closed_only(_c5m)
+                        _c4h_closed = _crt_closed_only(_c4h)
+                        # Initialize defensive defaults so the downstream
+                        # `if _crt_result is not None:` is safe even if the
+                        # post-slice length check below skips the scan call.
+                        _crt_result, _crt_plan, _crt_reason = None, None, "skipped_short_candles"
+                        # Re-verify length AFTER the [:-1] slice so we don't fall
+                        # under the inner detect_h4_crt's >=30 / >H4_CRT_C2_LOOKBACK
+                        # floor with the forming-bar removed.
+                        if (len(_c5m_closed["closes"]) > 30
+                                and len(_c4h_closed["closes"]) > H4_CRT_C2_LOOKBACK + 2):
+                            # H-3 fix (audit cycle-8 2026-05-27): compute
+                            # per-token 1H trend directly from the cached
+                            # 1H candles. Previously read STATE[token]["trend_1h"]
+                            # which is ONLY populated by the 5M_SWEEP path
+                            # (generate_signal) — when ENABLE_5M_SWEEP=0 the
+                            # value defaulted to "NEUTRAL" forever, breaking
+                            # both the CRT_REQUIRE_1H_TREND gate AND OGD's
+                            # trend_strength feature attribution.
+                            # L-NEW-3 fix (cycle-9 audit 2026-05-28): exclude
+                            # the forming 1H bar before calling get_trend.
+                            # Pre-fix the in-progress bar (which can repaint
+                            # at any tick) was included, so during the first
+                            # ~10 min of each H1 the trend could flip BULL↔BEAR
+                            # mid-cycle. Mirrors the [:-1] discipline used
+                            # everywhere else closed-only logic is required.
+                            _c1h_closes = _c1h_live.get("closes", []) if _c1h_live else []
+                            _c1h_closed_only = _c1h_closes[:-1] if len(_c1h_closes) > 1 else _c1h_closes
+                            _crt_trend_1h = get_trend(_c1h_closed_only) if _c1h_closed_only else "NEUTRAL"
+                            # Cache it back to STATE so other code paths
+                            # (e.g. dashboard, Telegram render) see the real
+                            # value too (was None / missing).
+                            STATE[token]["trend_1h"] = _crt_trend_1h
+                            # F-1 (2026-05-28): pass BTC 5M cache so SMT
+                            # divergence is computed for CRT signals (was
+                            # hardcoded NONE/False pre-fix).
+                            #
+                            # M10-2 fix (cycle-10 audit 2026-05-28): when
+                            # `token == 'BTC'` pass None — SMT divergence
+                            # against self is meaningless and produces
+                            # spurious confirmations. Mirrors the backtest
+                            # guard at backtest.py:3788.
+                            if token == "BTC":
+                                _btc_c5m_for_smt = None
+                            else:
+                                _btc_c5m_raw = (
+                                    STATE["BTC"]["candles"].get("5m", {})
+                                    if "BTC" in STATE
+                                       and STATE["BTC"]["candles"].get("5m", {}).get("highs")
+                                    else BTC_STATE.get("candles", {}).get("5m", {})
+                                )
+                                # CY12-BTC-CORR-KEY fix (full audit 2026-05-29
+                                # data-pipeline HIGH): fetch_binance_candles
+                                # returns dict keyed "timestamps" (plural).
+                                # Downstream BTC-correlation guard at line ~1143
+                                # checks `.get("times")` (singular). Pre-fix the
+                                # guard ALWAYS returned falsy → live T1.3
+                                # correlation overlay silently inert
+                                # (_btc_corr=None, _btc_corr_cls="UNKNOWN",
+                                # bonus=0.0). Zero impact today at
+                                # BTC_CORR_BONUS_PCT=0.0 but creates a
+                                # live↔backtest parity gap the moment the
+                                # explorer tunes the bonus non-zero. Mirror
+                                # _crt_closed_only's translation: add a "times"
+                                # alias pointing at the same list. NEW dict
+                                # (don't mutate shared STATE).
+                                if _btc_c5m_raw and "times" not in _btc_c5m_raw:
+                                    _btc_ts = _btc_c5m_raw.get("timestamps", [])
+                                    _btc_c5m_for_smt = dict(_btc_c5m_raw)
+                                    _btc_c5m_for_smt["times"] = list(_btc_ts)
+                                else:
+                                    _btc_c5m_for_smt = _btc_c5m_raw
+                            _crt_result, _crt_plan, _crt_reason = scan_h4_crt_for_token(
+                                token, _c5m_closed, _c4h_closed,
+                                consumed=STATE[token]["consumed_h4_crt"],
+                                trend_1h=_crt_trend_1h,
+                                btc_c5m=_btc_c5m_for_smt,
+                            )
+                            # [ACTIVITY] feed — plain-English per-token milestone print.
+                            # Tracker dashboard tails bot.log for "[ACTIVITY]" lines and
+                            # renders them in the Open Positions tab's live feed. Skip
+                            # the most common silent case ("no_setup") so the rolling
+                            # buffer fills with actionable events, not noise.
+                            if _crt_reason and _crt_reason != "no_setup":
+                                _act_msg = _crt_reason
+                                if _crt_reason == "outside_killzone":
+                                    _act_msg = "outside killzone (off-hours) — skipped"
+                                elif _crt_reason == "bias_gate_blocked":
+                                    _act_msg = f"setup found but 4H bias against direction — skipped"
+                                elif _crt_reason == "1h_trend_blocked":
+                                    _act_msg = "setup found but 1H trend against direction — skipped"
+                                elif _crt_reason == "no_post_mss_bar":
+                                    _act_msg = "trend shift at last 5M bar — waiting for next cycle"
+                                elif _crt_reason.startswith("economics_"):
+                                    _act_msg = f"setup found but risk/reward too weak ({_crt_reason[10:]}) — skipped"
+                                elif _crt_reason.startswith("wyckoff_"):
+                                    _act_msg = f"setup found but Wyckoff phase mismatch ({_crt_reason[8:]}) — skipped"
+                                elif _crt_reason == "blacklisted":
+                                    _act_msg = "token blacklisted from CRT — skipped"
+                                print(f"[ACTIVITY] {token}: {_act_msg}")
+                        if _crt_result is not None:
+                            # GAP-CRT-2 fix (cycle-9 audit 2026-05-28):
+                            # per-direction time cooldown. Mirrors the
+                            # 5M_SWEEP gate at line 2854. Pre-fix: 2 TON SELL
+                            # CRT signals fired 3 min apart (audit empirical
+                            # evidence) because CRT didn't consult
+                            # last_signal_times. Now matches the 30-min
+                            # default + per-token per-direction granularity.
+                            _crt_dir = _crt_result.get("signal")
+                            _crt_last_t = STATE[token]["last_signal_times"].get(_crt_dir)
+                            if _crt_last_t and (datetime.now(timezone.utc)
+                                                - _crt_last_t).total_seconds() / 60 < SIGNAL_COOLDOWN:
+                                print(f"[{datetime.now().strftime('%H:%M')}] "
+                                      f"{token} CRT {_crt_dir} cooldown active "
+                                      f"({SIGNAL_COOLDOWN}min from last) — skipping")
+                                print(f"[ACTIVITY] {token}: signal cooldown active "
+                                      f"({SIGNAL_COOLDOWN}min from last {_crt_dir}) — skipped")
+                                continue
+                            # H-1 fix (audit cycle-8 2026-05-27): apply the
+                            # SAME risk gates the 5M_SWEEP path enforces at
+                            # crypto_alert.py:2435 (kill switches) and
+                            # crypto_alert.py:2742 (portfolio risk layer).
+                            # Pre-fix: CRT signals bypassed BOTH gates →
+                            # daily-loss circuit breaker, per-symbol post-loss
+                            # cooldown, MAX_OPEN_POSITIONS, MAX_PORTFOLIO_RISK_PCT,
+                            # and correlation guard all SILENTLY ignored for CRT.
+                            # Silent in PAPER today; DANGEROUS the moment
+                            # template_live_allowed=1 is ever flipped for CRT.
+                            # Note: scan_h4_crt_for_token already added the
+                            # zone's `key` to consumed (crypto_alert.py:1027)
+                            # before returning result — so if these gates
+                            # reject, the zone is ALREADY mitigated and won't
+                            # re-fire on subsequent cycles.
+                            #
+                            # M-NEW-4 fix (cycle-9 audit 2026-05-28): also apply
+                            # the macro event gate. Pre-fix, the CRT path
+                            # never consulted MACRO_FILTER_ENABLED while the
+                            # 5M_SWEEP path did at crypto_alert.py:2578 —
+                            # FOMC/CPI/NFP windows would silently allow CRT
+                            # signals through. Backtest asymmetry is
+                            # intentional: backtest has no macro calendar
+                            # lookup yet — see docs/LIVE_BACKTEST_PARITY_ROADMAP.md.
+                            if MACRO_FILTER_ENABLED:
+                                _macro_in, _macro_name = _is_macro_window(
+                                    datetime.now(timezone.utc),
+                                    pre_hours=MACRO_PRE_WINDOW_H,
+                                    post_hours=MACRO_POST_WINDOW_H,
+                                )
+                                if _macro_in:
+                                    if MACRO_ADVISORY_ONLY:
+                                        print(f"[MACRO-ADVISORY] {token} CRT: near {_macro_name} — signal allowed (advisory mode)")
+                                        print(f"[ACTIVITY] {token}: macro event {_macro_name} nearby — signal allowed (advisory)")
+                                    else:
+                                        print(f"[MACRO-BLOCK] {token} CRT: blocked near {_macro_name}")
+                                        print(f"[ACTIVITY] {token}: macro event {_macro_name} nearby — signal blocked")
+                                        continue
+                            _crt_ks_ok, _crt_ks_reason = check_kill_switches(token)
+                            if not _crt_ks_ok:
+                                print(f"[{datetime.now().strftime('%H:%M')}] {token} CRT KILL SWITCH — {_crt_ks_reason}")
+                                print(f"[ACTIVITY] {token}: safety kill switch fired — {_crt_ks_reason}")
+                                continue
+                            _crt_port_ok, _crt_port_reason, _crt_port_warnings = portfolio_layer.check(
+                                token, _crt_result["signal"], RISK_PER_TRADE_PCT,
+                            )
+                            if not _crt_port_ok:
+                                print(f"[{datetime.now().strftime('%H:%M')}] {token} CRT {_crt_result['signal']} BLOCKED — {_crt_port_reason}")
+                                print(f"[ACTIVITY] {token}: portfolio risk gate blocked — {_crt_port_reason}")
+                                continue
+                            for _w in _crt_port_warnings:
+                                print(f"[{datetime.now().strftime('%H:%M')}] [PORTFOLIO WARN] {token}: {_w}")
+                            _crt_entry = _crt_result["entry_price"]
+                            # CY12-REGIME fix (post explorer audit 2026-05-29):
+                            # compute the real market regime BEFORE save_signal
+                            # so the persisted CRT row has proper RANGING /
+                            # TRENDING_BULL / TRENDING_BEAR / UNKNOWN classification.
+                            # Pre-fix, every CRT signal was tagged regime=UNKNOWN
+                            # at save time even though the M-CY11-1 fix had
+                            # already plumbed a real-regime computation below
+                            # (for Phase 5A only). Tracker's WIN RATE BY REGIME
+                            # panel + AI Recommendations regime slicer collapsed
+                            # all CRT into one bucket as a result. The compute
+                            # is now lifted above save_signal and the same value
+                            # is reused for Phase 5A — single source of truth.
+                            try:
+                                _crt_prior_drift = drift_detector.get_dynamic_thresholds(token)
+                                _crt_drift_adx_thr = _crt_prior_drift["adx_trend_threshold"]
+                                _crt_regime_full = get_regime_for_token(token, adx_trend=_crt_drift_adx_thr)
+                                _crt_regime_lbl = _crt_regime_full.get("regime", "UNKNOWN")
+                                _crt_regime_payload = {
+                                    "regime":     _crt_regime_lbl,
+                                    "adx":        _crt_regime_full.get("adx", 0),
+                                    "efficiency": _crt_regime_full.get("efficiency", 0),
+                                    "atr_ratio":  _crt_regime_full.get("atr_ratio", 0),
+                                    "confidence": _crt_regime_full.get("confidence", 0),
+                                }
+                            except Exception:
+                                _crt_regime_full = {}
+                                _crt_drift_adx_thr = 25.0
+                                _crt_regime_lbl = "UNKNOWN"
+                                _crt_regime_payload = {
+                                    "regime": "UNKNOWN", "adx": 0, "efficiency": 0,
+                                    "atr_ratio": 0, "confidence": 0,
+                                }
+                            _crt_sig_id = save_signal(
+                                token, _crt_entry,
+                                _crt_result, _crt_plan,
+                                _crt_regime_payload,
+                            )
+                            if _crt_sig_id < 0:
+                                print(f"[ERROR] {token} H4-CRT signal DB save failed — no Telegram sent")
+                            else:
+                                # GAP-CRT-2 fix (cycle-9 audit 2026-05-28):
+                                # update last_signal_times for cooldown so
+                                # the next scan respects the gate at
+                                # crypto_alert.py:~4180. Mirrors the
+                                # 5M_SWEEP write at line 3045.
+                                STATE[token]["last_signal_times"][_crt_dir] = datetime.now(timezone.utc)
+                                # Phase B (2026-05-28): CRT now has tier
+                                # classification, so the LIVE-block check
+                                # mirrors the 5M_SWEEP path's
+                                # template_live_allowed semantics. Tier A/B
+                                # carries live_allowed=1; Tier C is paper-only.
+                                # LIVE flip is still gated by EXECUTION_MODE
+                                # (operator's manual env switch) and N≥30
+                                # paper soak discipline.
+                                #
+                                # RISK-GAP-NEW-1 fix (cycle-10 audit
+                                # 2026-05-28): pre-fix CRT only read the
+                                # static template_live_allowed bit, BYPASSING
+                                # Phase 5A's INSUFFICIENT_SAMPLE /
+                                # CIRCUIT_BREAKER / DAILY_CAP gates that the
+                                # 5M_SWEEP path enforces at line 3238. Now
+                                # call evaluate_template_status() for CRT too
+                                # so a LIVE flip with 0 closed CRT trades
+                                # can't fire untested-tier signals.
+                                _tmpl_id  = _crt_result.get("matched_template_id", "NONE")
+                                # M-CY11-1 fix (audit 2026-05-28 cycle-11):
+                                # actual regime now computed BEFORE save_signal
+                                # by the CY12-REGIME fix (above) — Phase 5A
+                                # reuses the same value via _crt_regime_lbl,
+                                # single source of truth. Pre-CY12-REGIME this
+                                # block re-computed regime separately, leaving
+                                # the saved DB row at hardcoded UNKNOWN.
+                                try:
+                                    _conn_5a_crt = _connect()
+                                    _crt_tmpl_status, _crt_tmpl_live_ok, _crt_tmpl_block_reason = \
+                                        evaluate_template_status(_conn_5a_crt, _tmpl_id, _crt_regime_lbl)
+                                    _conn_5a_crt.close()
+                                except Exception as _e_5a_crt:
+                                    _crt_tmpl_status       = "UNKNOWN_TEMPLATE"
+                                    _crt_tmpl_live_ok      = False
+                                    _crt_tmpl_block_reason = f"Phase 5A eval exception: {_e_5a_crt}"
+                                print(f"[CRT-Phase5A] {token} {_crt_result['signal']} → {_tmpl_id} "
+                                      f"status={_crt_tmpl_status} live_ok={_crt_tmpl_live_ok}"
+                                      + (f" | {_crt_tmpl_block_reason}" if _crt_tmpl_block_reason else ""))
+                                if EXECUTION_MODE == "LIVE" and not _crt_tmpl_live_ok:
+                                    print(f"[CRT-Phase-B] LIVE BLOCK: {token} {_crt_result['signal']} "
+                                          f"template={_tmpl_id} status={_crt_tmpl_status} "
+                                          f"({_crt_tmpl_block_reason or 'paper-only'}) "
+                                          f"— signal saved (sig_id={_crt_sig_id}), no Telegram")
+                                else:
+                                    # CY12-REGIME-TG fix (full audit 2026-05-29):
+                                    # pre-fix the Telegram render was passed a
+                                    # hardcoded UNKNOWN even though save_signal
+                                    # received the real _crt_regime_payload —
+                                    # operator's alert message showed UNKNOWN
+                                    # while the DB had the correct regime. The
+                                    # audit (3 agents convergent) flagged this
+                                    # as the operator-visible defect of the
+                                    # CY12-REGIME fix. Now the alert renders
+                                    # whatever was persisted (RANGING /
+                                    # TRENDING_BULL / TRENDING_BEAR / CHOPPY /
+                                    # UNKNOWN per get_regime_for_token).
+                                    send_signal_msg(token, price, ch24, _crt_result,
+                                                    _crt_plan, _crt_sig_id,
+                                                    _crt_regime_payload)
+                                print(f"[CRT] EMIT {token} {_crt_result['signal']} "
+                                      f"tier={_tmpl_id} ({_crt_result['sr_type']}, "
+                                      f"conf={_crt_result['confidence']}) sig_id={_crt_sig_id}")
+                                print(f"[ACTIVITY] {token}: SIGNAL FIRED — "
+                                      f"{_crt_result['signal']} @ ${_crt_entry:.4f}, "
+                                      f"confidence {_crt_result['confidence']}/10, "
+                                      f"tier {_tmpl_id}")
+            # [ACTIVITY] per-cycle compact snapshot — all 10 tokens on one line.
+            # Replaces the always-empty "no setup" silence with a state-rich view.
+            # Format: TOKEN(1H/4H/zones)  where:
+            #   1H trend  — sBULL / BULL / NEUT / BEAR / sBEAR  (STATE[tok]["trend_1h"])
+            #   4H bias   — BULL / BEAR / NEUT (computed on-the-fly from cached candles)
+            #   zones     — consumed CRT mitigation set size (0 = no zones consumed)
+            # Computed at end of cycle when STATE has the latest values from BOTH
+            # scanners. Best-effort — never raises into the loop.
+            try:
+                _trend_short = {
+                    "STRONG_BULL": "sBULL", "BULL": "BULL", "NEUTRAL": "NEUT",
+                    "BEAR": "BEAR", "STRONG_BEAR": "sBEAR",
+                }
+                _bias_short = {"BULLISH": "BULL", "BEARISH": "BEAR", "NEUTRAL": "NEUT"}
+                _tok_parts = []
+                for _tok in BINANCE_TOKENS:
+                    _tr1h = STATE[_tok].get("trend_1h", "NEUTRAL")
+                    _tr1h_s = _trend_short.get(_tr1h, _tr1h[:5])
+                    # 4H bias from cached candles (mirror live's scan_h4_crt_for_token
+                    # 210-bar slice for live↔BT parity)
+                    _c4h_closes = STATE[_tok]["candles"].get("4h", {}).get("closes", [])
+                    if len(_c4h_closes) >= 200:
+                        _N = min(len(_c4h_closes), 210)
+                        _b4h = get_ict_4h_bias(
+                            _c4h_closes[-_N:],
+                            STATE[_tok]["candles"]["4h"]["highs"][-_N:],
+                            STATE[_tok]["candles"]["4h"]["lows"][-_N:],
+                        )
                     else:
-                        send_signal_msg(token,price,ch24,result,plan,sig_id,regime)
+                        _b4h = "NEUTRAL"
+                    _b4h_s = _bias_short.get(_b4h, _b4h[:4])
+                    _zones = len(STATE[_tok].get("consumed_h4_crt", set()))
+                    _tok_parts.append(f"{_tok}({_tr1h_s}/{_b4h_s}/{_zones})")
+                print(f"[ACTIVITY] Tokens: {' '.join(_tok_parts)}")
+            except Exception as _act_e:
+                # Snapshot is observability-only — never let it kill the cycle
+                print(f"[ACTIVITY] (snapshot failed: {_act_e})")
+
             elapsed=time.time()-start
             sleep_t=max(0,CHECK_INTERVAL-elapsed)
             save_scalar_state("last_cycle_ts", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
             # Phase A-2: snapshot in-process counters to disk so crash/restart
             # resumes with correct state. Best-effort — never raises into the loop.
+            # CRT v1 Session 3 (LBC-H-2 fix): serialize per-token consumed_h4_crt
+            # sets as lists of 3-element lists (JSON-safe — tuples and sets
+            # don't survive JSON round-trip). Rehydration on startup converts
+            # back to sets of tuples. Empty sets pruned to keep snapshot small.
+            _crt_state = {
+                t: [list(k) for k in STATE[t].get("consumed_h4_crt", set())]
+                for t in BINANCE_TOKENS
+                if STATE[t].get("consumed_h4_crt")
+            }
             _state_store.save({
                 "cycle": cycle,
                 "consecutive_errors": _consecutive_errors,
                 "last_heartbeat_ts": _last_heartbeat,
                 "last_cycle_ts_unix": time.time(),
                 "restart_count": _persisted.get("restart_count", 1),
+                "consumed_h4_crt": _crt_state,
             })
             print(f"[{datetime.now().strftime('%H:%M')}] Done {elapsed:.0f}s — sleep {sleep_t:.0f}s")
             # M-C fix: check shutdown flag between cycles; honor SIGTERM
@@ -3374,14 +5106,29 @@ def main():
             if _SHUTDOWN_REQUESTED:
                 print("[SHUTDOWN] SIGTERM received — exiting main loop cleanly.")
                 try:
-                    send_telegram("<b>TradeAI v13 STOPPED</b>\n\nSIGTERM received "
-                                  "(graceful shutdown — likely systemctl restart).")
+                    _now = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M') + ' UTC'
+                    send_telegram(
+                        "\U0001F6D1 <b>BOT STOPPED</b>\n"
+                        f"\n⏰ <b>Time:</b> {_h(_now)}"
+                        "\n\U0001F4DD <b>Reason:</b> Graceful shutdown (likely a systemctl restart)"
+                        "\n\n<i>Watchdog will alert if the bot doesn't come back within 5 min.</i>"
+                    )
                 except Exception:
                     pass
                 break
             time.sleep(sleep_t)
         except KeyboardInterrupt:
-            print("\n[STOPPED]"); send_telegram("<b>TradeAI v13 STOPPED</b>\n\nKeyboard interrupt received."); break
+            print("\n[STOPPED]")
+            try:
+                _now = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M') + ' UTC'
+                send_telegram(
+                    "\U0001F6D1 <b>BOT STOPPED</b>\n"
+                    f"\n⏰ <b>Time:</b> {_h(_now)}"
+                    "\n\U0001F4DD <b>Reason:</b> Keyboard interrupt (manual stop)"
+                )
+            except Exception:
+                pass
+            break
         except Exception as e:
             _consecutive_errors += 1
             print(f"[LOOP ERROR #{_consecutive_errors}] {e}")
@@ -3395,10 +5142,18 @@ def main():
                     "Bot is retrying. Investigate if this persists:\n"
                     "<code>journalctl -u tradeai -n 50</code>"
                 )
-            if _consecutive_errors >= 15:
+            # M-CY13-1 Resilience fix (audit cycle-13 2026-05-29): lowered
+            # break threshold from 15 → 8 consecutive errors. At 15× backoff
+            # (max 300s/cycle) the bot would silently degrade for up to
+            # ~75 minutes before stopping; systemd's Restart=always would
+            # then re-launch with fresh state. 8× backoff = ~30 min max,
+            # which preserves recovery from transient outages (a 15-min
+            # Binance hiccup recovers cleanly) but stops the broken process
+            # earlier so systemd can take over with a clean PID.
+            if _consecutive_errors >= 8:
                 send_telegram(
                     "<b>Bot CRITICAL  -  STOPPING</b>\n\n"
-                    "15 consecutive cycle failures. The bot has stopped.\n\n"
+                    "8 consecutive cycle failures. The bot has stopped.\n\n"
                     "Investigate before restarting:\n"
                     "<code>journalctl -u tradeai -n 100</code>"
                 )

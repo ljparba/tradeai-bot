@@ -656,7 +656,14 @@ def cpcv_summary(
     #
     # Reference: validation.py audit cross-ref entry C-NEW-1 in
     # docs/comprehensive/CROSS_REF.md.
-    n_oos_per_fold = max(1, int(n * n_test_groups / n_groups))
+    # M-CY13-1 Honest Metrics fix (audit cycle-13 2026-05-29): use round()
+    # instead of int() to track the true mean test-fold size more
+    # accurately. Pre-fix `int()` truncated 38.4 → 38 at n=96, biasing
+    # the PSR/DSR T-denominator slightly conservative. The bias was in
+    # the safe direction (under-stated T → over-stated SE → under-stated
+    # PSR), but the formula should match the estimator's source as
+    # closely as possible. Cycle-12 flagged this as M-CY12-8.
+    n_oos_per_fold = max(1, round(n * n_test_groups / n_groups))
     out["n_oos_per_fold"] = n_oos_per_fold
 
     # PSR (OOS CPCV) — uses per-fold T to match the sharpe_mean estimator.

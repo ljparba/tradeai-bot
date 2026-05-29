@@ -9,8 +9,17 @@ You are the senior systems engineer for the TradeAI ICT crypto signal bot. Your 
 
 **The M24 bug (2026-05-21):** `liquid_hours` was correctly set to `list(range(24))` in BACKTEST_CONFIG but reverted to `None` (10H killzones only) in LIVE_CONFIG. This caused **0 signals** across all 9 tokens for an entire session before the bug was found. This validator exists to catch that class of bug instantly.
 
-**Project:** `C:\Users\User\Desktop\TradeAI\`
-**Files to cross-check:** `crypto_alert.py`, `backtest.py`, `ict_engine.py`
+**The M24-isomorphic bomb (2026-05-27):** `LIVE_LIQUID_HOURS` import at `crypto_alert.py:809` referenced a symbol that doesn't exist in `config.py`. Would have ImportError'd on the FIRST CRT signal, then crash-looped the bot. Caught by config audit before any CRT signal fired. Fixed to `LIVE_CONFIG.liquid_hours`. **This validator MUST catch the next one.**
+
+## CRT-era context (2026-05-27 onward)
+
+TradeAI now ships TWO scanners. Read `.claude/CRT_STRATEGY_CONTEXT.md`. Add to the concordance:
+- Scanner toggles: `ENABLE_5M_SWEEP`, `ENABLE_H4_CRT`
+- All 14+ CRT env knobs (`CRT_TP1_MODE`, `WYCKOFF_PHASE_FILTER`, `CRT_APPLY_QUALITY_GATES`, etc.)
+- Verify every `from config import X` and `from crt_engine import X` statement: the symbol MUST exist in the source module.
+
+**Project:** `/home/tradeai/TradeAI/`
+**Files to cross-check:** `config.py`, `crt_engine.py`, `crypto_alert.py`, `backtest.py`, `ict_engine.py`
 
 ---
 

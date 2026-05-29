@@ -44,7 +44,17 @@ ICT_IFVG_PROXIMITY_PCT = 0.03  # iFVG midpoint must be within 3% of FVG midpoint
 DEALING_RANGE_LOOKBACK = _env_int("DEALING_RANGE_LOOKBACK", 50)  # 4H/1H bars to define active dealing range
 
 # Trade plan constants
-MIN_TP1_MULT         = 1.5    # Run #36: reverted 2.0→1.5 — 2.0R killed WR (18% vs 38%), 1.5R+24H untested
+# Cycle-12 explorer-axis (2026-05-29): env-overridable so Optuna can sweep
+# the RR floor for TP1 placement. Anti-pattern threshold is ≥2.0 (Run #36
+# empirical: 2.0R killed WR 18% vs 38%); explorer is locked to <2.0 via
+# CRT_ANTI_PATTERN_LOCKS. Default 1.5 preserves Run-1749 baseline EXACTLY.
+MIN_TP1_MULT         = _env_float("MIN_TP1_MULT", 1.5)
+# Defensive clamp — refuse to load with value ≥2.0 (anti-pattern). This
+# matches the explorer's lock; manual env overrides also can't violate.
+if MIN_TP1_MULT >= 2.0:
+    MIN_TP1_MULT = 1.5  # safe fallback on operator typo
+if MIN_TP1_MULT < 0.8:
+    MIN_TP1_MULT = 0.8  # safe floor — below 0.8 makes economics gate degenerate
 # Fix #37 (2026-05-22 cycle 11): MAX_SL_PCT / MIN_SL_PCT migrated to config.py
 # with env-var support. Imported here as module-level constants so all existing
 # `from ict_engine import MAX_SL_PCT` callers (crypto_alert.py:71, backtest.py:66)
@@ -67,11 +77,27 @@ TOKEN_RT_COST: dict = {
     "HBAR": 0.005,
 }
 MAX_BREAKEVEN_WR     = 0.60    # relaxed - ICT structural SLs are larger
-ICT_SL_BUFFER_PCT          = 0.003  # SL placed 0.3% beyond swept wick (structural buffer)
+# Cycle-12 explorer-axis (2026-05-29): env-overridable so Optuna can sweep
+# the SL buffer beyond the swept wick. Tighter = more SL hits but better RR;
+# looser = fewer SL hits but worse RR. Default 0.003 (0.3%) preserves Run-1749
+# baseline EXACTLY. Clamped to [0.0005, 0.010] = [0.05%, 1.0%].
+ICT_SL_BUFFER_PCT          = _env_float("ICT_SL_BUFFER_PCT", 0.003)
+if ICT_SL_BUFFER_PCT < 0.0005:
+    ICT_SL_BUFFER_PCT = 0.0005   # safe floor — too tight invalidates structural buffer
+if ICT_SL_BUFFER_PCT > 0.010:
+    ICT_SL_BUFFER_PCT = 0.010    # safe cap — too wide invalidates economics gate
 ICT_FVG_SIZE_BONUS_THRESHOLD = 0.003  # FVG must be ≥0.3% of price to earn confidence bonus
 ICT_SMT_LOOKBACK           = 8   # bars to scan backward for SMT sweep confirmation
 ICT_SMT_REF_HORIZON        = 40  # reference window (bars) to check BTC did not sweep
-ICT_MIN_RR_GATE            = 1.5 # minimum TP1 R:R gate — matches MIN_TP1_MULT floor
+# 2026-05-28 — env-overridable + lowered default 1.5 → 1.3 per operator decision
+# after cycle-9 H-NEW-3 fix cut CRT signal output from ~416 to ~95 (−77%).
+# Rationale: 1.5 was calibrated for 5M_SWEEP era (sparse signals, high per-signal
+# Sharpe). CRT is a higher-frequency scanner (~10-20× more candidate setups);
+# the 1.5 floor was rejecting marginal-but-defensible setups. Lowering to 1.3
+# admits setups where TP1 is 1.3× SL distance (still net-positive after fees
+# at MAX_BREAKEVEN_WR=0.60). Tuneable via env in case operator wants to push
+# back up. Anti-pattern: ≥ 2.0 catastrophic per CLAUDE.md §7.
+ICT_MIN_RR_GATE            = _env_float("ICT_MIN_RR_GATE", 1.3)
 
 def find_ict_swings(highs, lows, n=ICT_SWING_N):
     """Confirmed swing highs/lows with n-bar confirmation lag (non-repainting).
@@ -295,7 +321,7 @@ def detect_ict_mss(sweep_bar, closes, sh, sl, sweep_type, horizon=ICT_MSS_HORIZO
     return score_ict_mss(sweep_bar, closes, [], [], [], sh, sl, sweep_type, horizon)["confirmed"]
 
 
-def score_ict_fvg(d, highs, lows, opens=(), closes=()):
+def score_ict_fvg(d, highs, lows, opens=(), closes=(), max_post_d_bars=None):
     """Score Fair Value Gap quality on 3-bar pattern [d-1, d, d+1].
 
     Quality criteria (max 3 pts):
@@ -303,6 +329,13 @@ def score_ict_fvg(d, highs, lows, opens=(), closes=()):
       Body       — displacement bar body/range ≥ 0.65: 1 pt
       H4: Freshness removed — age was always 2-4 bars in normal signal flow,
           so it awarded +1 to every FVG and never discriminated quality.
+
+    L-NEW-1 fix (cycle-9 audit 2026-05-28): `max_post_d_bars` caps the
+    mitigation lookahead so the backtest CRT path (which can pass slices
+    extending up to ~35 bars past the FVG formation point) doesn't reject
+    FVGs that the LIVE path — only seeing closed bars up to "now" at signal
+    time — would have accepted. Default None preserves the pre-existing
+    no-cap behavior used by the live and 5M_SWEEP paths.
 
     quality: "HIGH" (3 pts = large gap + strong body)
              "MEDIUM" (2 pts = large gap only, or medium gap + strong body)
@@ -331,9 +364,12 @@ def score_ict_fvg(d, highs, lows, opens=(), closes=()):
     # to the midpoint of any gap within 30min (6 5M bars), eliminating nearly all FVGs.
     # "Mitigated" = gap no longer structurally exists; partial fills leave the gap intact.
     if len(closes) > d + 2:
-        if direction == "BUY" and any(closes[k] <= bottom for k in range(d + 2, len(closes))):
+        # L-NEW-1: bound the scan window with max_post_d_bars if caller specified one
+        _mit_end = (min(len(closes), d + 2 + max_post_d_bars)
+                    if max_post_d_bars is not None else len(closes))
+        if direction == "BUY" and any(closes[k] <= bottom for k in range(d + 2, _mit_end)):
             return None
-        if direction == "SELL" and any(closes[k] >= top for k in range(d + 2, len(closes))):
+        if direction == "SELL" and any(closes[k] >= top for k in range(d + 2, _mit_end)):
             return None
     size_pct = (top - bottom) / max(bottom, 1e-10) * 100
 
@@ -840,3 +876,131 @@ def compute_ict_trade_plan(price, signal, sweep_wick, sh_1h, sl_1h, extra_liq=No
         "tp2_target_type": tp2_label,
         "entry_note":f"ICT FVG retracement | SL below swept {sweep_wick:.5f}",
     }
+
+
+# ── Order Block detection (CRT v1 confluence — added 2026-05-27) ──────────
+# An ICT Order Block (OB) is the LAST opposite-direction candle immediately
+# preceding a strong displacement. It marks where institutions absorbed the
+# opposite-side flow before initiating the real move — and therefore where
+# they are likely to defend on a retest.
+#
+# Bullish OB:  last BEARISH candle (close < open) before a strong BULLISH
+#              displacement. Acts as a demand zone — price expected to bounce
+#              UP from this zone on retest.
+# Bearish OB:  last BULLISH candle (close > open) before a strong BEARISH
+#              displacement. Acts as a supply zone — price expected to reverse
+#              DOWN from this zone on retest.
+#
+# Used by crt_engine.py as a confluence filter alongside FVG: a CRT setup
+# qualifies for entry only if the C2 sweep wick (or the MSS bar) overlaps
+# with either a fresh FVG or a fresh OB. Per the Trading Wyckoff article,
+# the OB is the PRIMARY confluence (more significant than FVG alone) so
+# including it materially improves the CRT signal quality stack.
+# H-CRT-2 fix (cycle-7 audit 2026-05-27): raised from 0.5% → 1.5% because
+# 0.5% is well within H4 crypto ATR noise (~1-2%). Made env-overridable for
+# the explorer / Optuna tuning per the project's other env-knob convention
+# (cf. ict_engine.py:25, 27, 40, 44 — all env-overridable).
+ICT_OB_MIN_DISPLACEMENT_PCT = _env_float("ICT_OB_MIN_DISPLACEMENT_PCT", 0.015)
+ICT_OB_OPPOSITE_LOOKBACK    = _env_int("ICT_OB_OPPOSITE_LOOKBACK", 5)
+
+
+def detect_ict_order_block(opens, highs, lows, closes, lookback=20,
+                           min_disp_body_pct=ICT_OB_MIN_DISPLACEMENT_PCT,
+                           opposite_lookback=ICT_OB_OPPOSITE_LOOKBACK):
+    """Detect the most recent Order Block on the given candle stream.
+
+    Scans the last `lookback` bars (most recent first) for a strong
+    displacement candle, then walks back up to `opposite_lookback` bars to
+    find the last opposite-direction candle — that candle's range is the OB.
+
+    Args:
+        opens, highs, lows, closes: equal-length arrays of candle data
+        lookback:           bars from the end to scan for displacement (default 20)
+        min_disp_body_pct:  displacement body must be ≥ this fraction of price (default 0.5%)
+        opposite_lookback:  max bars before displacement to find opposite candle (default 5)
+
+    Returns:
+        dict with the OB metadata or None if no OB found within window.
+
+        {
+          "bar_idx":          int,    # index of the OB candle
+          "displacement_bar": int,    # index of the displacement candle
+          "displacement_pct": float,  # body magnitude as fraction of price
+          "top":              float,  # OB candle high (zone ceiling)
+          "bottom":           float,  # OB candle low (zone floor)
+          "mid":              float,  # midpoint of OB zone
+          "direction":        "BUY" | "SELL",  # which CRT direction the OB supports
+        }
+
+    A bullish OB (direction="BUY") supports BUY signals — its zone is a
+    demand block, so a BUY-side CRT whose sweep wick reaches this zone
+    has institutional defense backing the reversal.
+    """
+    n = len(closes)
+    if n < 2 or len(opens) != n or len(highs) != n or len(lows) != n:
+        return None
+    start = max(1, n - lookback)
+
+    # Walk backward from most recent candle looking for displacement
+    for i in range(n - 1, start - 1, -1):
+        price = closes[i]
+        if price <= 0:
+            continue
+        body = abs(closes[i] - opens[i])
+        if body / price < min_disp_body_pct:
+            continue
+
+        is_bullish_disp = closes[i] > opens[i]
+        is_bearish_disp = closes[i] < opens[i]
+
+        # Walk back to find last opposite-direction candle.
+        # H-CRT-3 fix (cycle-7 audit 2026-05-27): previously broke out of the
+        # loop on any same-direction candle, which discarded the real OB
+        # whenever a displacement leg spanned more than one bar (e.g.
+        # bullish_disp ← bullish ← bullish ← bearish OB ← ...). Per ICT
+        # methodology, the OB is the LAST opposite candle BEFORE the move
+        # leg began — walking through impulse bars in the same direction is
+        # normal. The cap at `opposite_lookback` already bounds the search.
+        opp_start = max(0, i - opposite_lookback)
+        for j in range(i - 1, opp_start - 1, -1):
+            j_bullish = closes[j] > opens[j]
+            j_bearish = closes[j] < opens[j]
+
+            if is_bullish_disp and j_bearish:
+                # Bullish OB — last bearish candle before bullish move
+                return {
+                    "bar_idx":          j,
+                    "displacement_bar": i,
+                    "displacement_pct": round(body / price, 4),
+                    "top":              round(highs[j], 6),
+                    "bottom":           round(lows[j], 6),
+                    "mid":              round((highs[j] + lows[j]) / 2, 6),
+                    "direction":        "BUY",
+                }
+            if is_bearish_disp and j_bullish:
+                # Bearish OB — last bullish candle before bearish move
+                return {
+                    "bar_idx":          j,
+                    "displacement_bar": i,
+                    "displacement_pct": round(body / price, 4),
+                    "top":              round(highs[j], 6),
+                    "bottom":           round(lows[j], 6),
+                    "mid":              round((highs[j] + lows[j]) / 2, 6),
+                    "direction":        "SELL",
+                }
+            # Continue walking through same-direction candles — they are
+            # part of the displacement leg, not a reason to abort. Doji
+            # candles (close == open) also continue the search.
+
+    return None
+
+
+def order_block_overlaps_range(ob, range_high, range_low):
+    """True if the OB zone [bottom, top] overlaps the given price range.
+
+    Used by crt_engine.py to confirm OB confluence with a CRT C1 range or
+    the MSS bar's high/low envelope.
+    """
+    if ob is None:
+        return False
+    return not (ob["bottom"] > range_high or ob["top"] < range_low)

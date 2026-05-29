@@ -2,23 +2,21 @@
 
 > **Signal-only.** Sends BUY / SELL alerts to Telegram. No order execution — the operator places every trade manually.
 
-A directional crypto signal bot built on Inner Circle Trader (ICT) methodology. Detects liquidity sweeps, market structure shifts, fair value gaps, dealing ranges, and killzone timing on the 5-minute chart across 10 large-cap tokens. Every signal is validated through a statistical backtest engine using Combinatorial Purged k-Fold cross-validation (CPCV) and the Deflated Sharpe Ratio (Bailey & López de Prado 2014). Online Gradient Descent (OGD) per-token weights adapt the scoring on every closed paper trade.
+A directional crypto signal bot built on Inner Circle Trader (ICT) methodology. Ships **two parallel detection engines**: a 5-minute liquidity-sweep scanner and an H4 Candle Range Theory (CRT) scanner, each independently switchable. Detects liquidity sweeps, market structure shifts, fair value gaps, order blocks, Wyckoff context, optimal-trade-entry retracement zones, and killzone session timing across 10 large-cap tokens. Every signal is validated through a 365-day backtest engine using Combinatorial Purged k-Fold cross-validation and the Deflated Sharpe Ratio (Bailey & López de Prado 2014). Online Gradient Descent per-token weights adapt the scoring on every closed paper trade. Funding-rate divergence and rolling BTC-correlation overlays modulate signal confidence.
 
 ---
 
-## Current State (2026-05-27)
+## Current State
 
 | Item | Value |
 |---|---|
 | Execution mode | `PAPER` — 24/7 on Contabo VPS Singapore |
-| Canonical baseline | **Run-81** (Phase B reverted; DR gate OFF both sides) |
-| Baseline metrics | n=35, CPCV mean WR 70.0%, std 7.93%, q05 53.3%, Sharpe 1.007, **DSR 98.7%** (honest cross-config) |
-| LIVE-clearance gate | CPCV WR ≥ 60% **AND** DSR ≥ 95% **AND** 30 closed paper signals |
-| Current paper signals closed | 0 / 30 — the only remaining blocker |
-| Cycle-7 audit score | 9.30 / 10 (all-time peak) |
-| Test coverage | 444 passing across 19 test modules |
+| Active scanner | CRT-only paper soak (5M_SWEEP scanner available but disabled) |
+| Statistical clearance for LIVE | CPCV mean WR ≥ 60% **AND** Deflated Sharpe ≥ 95% **AND** 30 closed paper signals |
+| Test coverage | 570+ passing tests across 24 modules |
+| Hosting | Contabo Cloud VPS 10 Singapore (4 vCPU, 8 GB RAM, Ubuntu 24.04) |
 
-**LIVE switch never auto-flips.** Requires explicit `EXECUTION_MODE=LIVE` + `LIVE_MODE_CONFIRMED=YES` env vars set by the operator.
+**The LIVE switch never auto-flips.** It requires explicit `EXECUTION_MODE=LIVE` + `LIVE_MODE_CONFIRMED=YES` environment variables set by the operator, plus a non-default `YOUR_CAPITAL` value. The bot is signal-only — there is no order-execution code path anywhere in the codebase.
 
 ---
 
@@ -44,18 +42,21 @@ Rejected after documented underperformance (do not re-propose): SOL, DOT, NEAR, 
 
 | File | Role |
 |---|---|
-| `crypto_alert.py` | Main signal bot — 5-minute scan loop, Telegram dispatch, paper-trade lifecycle |
-| `ict_engine.py` | ICT detection — sweeps, MSS, FVG, dealing range, iFVG, SMT divergence, trade plan |
-| `strategy_engine.py` | Shared gate engine consuming `LIVE_CONFIG` / `BACKTEST_CONFIG` |
-| `strategy_templates.py` | ICT variant templates (Tier A / B / C classification) |
-| `adaptive_engine.py` | OGD weight engine, EV scoring, drift detection, portfolio risk layer |
-| `backtest.py` | 365-day backtesting engine with multi-template harness + checkpoint resume |
-| `validation.py` | CPCV + PSR + DSR (Bailey & López de Prado 2014) — honest metrics workhorse |
-| `walk_forward.py` | Walk-forward validation + held-out lockbox + Phase D.1 dual-track WFV-with-OGD |
-| `labeling.py` | Triple-barrier labels + bootstrap CI (López de Prado AFML 2018) |
+| `crypto_alert.py` | Main signal bot — scan loop, Telegram dispatch, paper-trade lifecycle, BTC macro filter, live activity feed |
+| `crt_engine.py` | H4 Candle Range Theory detector — range sweep + 5M structure confirmation + fair-value-gap or order-block confluence + Wyckoff phase tagging |
+| `ict_engine.py` | ICT primitives — sweeps, market structure shifts, fair value gaps, dealing range, inverse FVG, SMT divergence, OTE overlay, equal-highs/lows clustering, trade plan |
+| `strategy_engine.py` | Shared gate engine consuming live and backtest configs |
+| `strategy_templates.py` | Signal quality templates (Tier A / B / C classification with per-direction calibration) |
+| `adaptive_engine.py` | Per-token weight engine, expected-value scoring, drift detection, portfolio risk layer, statistical-validity-aware learning rate |
+| `funding_rate_client.py` | 8-hour funding-rate overlay — live and historical Binance perpetual data, confidence bonus on extreme readings |
+| `btc_correlation.py` | Rolling Pearson correlation between BTC and token 5-minute log-returns, confidence bonus on alignment |
+| `backtest.py` | 365-day backtest engine with multi-template harness, checkpoint resume, both scanner paths |
+| `validation.py` | CPCV + PSR + Deflated Sharpe Ratio (López de Prado 2018, Bailey & LdP 2014) — honest metrics workhorse |
+| `walk_forward.py` | Walk-forward validation + held-out lockbox + dual-track parity quantification |
+| `labeling.py` | Triple-barrier labels + bootstrap confidence intervals (López de Prado AFML 2018) |
 | `indicators.py` | RSI, ATR, ADX, Bollinger, candle structure helpers |
-| `config.py` | Single source of truth for all tunables + env-var overrides |
-| `tracker.py` / `tracker_html.py` | Web dashboard server + frontend (single-file HTML/JS template) |
+| `config.py` | Single source of truth for all tunables + environment-variable overrides |
+| `tracker.py` / `tracker_html.py` | Web dashboard server + single-file HTML/JS frontend with Reports tab, AI Intelligence panel, adaptive weights view, and live activity feed |
 
 ### Operational resilience
 
@@ -85,7 +86,9 @@ Rejected after documented underperformance (do not re-propose): SOL, DOT, NEAR, 
 
 ## Signal Pipeline
 
-Each 5-minute cycle runs through a fixed sequence. Any single failure short-circuits the rest.
+Two parallel scanners run independently per cycle, each gated by its own kill switch. Any single gate failure short-circuits the rest within that scanner.
+
+### 5M_SWEEP scanner (canonical, currently DISABLED)
 
 ```
  1. Fetch OHLCV       — 5M / 1H / 4H candles (Binance REST)
@@ -105,7 +108,36 @@ Each 5-minute cycle runs through a fixed sequence. Any single failure short-circ
 15. Confidence floor  — signal blocked if below dynamic floor
 ```
 
-See `crypto_alert.py:scan_token()` for the canonical implementation.
+See `crypto_alert.py:generate_signal()` for the canonical 5M_SWEEP implementation.
+
+### H4_CRT scanner (active in current paper soak)
+
+```
+ 1. Fetch OHLCV          — 5M / 4H candles (with stale + gap guards)
+ 2. C1 candidate         — H4 reference candle within the lookback window
+ 3. C2 sweep              — C2 wicks beyond C1's high or low
+ 4. Mitigation check     — consumed-zone pruning (re-eligibility TTL)
+ 5. 5M structure shift   — confirmation within the MSS horizon
+ 6. FVG or order block   — confluence at C1's swept-extreme half
+ 7. Killzone session     — liquid-hours filter
+ 8. 4H bias gate         — higher-timeframe directional alignment
+ 9. 1H trend gate        — intermediate trend confirmation (optional)
+10. Wyckoff context      — phase tag (informational by default)
+11. Trade economics      — SL / TP1 / TP2 / TP3 cascade + min RR
+12. Funding overlay      — confidence bonus on extreme funding rates
+13. BTC correlation      — confidence bonus on aligned BTC log-returns
+14. EQH/EQL cluster tag  — equal-highs/lows liquidity-pool annotation
+15. OTE retracement tag  — optimal-trade-entry Fibonacci zone (62-79%)
+16. Template tier        — Tier A (premium) / Tier B / Tier C classification
+17. Per-token cooldown   — 40 min per direction
+18. Macro filter         — FOMC / CPI / NFP window check
+19. Kill switches        — daily loss, weekly loss, consecutive losses
+20. Portfolio gate       — max open positions, risk cap, correlation guard
+21. Regime classification — live market regime stored with the signal
+22. Telegram dispatch    — multi-channel alerter with SMTP fallback
+```
+
+The shared CRT detection engine is identical between live and backtest paths, so backtest results are predictive of live behavior.
 
 ---
 
@@ -135,28 +167,28 @@ Online Gradient Descent updates six feature weights per token on every closed pa
 
 Weights are persisted to `data/signals.db` (`token_weights` table) and survive restarts. Backtest history warm-starts weights via a separate isolated table (`backtest_token_weights`) — backtest writes never contaminate the live weight pool (H6 isolation).
 
-### Layer 2 — R1–R10 master adaptive sweep (2026-05-26)
+### Layer 2 — Safety + observability
 
-| Ref | Component |
+| Component | Description |
 |---|---|
-| R1 | DSR-aware learning gate — `_dsr_gate_lr_scale()` downscales LR when latest CPCV verdict is FAIL or MARGINAL-without-DSR-correction |
-| R2 | Soft warmup ramp — continuous LR from n=3 to n=10 (no n=10 cliff) |
-| R3 | Bootstrap env gate — `BOOTSTRAP_AFTER_RUN=0` opt-out for non-canonical backtests |
-| R4 | `weight_history` forensic columns: `reward`, `gradient_l1`, `profit_pct`, `regime`, `run_id` |
-| R5 | Daily monitor systemd timer + Telegram CRIT alert |
-| R6 | Event-driven decay — `apply_decay_if_due()` (replaces fixed-cadence cron) |
-| R7 | Regime labeling — observation-only, not conditioning |
-| R8 | Reward magnitude alert — \|reward\| > 1.2 → Telegram |
-| R9 | Learning-freeze predicate — shadow mode default, gates active under 3 trigger conditions |
-| R10 | Per-token forensic dashboard panel — full weight matrix with badges |
+| Statistical-validity learning gate | Downscales the learning rate when the latest cross-validation verdict is FAIL or unverified-MARGINAL |
+| Soft warmup ramp | Continuous learning-rate ramp from first sample to full-rate (no cliff transitions) |
+| Bootstrap isolation | Backtest weight writes are gated by an explicit opt-in so non-canonical runs never contaminate the live weight pool |
+| Forensic weight history | Every update logs reward, gradient magnitude, profit percentage, regime, and source run for retrospective analysis |
+| Daily weight monitor | Sidecar checks for degeneracy, floor-pinning, entropy collapse — escalates via Telegram alert |
+| Event-driven decay | Weight decay fires per-token on scan activity rather than a fixed cron — survives bot restarts cleanly |
+| Regime tagging | Market regime is stored with each signal for retrospective slicing without affecting acceptance |
+| Reward magnitude alert | Large reward magnitudes (potential unit-violation guards) fire Telegram alerts |
+| Learning-freeze predicate | Three trigger conditions (consecutive losses, validity-fail streak, gradient spike) freeze learning in shadow mode by default |
+| Per-token dashboard panel | Full weight matrix with badges for warm-start, live, degenerate, or floor-pinned states |
 
 ### Layer 3 — Tune Bot (operator-driven gate tuning)
 
 Analyzes backtest with 60/40 train/test walk-forward split. Proposes changes to `strategy_engine.py LIVE_CONFIG` only when a finding holds in **both** halves. Guards: frequency gate (50 new signals OR 14 days), Wilson CI overlap check, max 2 APPLIED entries, walk-forward gap warning (>15pp = overfitting risk). Post-apply WR verdict (`VERIFIED_BETTER` / `VERIFIED_WORSE`) fires Telegram alert.
 
-### Phase D.1 dual-track WFV-with-OGD (parity quantification)
+### Layer 3 — Live/backtest parity simulation
 
-`walk_forward.py:walk_forward_with_ogd()` runs a sandboxed `AdaptiveWeightEngine` per backtest. Simulates what the live OGD trajectory would look like if learning had been active — used for engineering validation of new adaptive features without waiting for real paper closes. Does not persist state or affect verdicts.
+A sandboxed copy of the adaptive engine runs alongside the canonical backtest to simulate what the live learning trajectory would look like if the engine had been active across the full historical window. This is engineering-only — it does not persist state or affect production decisions, but it lets new adaptive features be validated without waiting for months of real paper closes.
 
 ---
 
@@ -194,11 +226,11 @@ A standing background Bayesian search built in four phases (`scripts/autonomous_
 - Auto-promote writes `baseline_pin.json` + `tune_history` only — does not toggle anything else.
 - Reproducibility required: two backtests with matching `config_hash` and ±0.5pp `cpcv_mean` tolerance.
 - 2 auto-promotes per UTC day cap. 24-hour soak between promotions.
-- Explorer trials skip the bootstrap weight write (`BOOTSTRAP_AFTER_RUN=0`) — never contaminate the live OGD pool.
-- Explorer trials skip the CPCV verdict write (`WRITE_CPCV_VERDICT=0`) — never pollute the R1 DSR gate.
-- Anti-pattern locks asserted at session start: `ICT_SWING_N=2`, `ICT_MIN_RR_GATE=1.5`.
+- Explorer trials skip the bootstrap weight write — never contaminate the live learning pool.
+- Explorer trials skip the cross-validation verdict write — never pollute the live learning-rate gate.
+- Anti-pattern locks asserted at session start prevent re-testing parameter regions empirically shown to be net-harmful.
 
-### Objective function (cycle-7)
+### Objective function
 
 Optuna maximizes `cpcv_mean + alpha * log(max(1, n))` where alpha is set via `EXPLORER_N_BONUS_ALPHA` (default 2.0). Bigger alpha biases the search toward higher-frequency configs at the cost of marginal WR — the LIVE-clearance gate requires 30 closed paper signals, so frequency is operationally as important as WR.
 
@@ -206,17 +238,17 @@ Error / timeout trials return `-100.0` sentinel — strictly below the worst val
 
 ---
 
-## ICT Strategy Variant Templates
+## Signal Quality Templates
 
-Defined in `strategy_templates.py`.
+Defined in `strategy_templates.py`. Each signal is classified into one of three tiers based on confluence quality and direction calibration. Empirical paper data drives the tier definitions — they evolve as the live cohort accumulates.
 
 | Tier | Live execution | Daily cap | Description |
 |---|---|---|---|
-| A | After 50 closed live signals | 3 per day | Highest-confluence ICT setups |
-| B | After 50 closed live signals | 2 per day | Standard ICT setups |
-| C | Paper only | 0 | Experimental — never live |
+| A | After 50 closed live signals | 3 per day | Premium-confluence setups (currently SELL-direction only per empirical calibration) |
+| B | After 50 closed live signals | 2 per day | High-quality fair-value-gap or order-block confluence with strong structure-shift |
+| C | Paper only | 0 | Catchall for signals that don't meet the higher tiers — observed only, never live |
 
-Circuit breaker pauses a template if rolling WR drops below 55% over 20 signals. RANGING regime blocks Tier B / NONE templates.
+A circuit breaker pauses any template if its rolling win rate drops below 55% over 20 signals. Range-bound regimes block the order-block-confluence templates because order-block reactions are empirically weakest in choppy markets.
 
 ---
 
@@ -224,12 +256,17 @@ Circuit breaker pauses a template if rolling WR drops below 55% over 20 signals.
 
 | Control | Value | Notes |
 |---|---|---|
-| Risk per trade | 1% of capital | Position size scales with SL distance |
+| Risk per trade | 1% of capital | Position size scales with stop-loss distance, capped at 20% notional |
 | Max open positions | 4 (live) / unlimited (paper) | Portfolio-level cap |
-| Daily loss limit | 3% of capital | Kill switch active in both PAPER and LIVE |
-| Weekly loss limit | 8% of capital | Kill switch active in both PAPER and LIVE |
-| Max consecutive losses | Configurable | Kill switch on breach |
-| Drawdown gate | Configurable | Blocks new signals during drawdown |
+| Daily loss limit | 3% of capital and 3-trade count | Dual-gate kill switch (percentage AND count) |
+| Weekly loss limit | 6% of capital | Kill switch active in both PAPER and LIVE |
+| Max consecutive losses | 3 | Kill switch on breach |
+| Total drawdown | 10% LIVE / 20% PAPER | Computed via full equity-curve replay |
+| Per-symbol cooldown | 2 hours after a stop-loss hit | Per-token post-loss pause |
+| Correlation guard | Block third same-direction correlated position | Prevents stacked exposure during BTC-led moves |
+| Template safety gates | Insufficient-sample, circuit-breaker, daily-cap, ranging-regime block | Enforced before any live alert |
+| Adaptive learning throttle | Conservative scaling when statistical validity is stale | Protects OGD from drifting away from a confirmed baseline |
+| Execution-mode triple-lock | Three independent environment variables required for LIVE | Bot refuses to start LIVE otherwise |
 
 ---
 
@@ -335,7 +372,7 @@ Switching to LIVE requires two explicit steps: set `EXECUTION_MODE=LIVE` in `.en
 |---|---|
 | Overview | Open paper positions, TP progress, live aggregate stats (WR, total signals, P&L) |
 | Signal History | All signals with filters, sorting, pagination, per-signal forensic detail |
-| AI Intelligence | Bot health score, per-token OGD weight matrix (R10 panel), drift baselines, adaptive learning state |
+| AI Intelligence | Bot health score, per-token adaptive weight matrix, drift baselines, learning state |
 | Backtest | Run history, template performance report, Tune Bot panel, Tune History with rollback, honest-metrics summary |
 | Auto-Explorer | Live explorer session state, Pareto archive top-10, promotion log, trial digest |
 
@@ -354,7 +391,7 @@ TradeAI/
 ├── adaptive_engine.py         OGD weights, EV, drift, portfolio risk
 ├── backtest.py                Backtest engine + checkpoint resume
 ├── validation.py              CPCV + PSR + DSR
-├── walk_forward.py            Walk-forward + held-out + Phase D.1 dual-track
+├── walk_forward.py            Walk-forward validation + held-out lockbox + parity simulation
 ├── labeling.py                Triple-barrier labels + bootstrap CI
 ├── monitoring.py              OGD weight monitor (read-only)
 ├── tracker.py                 Dashboard API server
@@ -429,41 +466,45 @@ The project uses a multi-agent review system via Claude Code. Operator-invocable
 
 Specialist agents cover: ICT logic, backtest bias, live/backtest consistency, risk management, data pipeline, adaptive learning, OGD weights, template tier calibration, signal performance, honest metrics, operational resilience, config consistency.
 
-Periodic audits produce a unified 10/10 scorecard. Current state: **9.30 / 10** (cycle-7, 2026-05-27 — all-time peak). See `.claude/reports/tradeai-audit/` for the full history.
+Periodic audits produce a unified scorecard across eleven engineering dimensions: ICT logic, live/backtest consistency, risk management, backtest validity, adaptive learning, weight quality, template calibration, data pipeline, honest metrics, operational resilience, and configuration consistency.
 
 ---
 
 ## Roadmap
 
-| Phase | Status | Description |
+| Component | Status | Description |
 |---|---|---|
-| ICT signal pipeline (I-1 → I-5A) | Complete | Sweep, MSS, FVG, DR, iFVG, SMT, trade plan, template registry, backtest harness |
-| Sprint 1 — Operational resilience | Complete | Heartbeat, watchdog, atomic state store, backtest checkpoint |
-| Sprint 2 — Config + statistical foundation | Complete | `config.py` SSoT, secrets loader, triple-barrier labels, CI regression gate |
-| Sprint 3 — Honest metrics + observability | Complete | CPCV + PSR + DSR, OGD weight monitor, macro event filter |
-| Phase A — Realistic execution model | Complete | Fees, slippage, partial fill model (REALISTIC_EXECUTION=1) |
-| Phase B — DR gate parity | Reverted (KNOWN STRUCTURAL) | D2 diagnostic revealed gate killed 98.5% of signals — reverted to OFF both sides |
-| Phase C — Held-out lockbox | Complete | One-shot final validation gate (`HELD_OUT_DAYS` configurable) |
-| Phase D.1 — Dual-track WFV-with-OGD | Complete | Live↔backtest parity quantification via sandboxed AdaptiveWeightEngine |
-| Autonomous explorer (Phases 1-4) | Complete | Optuna search, anti-overfit guard, auto-promote, dashboard |
-| R1–R10 master adaptive sweep | Complete | DSR gate, warmup ramp, forensic cols, regime labels, freeze predicate, dashboard |
-| ICT I-5B / I-6 per-template OGD | Data-gated | Needs N ≥ 30 closed live signals per template |
-| Paper signal accumulation | In progress | 0 / 30 closed — only remaining LIVE-clearance blocker |
+| ICT signal pipeline | Complete | Sweep, market structure shift, fair value gap, dealing range, inverse FVG, SMT, trade plan, template registry, backtest harness |
+| H4 Candle Range Theory scanner | Complete | Independent second scanner with shared backtest path; per-direction template calibration |
+| Operational resilience | Complete | Heartbeat, watchdog, atomic state store, backtest checkpoint, multi-channel alerter with SMTP fallback |
+| Configuration foundation | Complete | Single-source-of-truth config, secrets loader, environment-variable overrides, schema-parity tests |
+| Honest metrics | Complete | CPCV + PSR + Deflated Sharpe Ratio, weight-quality monitor, macro-event filter |
+| Realistic execution model | Complete | Fees, slippage, limit-order fillability tracking |
+| Held-out lockbox | Complete | One-shot final-validation gate for promotion candidates |
+| Live/backtest parity simulation | Complete | Sandboxed adaptive engine quantifies how live learning would have evolved across the historical window |
+| Autonomous explorer | Complete | Optuna Bayesian search, anti-overfit guard, auto-promotion gate, dashboard panel |
+| Adaptive learning safety + observability | Complete | Statistical-validity-aware learning rate, soft warmup ramp, forensic logging, daily monitor |
+| Funding-rate divergence overlay | Complete | Live and historical Binance perpetual funding-rate data feeds confidence bonus |
+| BTC correlation overlay | Complete | Rolling Pearson correlation modulates confidence on aligned vs divergent moves |
+| Per-template adaptive weights | Pending closed-signal threshold | Requires sufficient closed live signals per template before activation |
+| Paper signal accumulation | In progress | Statistical-clearance gate ahead of any LIVE consideration |
 
-The remaining blocker is operator patience plus explorer-discovered higher-frequency configs. Current baseline produces ~2.88 signals / month; reaching 30 closed signals at that rate takes ~10 months. Explorer sessions are tuned to find higher-frequency configs that pass the honest-metrics gates.
+The remaining gate to LIVE is statistical: the system needs enough closed paper signals to clear the Deflated Sharpe Ratio threshold. Explorer sessions search for higher-frequency parameter configurations that preserve win rate, shortening the soak window.
 
 ---
 
-## Confirmed Anti-Patterns (Do Not Re-Test)
+## Confirmed Anti-Patterns
 
-Documented in `docs/comprehensive/CROSS_REF.md`. Burned testing each.
+Parameter regions empirically shown to be net-harmful — locked at the explorer level so future tuning cannot drift back into them.
 
-- `ICT_SWING_N ≥ 3` — −3.9pp WR / −0.07 Sharpe
-- `ICT_MIN_RR_GATE ≥ 2.0` — catastrophic (n=10, WR=50%)
-- `BACKTEST_FVG_MIN_QUALITY = LOW` or `MEDIUM` — coin-flip WR (~44%)
-- `BACKTEST_DAYS = 730` — averages the 2024 dead-zone (Cycle Z)
-- Adding SOL / DOT / NEAR / SUI / LTC — chronic underperformers
-- `vectorbt` library — rejected (would break live↔backtest parity)
+- Looser swing-detection threshold — degrades win rate and Sharpe
+- Aggressive minimum risk/reward gate — catastrophically thins the signal pool with no quality compensation
+- Lower fair-value-gap quality bars — collapses win rate to coin-flip territory
+- Wider backtest window that includes regime-degraded periods — averages the live edge away
+- Adding tokens shown to chronically underperform on this strategy
+- Strict Wyckoff phase filter on crypto — calibrated for gold/forex, empirically harms crypto win rate
+- Universal high-mass-quality gating across both directions — destroys the BUY-side signal pool under current TP geometry
+- Backtest-internal library shortcuts that would break live/backtest parity
 
 ---
 
@@ -473,7 +514,7 @@ Documented in `docs/comprehensive/CROSS_REF.md`. Burned testing each.
 - All Telegram tokens loaded via `.env` only — the bot refuses to start if `TELEGRAM_TOKEN` is missing.
 - After any code change that affects `strategy_engine.py` gate logic, **restart the bot** for the new config to load.
 - Backtest validity requires a full re-run after any change to signal-generation parameters — old runs are stale.
-- The `bot_state.latest_cpcv_verdict` is gated by `WRITE_CPCV_VERDICT=1` (default for manual backtests, =0 for explorer trials) — only canonical backtests overwrite the R1 DSR gate input.
+- The persisted cross-validation verdict is gated by an explicit opt-in environment variable (default-on for manual backtests, default-off for explorer trials) so only canonical backtests overwrite the live learning-rate-gate input.
 
 ---
 

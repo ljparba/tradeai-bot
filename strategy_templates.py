@@ -17,6 +17,8 @@ __all__ = [
     "TemplateMatch",
     "TEMPLATE_REGISTRY",
     "evaluate_confluences_vs_templates",
+    "evaluate_crt_templates",          # Phase B — CRT tier classifier (2026-05-28)
+    "CRT_TEMPLATE_IDS",                # Phase B — registered CRT template IDs
     "seed_templates_table",
     "validate_tier_hierarchy",
 ]
@@ -88,7 +90,72 @@ TEMPLATE_REGISTRY = [
                         "Paper/backtest only — not permitted in live trading."),
         "live_allowed": 0,
     },
+    # ── Phase B (2026-05-28) — CRT-specific tier templates ──────────────────
+    # CRT signals are H4 candle range theory: H4 sweep + 5M MSS confirmation +
+    # (FVG OR OB) confluence + Wyckoff phase tag. The 5M_SWEEP templates above
+    # don't apply (different feature semantics — CRT has no killzone constraint,
+    # no DR_LOCATION discipline, and uses confluence_type instead of FVG_QUALITY
+    # as the discriminator). The cycle-9 audit empirically identified FVG-vs-OB
+    # as the +14.6pp WR axis — these templates encode that axis.
+    {
+        "id":          "CRT_A_FVG_ALIGNED",
+        "name":        "CRT Tier A — FVG + MSS=HIGH",
+        "tier":        "A",
+        # T-1 fix (cycle-10 audit 2026-05-28): tightened MSS bar from
+        # ≥MEDIUM to ==HIGH after full-population analysis (n=1945)
+        # showed Tier A under ≥MEDIUM produced 63.9% WR while ==HIGH
+        # yields 72.5% WR (n=80, Wilson CI [61.9%, 81.1%]) — statistically
+        # separated top tier.
+        "description": ("FVG confluence + MSS=HIGH. Highest-quality CRT setup, "
+                        "Wilson-CI-separated from B/C at full-population n=1945."),
+        "live_allowed": 1,
+    },
+    {
+        "id":          "CRT_B_OB_HIGH_MSS",
+        "name":        "CRT Tier B — OB + MSS≥MEDIUM",
+        "tier":        "B",
+        # T-2 fix (cycle-10 audit 2026-05-28): flipped MSS bar from HIGH
+        # to ≥MEDIUM after full-population analysis (n=1945) showed
+        # OB+MSS=HIGH produced 51.0% WR — the WORST tier, inverting the
+        # expected A>B>C ordering — while OB+MSS=MEDIUM produced 56.9% WR.
+        # Template ID retained for back-compat with historical signals.
+        "description": ("OB confluence + MSS≥MEDIUM. Mid-tier CRT setup. "
+                        "(T-2: MSS=HIGH on OB-only signals empirically selects "
+                        "a worse sub-population — likely exhaustion-sweep "
+                        "regime changes.)"),
+        "live_allowed": 1,
+    },
+    {
+        "id":          "CRT_B_FVG_RELAXED",
+        "name":        "CRT Tier B — FVG (DEPRECATED A1/A2)",
+        "tier":        "B",
+        # A1/A2 (2026-05-28): retired from active classifier. Kept in
+        # registry so historical signals (DB rows pre-redefinition) still
+        # validate. evaluate_crt_templates no longer emits this template.
+        "description": ("DEPRECATED post-A1/A2. Historical-only template ID. "
+                        "Tier A's revised FVG+MSS≥MEDIUM definition absorbs the "
+                        "entire former scope of this template."),
+        "live_allowed": 1,
+    },
+    {
+        "id":          "CRT_C_OB_DEFAULT",
+        "name":        "CRT Tier C — OB default",
+        "tier":        "C",
+        "description": ("Catch-all for OB-only setups not meeting Tier B's HIGH-MSS "
+                        "bar. Paper/backtest only — not permitted in live trading."),
+        "live_allowed": 0,
+    },
 ]
+
+# Phase B (2026-05-28) — IDs that mark a signal as classified by the CRT
+# tier scheme. Used by callers that need to distinguish CRT-classified
+# signals from 5M_SWEEP-classified or unclassified ones.
+CRT_TEMPLATE_IDS = {
+    "CRT_A_FVG_ALIGNED",
+    "CRT_B_OB_HIGH_MSS",
+    "CRT_B_FVG_RELAXED",
+    "CRT_C_OB_DEFAULT",
+}
 
 
 # ── Scoring functions ─────────────────────────────────────────────────────────
@@ -338,6 +405,322 @@ def evaluate_confluences_vs_templates(
         return matches
     except Exception as e:
         print(f"[TEMPLATES] evaluate error: {e}")
+        return []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase B (2026-05-28) — CRT tier classifier
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# CRT signals carry a different feature set than 5M_SWEEP signals:
+#   confluence_type — "FVG" | "OB"           (NEW — primary discriminator)
+#   mss_quality     — "HIGH" | "MEDIUM" | "LOW" | "NONE"
+#   wyckoff_phase   — "ACCUMULATION" | "DISTRIBUTION" | "MARKUP" | "MARKDOWN"
+#                     | "TRANSITION" | "?"
+#   direction       — "BUY" | "SELL"
+#   session         — "LONDON_KZ" | "NY_AM_KZ" | "ASIA_KZ" | "OVERNIGHT" | "UNKNOWN"
+#   bias_4h         — "BULLISH" | "BEARISH" | "NEUTRAL"
+#
+# Empirical justification for these tier definitions:
+#   - FVG vs OB axis = +14.6pp WR (cycle-9 audit, n=246 FVG vs n=2195 OB)
+#   - Wyckoff TRANSITION = no edge by definition (phase undecidable)
+#   - MSS=HIGH compensates for OB-only confluence (strong displacement
+#     supplies what FVG would otherwise contribute)
+
+
+def _crt_wyckoff_aligned(direction: str, phase: str) -> bool:
+    """Phase B helper — True when Wyckoff phase supports the trade direction.
+
+    BUY  is aligned with ACCUMULATION (basing) or MARKUP   (uptrend).
+    SELL is aligned with DISTRIBUTION (topping) or MARKDOWN (downtrend).
+    """
+    if direction == "BUY":
+        return phase in ("ACCUMULATION", "MARKUP")
+    if direction == "SELL":
+        return phase in ("DISTRIBUTION", "MARKDOWN")
+    return False
+
+
+def _score_crt_a(f: Dict[str, Any]) -> TemplateMatch:
+    """
+    CRT Tier A — FVG confluence + MSS≥MEDIUM (no Wyckoff requirement).
+
+    A1/A2 revision (2026-05-28, post-B-6 backtest validation on Run #146,
+    n=95): the original 3/3 definition that REQUIRED Wyckoff phase
+    alignment empirically produced the WORST tier (44.4% WR vs 56-60% for
+    B/C). Cross-tab showed FVG signals with phase-aligned Wyckoff under-
+    performed FVG signals with COUNTER (56%) or TRANSITION (64%) phase by
+    ~15-20pp WR. Confirms the broader CLAUDE.md finding that Wyckoff phase
+    as currently detected lacks predictive power on CRT setups (a sweep-
+    reversal pattern fundamentally conflicts with "trade in phase
+    direction"). Wyckoff stays as informational metadata in entry_type but
+    is no longer used as a tier discriminator. Template ID name retained
+    for back-compat with historical signals; semantic meaning is now
+    "high-quality FVG CRT setup."
+
+    Required (2/2):
+      1. confluence_type == FVG
+      2. mss_quality ≥ MEDIUM
+
+    Bonuses (max +0.20 total):
+      +0.10  4H bias aligned with direction
+      +0.05  Active killzone session (LONDON/NY/ASIA)
+      +0.05  Session in {LONDON_KZ, NY_AM_KZ} specifically (top killzones)
+    """
+    direction      = f.get("direction",      "BUY")
+    confluence     = f.get("confluence_type", "")
+    mss_quality    = f.get("mss_quality",    "NONE")
+    bias_4h        = f.get("bias_4h",        "NEUTRAL")
+    session        = f.get("session",        "UNKNOWN")
+
+    matched = []
+    hit = 0
+
+    if confluence == "FVG":
+        hit += 1; matched.append("confluence=FVG")
+    # T-1 fix (cycle-10 audit 2026-05-28): tighten MSS bar from ≥MEDIUM to
+    # ==HIGH. Full-population analysis (n=1945) showed Tier A under the
+    # ≥MEDIUM definition produced 63.9% WR (n=180). Tightening to MSS=HIGH
+    # yields 72.5% WR (n=80) with Wilson 95% CI [61.9%, 81.1%] — a
+    # statistically separated top tier.
+    #
+    # H-CY14-T1 fix (cycle-14 audit 2026-05-29) — TIER A IS SELL-ONLY.
+    # ---------------------------------------------------------------------
+    # Cycle-13 cumulative data (Runs 1854-2007, n=79 across Tier A):
+    #     Tier A SELL (BSL_CRT, MSS=HIGH):  n=44, WR=72.7%, avg_R=+0.673  ✓
+    #     Tier A BUY  (SSL_CRT, post-relax): n=35, WR=31.4%, avg_R=-0.207  ✗
+    # The BUY-side FVG-confluence cohort destroys capital — even after
+    # H-CY13-T2 relaxed the MSS gate to ≥MEDIUM (which moved BUY WR from
+    # 20% → 31.4%, still well below break-even). Tier B BUY at 68.2%
+    # (n=110, avg_R=+0.635) handles BUY setups correctly with the SAME
+    # FVG-or-OB structural shape; the issue is specifically the Tier A
+    # "FVG-aligned premium" classification on the BUY side. Per Tier-B
+    # symmetric performance, the FVG confluence is fine for SELL but
+    # systematically anti-selects on BUY (likely picking up gap-down
+    # FVGs in retracements that re-attract sellers — needs ICT-level
+    # investigation, not template-level patching).
+    #
+    # Until root cause identified, Tier A is SELL-only. BUY signals fall
+    # to Tier B (where they perform at canonical 68.2% WR) or Tier C
+    # (paper-only catchall). This trades ~35 lost "Tier A" BUY classifications
+    # per 365d for honesty about which setups are premium quality.
+    if direction != "SELL":
+        # BUY signals never qualify for Tier A under current TP geometry.
+        # Drops to Tier B (FVG + MSS=HIGH OR OB + MSS=HIGH) where they
+        # perform well per cumulative data.
+        pass
+    elif mss_quality == "HIGH":
+        # SELL + MSS=HIGH is the canonical Tier A premium tier (72.7% WR
+        # cumulative, working as designed).
+        hit += 1; matched.append("MSS=HIGH(SELL_only)")
+
+    bonus = 0.0
+    if (direction == "BUY"  and bias_4h == "BULLISH") or \
+       (direction == "SELL" and bias_4h == "BEARISH"):
+        bonus += 0.10; matched.append("4H_bias_bonus")
+    if session in ("LONDON_KZ", "NY_AM_KZ", "ASIA_KZ"):
+        bonus += 0.05; matched.append(f"session_bonus={session}")
+    if session in ("LONDON_KZ", "NY_AM_KZ"):
+        bonus += 0.05; matched.append("top_killzone_bonus")
+
+    base  = hit / 2.0
+    score = min(base + bonus * base, 1.0)
+    return TemplateMatch(
+        template_id="CRT_A_FVG_ALIGNED",
+        template_name="CRT Tier A — FVG + MSS=HIGH",
+        tier="A",
+        score=round(score, 4),
+        required_hit=hit, required_need=2,
+        confluences_matched=matched, live_allowed=True,
+    )
+
+
+def _score_crt_b_ob_high(f: Dict[str, Any]) -> TemplateMatch:
+    """
+    CRT Tier B — OB confluence + MSS=HIGH (no Wyckoff requirement).
+
+    A1/A2 revision (2026-05-28): non-TRANSITION Wyckoff requirement dropped
+    in lockstep with Tier A. Population-level cross-tab showed alignment
+    has near-zero independent discriminating power once confluence+MSS are
+    controlled. Strong MSS displacement supplies the quality that FVG would
+    otherwise contribute on its own.
+
+    Required (2/2):
+      1. confluence_type == OB
+      2. mss_quality == HIGH
+    """
+    confluence    = f.get("confluence_type", "")
+    mss_quality   = f.get("mss_quality",   "NONE")
+    bias_4h       = f.get("bias_4h",       "NEUTRAL")
+    direction     = f.get("direction",     "BUY")
+    session       = f.get("session",       "UNKNOWN")
+
+    matched = []
+    hit = 0
+
+    if confluence == "OB":
+        hit += 1; matched.append("confluence=OB")
+    # T-2 fix (cycle-10 audit 2026-05-28): flip OB's MSS bar from HIGH to
+    # MEDIUM. Full-population analysis (n=1945) showed OB+MSS=HIGH
+    # produced 51.0% WR (n=776) — the WORST tier — while OB+MSS=MEDIUM
+    # produced 56.9% WR (n=902). MSS=HIGH on OB-only signals selects a
+    # worse sub-population (hypothesis: exhaustion-sweep regime changes).
+    # After flip Tier B rises to ~57% WR territory and empirical
+    # ordering A > B > C is recovered.
+    if QUALITY_RANK.get(mss_quality, 0) >= QUALITY_RANK["MEDIUM"]:
+        hit += 1; matched.append(f"MSS={mss_quality}")
+
+    bonus = 0.0
+    if (direction == "BUY"  and bias_4h == "BULLISH") or \
+       (direction == "SELL" and bias_4h == "BEARISH"):
+        bonus += 0.10; matched.append("4H_bias_bonus")
+    if session in ("LONDON_KZ", "NY_AM_KZ", "ASIA_KZ"):
+        bonus += 0.05; matched.append(f"session_bonus={session}")
+
+    base  = hit / 2.0
+    score = min(base + bonus * base, 1.0)
+    return TemplateMatch(
+        template_id="CRT_B_OB_HIGH_MSS",
+        template_name="CRT Tier B — OB + MSS≥MEDIUM",
+        tier="B",
+        score=round(score, 4),
+        required_hit=hit, required_need=2,
+        confluences_matched=matched, live_allowed=True,
+    )
+
+
+def _score_crt_b_fvg_relaxed(f: Dict[str, Any]) -> TemplateMatch:
+    """
+    DEPRECATED 2026-05-28 (A1/A2 redefinition).
+
+    Pre-redefinition this template caught "FVG-confluence setups that missed
+    Tier A's Wyckoff-alignment requirement." Under A1/A2 the Wyckoff gate
+    was dropped from Tier A — Tier A is now FVG + MSS≥MEDIUM and absorbs
+    this template's entire historical scope (in Run #146 every FVG signal
+    carried MSS≥MEDIUM, so this template produced zero unique matches under
+    A1/A2 anyway).
+
+    Function retained:
+      - The template ID stays in CRT_TEMPLATE_IDS / TEMPLATE_REGISTRY so
+        historical signals with matched_template_id='CRT_B_FVG_RELAXED' on
+        the live DB and backtest_signals tables still validate against
+        Phase 5A _KNOWN_TEMPLATES and render correctly on the dashboard.
+      - The scoring function stays defined so any out-of-tree consumer that
+        imports it doesn't break.
+      - It is REMOVED from evaluate_crt_templates() so NEW signals never
+        receive this classification going forward.
+
+    Required (2/2):
+      1. confluence_type == FVG
+      2. mss_quality ≥ LOW    (any valid MSS — relaxed vs Tier A's MEDIUM bar)
+    """
+    confluence  = f.get("confluence_type", "")
+    mss_quality = f.get("mss_quality",   "NONE")
+    bias_4h     = f.get("bias_4h",       "NEUTRAL")
+    direction   = f.get("direction",     "BUY")
+    session     = f.get("session",       "UNKNOWN")
+
+    matched = []
+    hit = 0
+
+    if confluence == "FVG":
+        hit += 1; matched.append("confluence=FVG")
+    if QUALITY_RANK.get(mss_quality, 0) >= QUALITY_RANK["LOW"]:
+        hit += 1; matched.append(f"MSS={mss_quality}")
+
+    bonus = 0.0
+    if (direction == "BUY"  and bias_4h == "BULLISH") or \
+       (direction == "SELL" and bias_4h == "BEARISH"):
+        bonus += 0.10; matched.append("4H_bias_bonus")
+    if session in ("LONDON_KZ", "NY_AM_KZ", "ASIA_KZ"):
+        bonus += 0.05; matched.append(f"session_bonus={session}")
+
+    base  = hit / 2.0
+    score = min(base + bonus * base, 1.0)
+    return TemplateMatch(
+        template_id="CRT_B_FVG_RELAXED",
+        template_name="CRT Tier B — FVG (any MSS, any phase)",
+        tier="B",
+        score=round(score, 4),
+        required_hit=hit, required_need=2,
+        confluences_matched=matched, live_allowed=True,
+    )
+
+
+def _score_crt_c(f: Dict[str, Any]) -> TemplateMatch:
+    """
+    CRT Tier C — Catch-all. live_allowed=0 (paper/backtest only).
+
+    Required (1/1):
+      1. confluence_type in {FVG, OB}    (any valid CRT confluence)
+    """
+    confluence = f.get("confluence_type", "")
+    matched = []
+    hit = 0
+    if confluence in ("FVG", "OB"):
+        hit += 1; matched.append(f"confluence={confluence}")
+
+    base  = hit / 1.0
+    score = round(base, 4)
+    # M-CY13-T3 fix (audit cycle-13 2026-05-29): the template_id stays
+    # CRT_C_OB_DEFAULT for DB back-compat (legacy signals'
+    # matched_template_id rows must keep matching), but the human-readable
+    # name now reflects the empirical reality. Cycle-13 fresh-data
+    # tabulation showed Tier C caught 18 FVG signals vs only 4 OB signals
+    # in round-2 (Run-1854 n=22) — i.e. it serves as the catchall bucket
+    # for FVG setups that miss Tier A's MSS=HIGH bar, NOT just OB setups.
+    # The "OB default" label confused dashboard readers analyzing
+    # template attribution.
+    return TemplateMatch(
+        template_id="CRT_C_OB_DEFAULT",
+        template_name="CRT Tier C — catchall (FVG or OB, MSS<HIGH)",
+        tier="C",
+        score=score,
+        required_hit=hit, required_need=1,
+        confluences_matched=matched, live_allowed=False,
+    )
+
+
+def evaluate_crt_templates(features: Dict[str, Any]) -> List[TemplateMatch]:
+    """Evaluate a CRT signal against all 4 CRT-specific tier templates.
+
+    Returns matches sorted: matched-first, then A→B→C, then by score desc.
+    The caller picks `next((m for m in matches if m.is_match), None)` as the
+    single best match (same pattern as evaluate_confluences_vs_templates).
+
+    Parameters
+    ----------
+    features : dict with keys
+        direction       — "BUY" | "SELL"
+        confluence_type — "FVG" | "OB"
+        mss_quality     — "HIGH" | "MEDIUM" | "LOW" | "NONE"
+        wyckoff_phase   — "ACCUMULATION" | "DISTRIBUTION" | "MARKUP"
+                          | "MARKDOWN" | "TRANSITION" | "?"
+        bias_4h         — "BULLISH" | "BEARISH" | "NEUTRAL"
+        session         — "LONDON_KZ" | "NY_AM_KZ" | "ASIA_KZ"
+                          | "OVERNIGHT" | "UNKNOWN"
+
+    Returns
+    -------
+    List[TemplateMatch] — sorted; empty list on exception (never raises).
+    """
+    try:
+        # A1/A2 redefinition (2026-05-28): _score_crt_b_fvg_relaxed retired
+        # from active classification (see its docstring). Tier A's revised
+        # 2/2 (FVG + MSS≥MEDIUM) absorbs its entire scope.
+        matches = [
+            _score_crt_a(features),
+            _score_crt_b_ob_high(features),
+            _score_crt_c(features),
+        ]
+        matches.sort(key=lambda m: (
+            not m.is_match,
+            _TIER_RANK.get(m.tier, 9),
+            -m.score,
+        ))
+        return matches
+    except Exception as e:
+        print(f"[TEMPLATES] CRT evaluate error: {e}")
         return []
 
 

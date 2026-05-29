@@ -7,7 +7,13 @@ description: Run a complete multi-agent audit of the TradeAI system across all d
 
 You are the senior technical lead. Coordinate all audit agents, synthesize their findings, and produce the authoritative 10/10 scorecard. This is the highest-level quality gate for the TradeAI system.
 
-**Project:** `C:\Users\User\Desktop\TradeAI\`
+## CRT-era context (2026-05-27 onward) — READ FIRST
+
+TradeAI now ships TWO scanners (`5M_SWEEP` + `H4_CRT`). Operator currently runs CRT-only (`ENABLE_5M_SWEEP=0`). Before invoking subagents, read `.claude/CRT_STRATEGY_CONTEXT.md` and ensure subagents read it too. Each subagent's `.md` has a CRT-era context block added 2026-05-27.
+
+Today's audit cycle (2026-05-27) caught a CRITICAL `LIVE_LIQUID_HOURS` ImportError that would have crash-looped the bot on first CRT signal — fixed in commit `6c9137e`. Subsequent audits should verify it remains fixed.
+
+**Project:** `/home/tradeai/TradeAI/` (VPS) — the original Windows path `C:\Users\User\Desktop\TradeAI\` in older docs refers to the same project pre-VPS migration.
 **Target:** 10/10 across all dimensions
 **Audit history:**
 - 2026-05-21 8-agent audit: **3.3/10** overall (pre-fix baseline; all CRITICAL/HIGH/MEDIUM catalogued)

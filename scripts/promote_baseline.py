@@ -31,13 +31,35 @@ PIN_PATH  = os.path.join(_ROOT, "data", "baseline_pin.json")
 
 
 def _current_settings() -> dict:
-    """Snapshot the live param values from config + ict_engine at promote time."""
+    """Snapshot the live param values from config + ict_engine at promote time.
+
+    Fix E-3 (explorer audit 2026-05-27): now also captures scanner toggles
+    and CRT engine knobs so `baseline_pin.json` records the FULL strategy
+    fingerprint. Pre-CRT pins only carried ICT/BACKTEST gates; a CRT-era
+    promotion would silently lose the CRT context, breaking rollback audit.
+
+    Reads CRT knobs via os.environ to match `backtest._compute_run_config_hash`
+    (so the pin's `key_settings` and the run's `config_hash` agree on which
+    knobs were active at promote time).
+    """
     sys.path.insert(0, _ROOT)
     import config as cfg
     import ict_engine as ict
+    # M-CY11-7 fix (audit 2026-05-28 cycle-11): snapshot bias gates with explicit
+    # LIVE_ and BACKTEST_ split. Pre-fix the pin recorded a single `bias_4h_gate`
+    # = cfg.LIVE_BIAS_4H_GATE (process env at promote time) while `_extra` below
+    # recorded backtest_bias_4h_gate from os.environ — producing asymmetric pin
+    # snapshots where live_bias_4h_gate=strict but backtest_bias_4h_gate=loose
+    # for the SAME promoted trial. Now both are read via os.environ.get() with
+    # config defaults, so the pin transparently reflects the operator's env at
+    # promote time and (when explorer subprocess sets only one) the asymmetry
+    # is visible rather than hidden.
     return {
-        "bias_4h_gate":              cfg.LIVE_BIAS_4H_GATE,
-        "trend_1h_gate":             cfg.LIVE_TREND_1H_GATE,
+        # Original ICT gate fingerprint (LIVE/BACKTEST split surfaced)
+        "live_bias_4h_gate":         os.environ.get("LIVE_BIAS_4H_GATE", cfg.LIVE_BIAS_4H_GATE),
+        "backtest_bias_4h_gate":     os.environ.get("BACKTEST_BIAS_4H_GATE", cfg.BACKTEST_BIAS_4H_GATE),
+        "live_trend_1h_gate":        os.environ.get("LIVE_TREND_1H_GATE", cfg.LIVE_TREND_1H_GATE),
+        "backtest_trend_1h_gate":    os.environ.get("BACKTEST_TREND_1H_GATE", cfg.BACKTEST_TREND_1H_GATE),
         "dealing_range_gate_live":   cfg.LIVE_DEALING_RANGE_GATE,
         "dealing_range_gate_backtest": cfg.BACKTEST_DEALING_RANGE_GATE,
         "mss_min_quality":           cfg.LIVE_MSS_MIN_QUALITY,
@@ -47,6 +69,38 @@ def _current_settings() -> dict:
         "ict_mss_horizon":           ict.ICT_MSS_HORIZON,
         "ict_fvg_min_gap":           ict.ICT_FVG_MIN_GAP,
         "ict_eqh_tolerance":         ict.ICT_EQH_TOLERANCE,
+        # ICT_MIN_RR_GATE (cycle-11): now in config_hash payload too
+        "ict_min_rr_gate":           os.environ.get("ICT_MIN_RR_GATE", "1.3"),
+        # Scanner kill switches (Fix E-3, 2026-05-27)
+        "enable_5m_sweep":           os.environ.get("ENABLE_5M_SWEEP", "1"),
+        "enable_h4_crt":             os.environ.get("ENABLE_H4_CRT",   "0"),
+        # CRT engine fingerprint (Fix E-3, 2026-05-27)
+        "crt_tp1_mode":              os.environ.get("CRT_TP1_MODE",    "dynamic"),
+        "crt_apply_quality_gates":   os.environ.get("CRT_APPLY_QUALITY_GATES", "0"),
+        "crt_fvg_min_quality":       os.environ.get("CRT_FVG_MIN_QUALITY", "HIGH"),
+        "crt_mss_min_quality":       os.environ.get("CRT_MSS_MIN_QUALITY", "MEDIUM"),
+        "crt_require_1h_trend":      os.environ.get("CRT_REQUIRE_1H_TREND", "0"),
+        "h4_crt_c2_lookback":        os.environ.get("H4_CRT_C2_LOOKBACK", "10"),  # M10-13 fix 2026-05-28: match crt_engine.py default (was "6")
+        "h4_crt_mss_horizon":        os.environ.get("H4_CRT_MSS_HORIZON", "30"),
+        "h4_crt_ob_scan_lookback":   os.environ.get("H4_CRT_OB_SCAN_LOOKBACK", "20"),
+        "h4_crt_validation_school":  os.environ.get("H4_CRT_VALIDATION_SCHOOL", "flexible"),
+        "crt_tp2_rr":                os.environ.get("CRT_TP2_RR", "1.5"),
+        "crt_tp3_rr":                os.environ.get("CRT_TP3_RR", "2.0"),
+        "crt_forward_bars":          os.environ.get("CRT_FORWARD_BARS", "576"),
+        # Wyckoff v2 (Fix E-3, 2026-05-27)
+        "wyckoff_phase_filter":      os.environ.get("WYCKOFF_PHASE_FILTER", "off"),
+        # Cycle-12 unexplored axes (2026-05-29) — fingerprint MUST include
+        # these so promoted baselines that flip them are diffable against
+        # the prior pin and the explorer's headline-param picker shows them.
+        "h4_crt_fvg_probe_width":    os.environ.get("H4_CRT_FVG_PROBE_WIDTH", "2"),
+        "h4_crt_mitigation_ttl_h":   os.environ.get("H4_CRT_MITIGATION_TTL_H", "0"),
+        # Cycle-12 extended axes (added 2026-05-29 post explorer audit)
+        "min_tp1_mult":              os.environ.get("MIN_TP1_MULT", "1.5"),
+        "ict_sl_buffer_pct":         os.environ.get("ICT_SL_BUFFER_PCT", "0.003"),
+        "signal_cooldown":           os.environ.get("SIGNAL_COOLDOWN", "40"),
+        # H4_CRT_MSS_HORIZON, H4_CRT_OB_SCAN_LOOKBACK, ICT_FVG_MIN_GAP already
+        # captured above (lines 84, 85; ict_fvg_min_gap is implicit via 5M
+        # path though CRT-only mode now sweeps it too).
     }
 
 
@@ -215,6 +269,21 @@ def _check_held_out_gate(run_id: int, held_out_days: int,
         candidate = max(candidate, cumulative)
         if candidate > 1:
             n_trials_for_dsr = int(candidate)
+        # H-NEW-1 fix (audit 2026-05-28): persist the new max so a future DB
+        # wipe can't reset the selection-bias correction. Idempotent.
+        try:
+            if candidate > cumulative:
+                con.execute(
+                    "INSERT OR REPLACE INTO bot_state(key,value) VALUES(?,?)",
+                    ("cumulative_min_trials",
+                     json.dumps({"value": int(candidate),
+                                 "updated_at": datetime.now(timezone.utc)
+                                              .strftime("%Y-%m-%d %H:%M:%S"),
+                                 "source": "promote_baseline"})),
+                )
+                con.commit()
+        except Exception:
+            pass
         row = con.execute(
             "SELECT value FROM bot_state WHERE key='cross_config_sr_trial_std'"
         ).fetchone()

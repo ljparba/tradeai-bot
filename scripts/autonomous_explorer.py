@@ -78,7 +78,12 @@ PROMOTION_LOG   = os.path.join(_ROOT, "data", "promotion_log.json")
 PIN_PATH        = os.path.join(_ROOT, "data", "baseline_pin.json")
 
 # Files whose hash defines the "code state" — if any change mid-session, abort
-CODE_FILES = ["config.py", "backtest.py", "ict_engine.py"]
+# Fix G-2 (explorer audit 2026-05-27): crt_engine.py is now part of the code
+# surface that affects backtest signals. Without this, the operator could edit
+# `crt_engine.py` mid-session (e.g., tune H4_CRT_C2_LOOKBACK or adjust the
+# Wyckoff detector) and the code-drift guard would NOT trip — silently
+# polluting subsequent trials with code that doesn't match earlier trials.
+CODE_FILES = ["config.py", "backtest.py", "ict_engine.py", "crt_engine.py"]
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS trials (
@@ -156,7 +161,32 @@ N_BONUS_ALPHA = _env_float("EXPLORER_N_BONUS_ALPHA", 2.0)
 
 ANTI_PATTERN_LOCKS = {
     "ICT_SWING_N":      2,    # 3+ proven net-negative (Cycle 1b P-1 + 1c TP-5c')
-    "ICT_MIN_RR_GATE":  1.5,  # >=2.0 catastrophic per Cycle 1b
+    # 2026-05-28 — lowered from 1.5 to 1.3 by operator decision after cycle-9
+    # H-NEW-3 fix cut CRT signal output -77%. Anti-pattern threshold remains
+    # ≥ 2.0 (catastrophic per Cycle 1b); 1.3 is below the anti-pattern band
+    # but defensibly above net-negative-EV territory (BEW = 47.8% at SL=2%,
+    # fees=0.20% — still below operator's MAX_BREAKEVEN_WR=0.60).
+    "ICT_MIN_RR_GATE":  1.3,
+}
+
+# Fix G-1 (explorer audit 2026-05-27): CRT-side anti-pattern locks. These are
+# env-overridable knobs (unlike ANTI_PATTERN_LOCKS which assert on source-code
+# constants) — but the operator's empirical findings from 2026-05-27 prove
+# certain values are net-harmful. Locked here so an explorer session cannot
+# accidentally inherit them via the operator's .env. Values are the set of
+# ALLOWED values; anything else → session aborts at startup.
+CRT_ANTI_PATTERN_LOCKS = {
+    # 2026-05-27 Test B: strict Wyckoff filter reduced CRT WR by -5.22pp on
+    # the canonical 365-day window. "off" + "loose" remain searchable.
+    "WYCKOFF_PHASE_FILTER":     ("off", "loose"),
+    # 2026-05-27 CRT Pro empirical: quality gates ON cost -21% total R vs OFF
+    # at the same bias setting. Locked to "0" (OFF) until re-tested.
+    "CRT_APPLY_QUALITY_GATES":  ("0",),
+    # Cycle-12 explorer-axis additions (2026-05-29). These are env-overridable
+    # via ict_engine.py module-level _env_float() reads (added 2026-05-29).
+    # MIN_TP1_MULT anti-pattern at ≥2.0 — Run #36 catastrophic (WR 18% vs 38%);
+    # the explorer is locked to <2.0. The 4 sampled values stay below.
+    "MIN_TP1_MULT":             ("1.0", "1.25", "1.5", "1.75"),
 }
 
 
@@ -186,10 +216,25 @@ def _assert_anti_pattern_locks() -> None:
                 f"This param is anti-pattern-locked and must not be env-overridable. "
                 f"Unset the env var before starting an explorer session."
             )
+    # Fix G-1 (explorer audit 2026-05-27): also assert CRT-side env knobs are
+    # within the allowed set per today's empirical findings. Operator can
+    # override the lock by explicitly editing CRT_ANTI_PATTERN_LOCKS above
+    # AND re-testing the previously-rejected value on the canonical window.
+    for env_key, allowed in CRT_ANTI_PATTERN_LOCKS.items():
+        val = os.environ.get(env_key)
+        if val is None:
+            continue  # not set → safe (uses module default)
+        if val not in allowed:
+            raise RuntimeError(
+                f"CRT anti-pattern violation: env var {env_key}={val!r} is "
+                f"NOT in the allowed set {allowed}. This value was empirically "
+                f"rejected on 2026-05-27. Unset the env var (or set to an "
+                f"allowed value) before starting the explorer."
+            )
 
 # Anti-overfit guard thresholds
 GUARD = {
-    "consecutive_fail_max":     50,    # PAUSE if N consecutive FAIL verdicts
+    "consecutive_fail_max":     150,   # PAUSE if N consecutive FAIL verdicts. H2 fix (explorer audit cycle-12 2026-05-29): lowered from 500 to 150. At ~11min/trial, 500 = 92h of continuous failure before tripping — effectively disables invariant #12. 150 = ~27h, still allows tolerant Bayesian exploration in productive regions but doesn't let a broken session run unattended for ~4 days. Operator can stop manually anytime. (Prior raise 100→500 on 2026-05-28 PM was overcorrection for config_hash collision investigation — collisions are now impossible per CR-CY11-1 patch, so 100-150 is the right band.)
     "sr_trial_std_jump_pct":    25.0,  # PAUSE if cross-config std rises >X% mid-session
     "best_dsr_drop_vs_pin_pp":  5.0,   # PAUSE if best-of-session DSR < pin DSR - X pp
     "consecutive_error_max":    3,     # PAUSE if N consecutive ERROR (timeouts/crashes)
@@ -371,6 +416,17 @@ def _precache_warm(cache_minutes_max: int = 30) -> None:
     # Stale-verdict opt-out (audit 2026-05-27): pre-cache backtest must also
     # not overwrite the canonical verdict — see _params_to_env for rationale.
     env["WRITE_CPCV_VERDICT"] = "0"
+    # Fix B-3 (explorer audit 2026-05-27): pin scanner toggles identically
+    # to trial subprocesses (Fix B-1) so the pre-cache warm reflects the
+    # exact env the actual trials will run under — cache hits stay valid
+    # across the session and the warm-run cost reflects the right scanner
+    # mix (not whatever the operator's paper-soak `.env` happens to have).
+    # Defaults follow EXPLORER_SEARCH_SPACE (crt → CRT-only, 5m → 5M-only).
+    _space = os.environ.get("EXPLORER_SEARCH_SPACE", "crt").lower()
+    _default_5m  = "1" if _space == "5m" else "0"
+    _default_crt = "0" if _space == "5m" else "1"
+    env["ENABLE_5M_SWEEP"] = os.environ.get("EXPLORER_ENABLE_5M_SWEEP", _default_5m)
+    env["ENABLE_H4_CRT"]   = os.environ.get("EXPLORER_ENABLE_H4_CRT",   _default_crt)
     started = time.time()
     # Snapshot before so we only clean OUR precache row (FIX C1)
     max_id_before = 0
@@ -409,15 +465,138 @@ def _precache_warm(cache_minutes_max: int = 30) -> None:
 
 
 def _suggest_params(trial: optuna.Trial) -> dict:
+    """Optuna search space.
+
+    Default mode selectable via env knob `EXPLORER_SEARCH_SPACE`:
+      "crt"    — CRT-tuned (default 2026-05-27 onward) — 8 CRT-side params
+      "5m"     — legacy 5M_SWEEP-tuned (pre-CRT search space, kept for fallback)
+    """
+    space = os.environ.get("EXPLORER_SEARCH_SPACE", "crt").lower()
+    if space == "5m":
+        # Legacy 5M_SWEEP search space (pre-CRT, kept for operator override).
+        # See deploy/env.explorer.example "5m fallback profile".
+        return {
+            "ICT_SWEEP_LOOKBACK":       trial.suggest_int("ICT_SWEEP_LOOKBACK", 15, 60, step=5),
+            "ICT_MSS_HORIZON":          trial.suggest_int("ICT_MSS_HORIZON",    10, 60, step=5),
+            "ICT_FVG_MIN_GAP":          trial.suggest_float("ICT_FVG_MIN_GAP", 0.0005, 0.0030, step=0.0001),
+            "DEALING_RANGE_LOOKBACK":   trial.suggest_int("DEALING_RANGE_LOOKBACK", 30, 100, step=10),
+            "BACKTEST_BIAS_4H_GATE":    trial.suggest_categorical("BACKTEST_BIAS_4H_GATE",  ["none", "loose", "strict"]),
+            "BACKTEST_TREND_1H_GATE":   trial.suggest_categorical("BACKTEST_TREND_1H_GATE", ["none", "loose", "strict"]),
+            "BACKTEST_FVG_MIN_QUALITY": trial.suggest_categorical("BACKTEST_FVG_MIN_QUALITY", ["LOW", "MEDIUM", "HIGH"]),
+            "BACKTEST_MSS_MIN_QUALITY": trial.suggest_categorical("BACKTEST_MSS_MIN_QUALITY", ["LOW", "MEDIUM", "HIGH"]),
+        }
+
+    # ── DEFAULT: CRT-tuned search space (2026-05-27 — replaces legacy 5M space) ──
+    # 8 params targeting H4_CRT scanner behavior. Anti-pattern locks enforced
+    # at session startup via CRT_ANTI_PATTERN_LOCKS (line 175):
+    #   - WYCKOFF_PHASE_FILTER excludes "strict" (empirically -5.22pp WR)
+    #   - CRT_APPLY_QUALITY_GATES is NOT in this search space at all
+    #     (locked off; empirically -21% R)
     return {
-        "ICT_SWEEP_LOOKBACK":       trial.suggest_int("ICT_SWEEP_LOOKBACK", 15, 60, step=5),
-        "ICT_MSS_HORIZON":          trial.suggest_int("ICT_MSS_HORIZON",    10, 60, step=5),
-        "ICT_FVG_MIN_GAP":          trial.suggest_float("ICT_FVG_MIN_GAP", 0.0005, 0.0030, step=0.0001),
-        "DEALING_RANGE_LOOKBACK":   trial.suggest_int("DEALING_RANGE_LOOKBACK", 30, 100, step=10),
-        "BACKTEST_BIAS_4H_GATE":    trial.suggest_categorical("BACKTEST_BIAS_4H_GATE",  ["none", "loose", "strict"]),
-        "BACKTEST_TREND_1H_GATE":   trial.suggest_categorical("BACKTEST_TREND_1H_GATE", ["none", "loose", "strict"]),
-        "BACKTEST_FVG_MIN_QUALITY": trial.suggest_categorical("BACKTEST_FVG_MIN_QUALITY", ["LOW", "MEDIUM", "HIGH"]),
-        "BACKTEST_MSS_MIN_QUALITY": trial.suggest_categorical("BACKTEST_MSS_MIN_QUALITY", ["LOW", "MEDIUM", "HIGH"]),
+        # TP1 placement policy — today's empirical winner is "min_1r"; explorer
+        # can re-confirm or find better via DSR-honest selection.
+        "CRT_TP1_MODE":             trial.suggest_categorical("CRT_TP1_MODE",
+                                        ["dynamic", "fixed_1r", "min_1r"]),
+        # TP2 / TP3 R-multiples — defaults are 1.5R / 2.0R; tune the cascade
+        # to find the sweet spot between hit-rate and per-trade reward.
+        "CRT_TP2_RR":               trial.suggest_float("CRT_TP2_RR", 1.2, 2.5, step=0.1),
+        "CRT_TP3_RR":               trial.suggest_float("CRT_TP3_RR", 1.8, 3.5, step=0.1),
+        # H4 C1 lookback window — how far back to scan for the reference candle.
+        # Default 10 (~40h); range 4-20 = 16-80h.
+        "H4_CRT_C2_LOOKBACK":       trial.suggest_int("H4_CRT_C2_LOOKBACK", 4, 20, step=2),
+        # Wyckoff phase filter — "strict" excluded (locked anti-pattern).
+        # "off" preserves v1 behavior, "loose" rejects only TRANSITION phase.
+        "WYCKOFF_PHASE_FILTER":     trial.suggest_categorical("WYCKOFF_PHASE_FILTER",
+                                        ["off", "loose"]),
+        # Optional 1H trend gate for CRT path (mirrors 5M_SWEEP's TREND_1H_GATE).
+        # Categorical 0/1 — boolean tune.
+        "CRT_REQUIRE_1H_TREND":     trial.suggest_categorical("CRT_REQUIRE_1H_TREND",
+                                        ["0", "1"]),
+        # 4H bias gate — shared with 5M_SWEEP, but CRT uses it independently.
+        # Operator's current PAPER soak runs "strict"; explorer can confirm.
+        "BACKTEST_BIAS_4H_GATE":    trial.suggest_categorical("BACKTEST_BIAS_4H_GATE",
+                                        ["none", "loose", "strict"]),
+        # Outcome window — how long to wait for TP/SL resolution.
+        # Default 576 (48h); test 24h / 48h / 72h variants.
+        "CRT_FORWARD_BARS":         trial.suggest_categorical("CRT_FORWARD_BARS",
+                                        ["288", "576", "864"]),
+        # ── T1.2 Funding rate overlay knobs (2026-05-29, ENHANCEMENT_ROADMAP.md)
+        # FUNDING_GATE_ENABLED toggles the overlay on/off. When 0 the funding
+        # rate is captured for metadata but applies no confidence bonus.
+        "FUNDING_GATE_ENABLED":     trial.suggest_categorical("FUNDING_GATE_ENABLED",
+                                        ["0", "1"]),
+        # Extreme thresholds — values in raw fractional 8h rate.
+        # Defaults ±0.0003 (=±0.03% per 8h). Search [±0.0001 .. ±0.0010].
+        "FUNDING_EXTREME_SHORT_THRESH": trial.suggest_float(
+            "FUNDING_EXTREME_SHORT_THRESH", 0.0001, 0.0010, step=0.0001),
+        "FUNDING_EXTREME_LONG_THRESH":  trial.suggest_float(
+            "FUNDING_EXTREME_LONG_THRESH", -0.0010, -0.0001, step=0.0001),
+        # Confidence bonus magnitude. 0.0 = disabled; 0.10 = ±1 confidence pt.
+        "FUNDING_BONUS_PCT":        trial.suggest_float(
+            "FUNDING_BONUS_PCT", 0.0, 0.10, step=0.01),
+        # ── T1.3 BTC correlation overlay knobs (2026-05-29) ────────────
+        # Window in 5M bars: 30=2.5h, 60=5h, 120=10h. Sweet spot is 60-100.
+        "BTC_CORR_WINDOW_MIN":      trial.suggest_int(
+            "BTC_CORR_WINDOW_MIN", 30, 120, step=10),
+        # Confidence bonus magnitude. 0.0 = metadata-only.
+        "BTC_CORR_BONUS_PCT":       trial.suggest_float(
+            "BTC_CORR_BONUS_PCT", 0.0, 0.10, step=0.01),
+        # High-correlation threshold for ALIGNED_HIGH classification.
+        "BTC_CORR_HIGH_THRESH":     trial.suggest_float(
+            "BTC_CORR_HIGH_THRESH", 0.5, 0.9, step=0.05),
+        # ── Cycle-12 unexplored axes (2026-05-29) ───────────────────────────
+        # H4_CRT_FVG_PROBE_WIDTH — number of 5M bars probed for FVG
+        # confluence around the MSS confirmation site. Default W=2 reproduces
+        # the H-3 fix [mss-1, mss] probe (Run-1749 baseline). Wider W catches
+        # displacement-style FVGs that landed earlier than the MSS close-
+        # through bar. Live diagnostic 2026-05-29 showed BTC currently has 0
+        # BUY FVGs at exactly [mss-1, mss] in the 24h window — sweeping W=2-5
+        # tests whether the legacy probe is the binding gate on signal
+        # frequency at any rate of cost to per-signal WR.
+        "H4_CRT_FVG_PROBE_WIDTH":   trial.suggest_int(
+            "H4_CRT_FVG_PROBE_WIDTH", 2, 5, step=1),
+        # H4_CRT_MITIGATION_TTL_H — hours after which a consumed C1 zone
+        # becomes re-eligible for re-firing. 0 = never expire (DEFAULT,
+        # Run-1749 baseline). 24/72/168 lets zones re-fire after 1d/3d/1wk.
+        # Rationale: with C2_LOOKBACK=4 the search window slides only ~1 H4
+        # bar per scan but consumed zones accumulate indefinitely → in long
+        # bear runs eventually every recent C1 is locked. TTL re-eligibles
+        # old zones that re-test in subsequent trend phases (canonical ICT
+        # behavior for LRLR/LH-LL liquidity pools).
+        "H4_CRT_MITIGATION_TTL_H":  trial.suggest_categorical(
+            "H4_CRT_MITIGATION_TTL_H", ["0", "24", "72", "168"]),
+        # ── Cycle-12 extended axes (added 2026-05-29 post explorer audit) ───
+        # A: H4_CRT_MSS_HORIZON — 5M bars allowed for MSS confirmation after
+        # sweep. Live diagnostic 2026-05-29 found "MSS NOT confirmed in 30-bar
+        # horizon" was the binding gate for ~half of CRT candidates. Test
+        # 20/30/40/50 to find the sweet spot between strictness and frequency.
+        "H4_CRT_MSS_HORIZON":       trial.suggest_int(
+            "H4_CRT_MSS_HORIZON", 20, 50, step=5),
+        # B: ICT_SL_BUFFER_PCT — SL placement buffer beyond swept wick.
+        # Tighter = more SL hits but better RR; looser = fewer SL hits but
+        # worse RR. Default 0.003 (0.3%). Range = 0.001 to 0.005 (0.1-0.5%).
+        "ICT_SL_BUFFER_PCT":        trial.suggest_float(
+            "ICT_SL_BUFFER_PCT", 0.001, 0.005, step=0.0005),
+        # C: MIN_TP1_MULT — RR floor for TP1 placement. Affects which setups
+        # pass the economics gate. Anti-pattern at ≥2.0 (Run #36 catastrophic
+        # WR 18%); explorer locks <2.0. Default 1.5 preserves Run-1749 baseline.
+        "MIN_TP1_MULT":             trial.suggest_categorical(
+            "MIN_TP1_MULT", ["1.0", "1.25", "1.5", "1.75"]),
+        # D: H4_CRT_OB_SCAN_LOOKBACK — OB scan depth on H4 stream. Wider =
+        # more OB confluence matches but possibly stale OBs. Default 20.
+        "H4_CRT_OB_SCAN_LOOKBACK":  trial.suggest_int(
+            "H4_CRT_OB_SCAN_LOOKBACK", 10, 40, step=5),
+        # E: SIGNAL_COOLDOWN — re-fire latency in minutes per direction per
+        # token. Tighter = more signals on same token but correlation risk;
+        # looser = fewer signals. Default 40 minutes.
+        "SIGNAL_COOLDOWN":          trial.suggest_categorical(
+            "SIGNAL_COOLDOWN", ["20", "30", "40", "60", "120"]),
+        # F: ICT_FVG_MIN_GAP — min FVG gap as fraction of price for FVG
+        # detection sensitivity. Affects both 5M_SWEEP path and CRT FVG
+        # confluence. Default 0.001 (0.1%). Already in 5M_SWEEP space but
+        # not CRT — adding here so CRT-only mode can sweep it too.
+        "ICT_FVG_MIN_GAP":          trial.suggest_float(
+            "ICT_FVG_MIN_GAP", 0.0005, 0.003, step=0.0005),
     }
 
 
@@ -435,6 +614,25 @@ def _params_to_env(params: dict) -> dict:
     # the adaptive engine's OGD learning rate by 4× on the next live signal
     # close. backtest.py honors WRITE_CPCV_VERDICT=0 to skip the verdict write.
     env["WRITE_CPCV_VERDICT"] = "0"
+    # Fix B-1 (explorer audit 2026-05-27): pin the per-scanner kill switches
+    # so trial subprocesses don't silently inherit the operator's paper-soak
+    # mode. Without this, an operator running `.env` with ENABLE_5M_SWEEP=0
+    # for CRT-only paper soak would launch explorer trials where search-space
+    # params become no-ops on disabled scanners, while the active scanner's
+    # signal metrics get misattributed to those untouched params → polluted
+    # Pareto archive + wasted compute.
+    #
+    # Defaults are search-space-aligned (2026-05-27 — when search space
+    # switched from 5M to CRT):
+    #   EXPLORER_SEARCH_SPACE=crt (default) → 5M_SWEEP=0, H4_CRT=1
+    #   EXPLORER_SEARCH_SPACE=5m            → 5M_SWEEP=1, H4_CRT=0
+    # Operator can override either knob explicitly via .env.explorer for
+    # joint-mode (both-on) attribution-blend experiments.
+    _space = os.environ.get("EXPLORER_SEARCH_SPACE", "crt").lower()
+    _default_5m  = "1" if _space == "5m"  else "0"
+    _default_crt = "0" if _space == "5m"  else "1"
+    env["ENABLE_5M_SWEEP"] = os.environ.get("EXPLORER_ENABLE_5M_SWEEP", _default_5m)
+    env["ENABLE_H4_CRT"]   = os.environ.get("EXPLORER_ENABLE_H4_CRT",   _default_crt)
     return env
 
 
@@ -502,7 +700,23 @@ def _run_backtest(env: dict, timeout_s: int = 1800) -> dict:
         ).fetchall()
         con.close()
         if not new_rows:
-            m["error"] = "backtest_subprocess_wrote_no_row"
+            # 2026-05-28 fix: distinguish "subprocess crashed" from
+            # "subprocess succeeded with 0 signals". returncode==0 was
+            # already verified at line 582-584 above — so reaching here
+            # with no row means backtest.py ran clean but save_backtest_run
+            # returned early on `if not all_signals: return None`
+            # (backtest.py:3480). That's a structural FAIL (this param
+            # combo produces no signals), NOT an ERROR. Pre-fix this
+            # surfaced as `backtest_subprocess_wrote_no_row` ERROR and 3
+            # in a row tripped the anti-overfit guard at line 1207 —
+            # causing entire explorer sessions to auto-pause when Optuna
+            # picked structurally-empty param combos (e.g., post-cycle-10
+            # `CRT_TP1_MODE=fixed_1r` is incompatible with the new
+            # ICT_MIN_RR_GATE=1.5 floor and produces zero CRT signals).
+            # Now classified as FAIL with `n=0`; the _verdict() function
+            # picks it up via `m["n"] is None or m["n"] < GATES["n_min"]`
+            # and Optuna learns to avoid the combo.
+            m["n"] = 0
             return m
         if len(new_rows) > 1:
             print(f"[explorer] WARN: {len(new_rows)} new backtest_runs rows since trial start — "
@@ -660,6 +874,57 @@ def _read_pareto_archive() -> list:
         return []
 
 
+def _runtime_env_snapshot() -> dict:
+    """Snapshot env vars that affect signal output but live OUTSIDE the Optuna
+    search space — fixes finding E-1 (Pareto archive schema-blind to CRT).
+
+    Without this, an archive entry records the 8 tuned Optuna params but NOT
+    the scanner toggles or CRT knobs that actually shaped the run. A future
+    operator inspecting the archive cannot reproduce the entry from `params`
+    alone. With this, every Pareto entry + promotion-log entry self-documents
+    the full strategy fingerprint.
+
+    The set must match `backtest._compute_run_config_hash()` so the
+    `config_hash` field stays the canonical reproducibility key — this dict
+    is the human-readable expansion.
+    """
+    keys = [
+        # Scanner kill switches (2026-05-27)
+        "ENABLE_5M_SWEEP", "ENABLE_H4_CRT",
+        # CRT engine params (Session 2 + v2 + Pro)
+        "H4_CRT_DISABLED_TOKENS", "H4_CRT_C2_LOOKBACK", "H4_CRT_MSS_HORIZON",
+        "H4_CRT_OB_SCAN_LOOKBACK", "H4_CRT_VALIDATION_SCHOOL",
+        "CRT_TP1_MODE", "CRT_TP2_RR", "CRT_TP3_RR", "CRT_FORWARD_BARS",
+        "CRT_APPLY_QUALITY_GATES", "CRT_FVG_MIN_QUALITY", "CRT_MSS_MIN_QUALITY",
+        "CRT_REQUIRE_1H_TREND",
+        # Wyckoff v2
+        "WYCKOFF_PHASE_FILTER",
+        # Cycle-12 unexplored axes (2026-05-29)
+        "H4_CRT_FVG_PROBE_WIDTH", "H4_CRT_MITIGATION_TTL_H",
+        # Cycle-12 extended axes (added post explorer audit 2026-05-29)
+        "MIN_TP1_MULT", "ICT_SL_BUFFER_PCT", "SIGNAL_COOLDOWN",
+        "ICT_FVG_MIN_GAP",  # already in 5M space; explicit for CRT clarity
+    ]
+    # Conservative defaults — match what _compute_run_config_hash reads.
+    defaults = {
+        "ENABLE_5M_SWEEP": "1",
+        "ENABLE_H4_CRT":   "0",
+        "CRT_TP1_MODE":    "dynamic",
+        "CRT_APPLY_QUALITY_GATES": "0",
+        "CRT_REQUIRE_1H_TREND":    "0",
+        "WYCKOFF_PHASE_FILTER":    "off",
+        # Cycle-12 unexplored axes — defaults preserve Run-1749 baseline
+        "H4_CRT_FVG_PROBE_WIDTH":  "2",
+        "H4_CRT_MITIGATION_TTL_H": "0",
+        # Cycle-12 extended axes — all 6 defaults preserve Run-1749 baseline
+        "MIN_TP1_MULT":            "1.5",
+        "ICT_SL_BUFFER_PCT":       "0.003",
+        "SIGNAL_COOLDOWN":         "40",
+        "ICT_FVG_MIN_GAP":         "0.001",
+    }
+    return {k: os.environ.get(k, defaults.get(k, "")) for k in keys}
+
+
 def _update_pareto_archive(trial_summary: dict, max_size: int = 10) -> None:
     """Maintain top-K non-dominated configs across (cpcv_mean, -cpcv_std, sharpe, n).
 
@@ -762,14 +1027,25 @@ def _reproduce(params: dict, original_metrics: dict, timeout_s: int = 1800) -> t
 
 def _refresh_cross_config_std() -> None:
     """Re-run compute_cross_config_sr_std.py so the next trial's DSR uses the
-    pool that now includes the just-promoted baseline."""
+    pool that now includes the just-promoted baseline.
+
+    M-6 fix (cycle-9 audit 2026-05-28): pass --scanner-mode matching the
+    EXPLORER_SEARCH_SPACE so a CRT-only explorer session re-computes the
+    pool from CRT-only configs (not the default 'any' which would average
+    in 5M_SWEEP-era configs and silently muddy the DSR denominator).
+    """
+    _space = os.environ.get("EXPLORER_SEARCH_SPACE", "crt").lower()
+    _scanner_mode = {"crt": "crt_only", "5m": "5m_only"}.get(_space, "any")
     try:
         result = subprocess.run(
-            [sys.executable, os.path.join(_ROOT, "scripts", "compute_cross_config_sr_std.py")],
+            [sys.executable,
+             os.path.join(_ROOT, "scripts", "compute_cross_config_sr_std.py"),
+             "--scanner-mode", _scanner_mode],
             cwd=_ROOT, capture_output=True, text=True, timeout=60
         )
         if result.returncode == 0:
-            print(f"[promote] cross-config sr_trial_std refreshed (honest DSR pool now includes new baseline)")
+            print(f"[promote] cross-config sr_trial_std refreshed "
+                  f"(scanner_mode={_scanner_mode}; honest DSR pool now includes new baseline)")
         else:
             print(f"[promote] cross-config refresh failed: {result.stderr[:200]}")
     except Exception as e:
@@ -783,8 +1059,11 @@ def _auto_promote(study_name: str, trial_no: int, params: dict, m: dict, m2: dic
     pin = _read_pin_json()
     pin_settings = (pin.get("key_settings") or {})
     for k, v in params.items():
-        # Map env-name to pin key (best-effort)
+        # Map env-name to pin key (best-effort). Includes both legacy 5M_SWEEP
+        # keys and the new CRT keys (2026-05-27) so the headline-param picker
+        # works regardless of EXPLORER_SEARCH_SPACE selection.
         nice_key = {
+            # 5M_SWEEP search space (legacy + still valid when EXPLORER_SEARCH_SPACE=5m)
             "BACKTEST_BIAS_4H_GATE":  "bias_4h_gate",
             "BACKTEST_TREND_1H_GATE": "trend_1h_gate",
             "BACKTEST_FVG_MIN_QUALITY": "fvg_min_quality",
@@ -793,6 +1072,26 @@ def _auto_promote(study_name: str, trial_no: int, params: dict, m: dict, m2: dic
             "ICT_MSS_HORIZON":     "ict_mss_horizon",
             "ICT_FVG_MIN_GAP":     "ict_fvg_min_gap",
             "DEALING_RANGE_LOOKBACK": "dealing_range_lookback",
+            # CRT search space (default 2026-05-27 onward) — keys must match
+            # `promote_baseline._current_settings()` (today's E-3 fix) so
+            # the headline-param picker correctly diffs against the pin.
+            "CRT_TP1_MODE":           "crt_tp1_mode",
+            "CRT_TP2_RR":             "crt_tp2_rr",
+            "CRT_TP3_RR":             "crt_tp3_rr",
+            "H4_CRT_C2_LOOKBACK":     "h4_crt_c2_lookback",
+            "WYCKOFF_PHASE_FILTER":   "wyckoff_phase_filter",
+            "CRT_REQUIRE_1H_TREND":   "crt_require_1h_trend",
+            "CRT_FORWARD_BARS":       "crt_forward_bars",
+            # Cycle-12 unexplored axes (2026-05-29)
+            "H4_CRT_FVG_PROBE_WIDTH": "h4_crt_fvg_probe_width",
+            "H4_CRT_MITIGATION_TTL_H": "h4_crt_mitigation_ttl_h",
+            # Cycle-12 extended axes (added post explorer audit 2026-05-29)
+            "MIN_TP1_MULT":            "min_tp1_mult",
+            "ICT_SL_BUFFER_PCT":       "ict_sl_buffer_pct",
+            "SIGNAL_COOLDOWN":         "signal_cooldown",
+            "ICT_FVG_MIN_GAP":         "ict_fvg_min_gap",
+            "H4_CRT_MSS_HORIZON":      "h4_crt_mss_horizon",
+            "H4_CRT_OB_SCAN_LOOKBACK": "h4_crt_ob_scan_lookback",
         }.get(k, k.lower())
         prev = pin_settings.get(nice_key)
         if prev is not None and str(prev) != str(v):
@@ -841,6 +1140,12 @@ def _auto_promote(study_name: str, trial_no: int, params: dict, m: dict, m2: dic
                              ("cpcv_mean", "cpcv_std", "sharpe", "dsr", "n")},
         "metrics_run2":    {k: m2.get(k) for k in
                              ("cpcv_mean", "cpcv_std", "sharpe", "dsr", "n")},
+        # Fix E-1 (explorer audit 2026-05-27): capture full strategy
+        # fingerprint so a promotion is reproducible without inspecting
+        # the operator's `.env` at promote-time. Includes scanner toggles
+        # + CRT knobs that aren't in `params` but shape the run.
+        "runtime_env":     _runtime_env_snapshot(),
+        "config_hash":     m.get("config_hash"),
     })
 
     # Refresh honest cross-config std so the next trial's DSR pool includes
@@ -962,6 +1267,11 @@ def _objective_factory(study_name: str, guard: _GuardState, sess: dict):
                     "sharpe":      m.get("sharpe"),
                     "dsr":         m.get("dsr"),
                     "captured_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    # Fix E-1 (explorer audit 2026-05-27): record the env vars
+                    # that affect signals but live outside `params` (scanner
+                    # toggles, CRT knobs). Reproducibility key + audit trail.
+                    "runtime_env": _runtime_env_snapshot(),
+                    "config_hash": m.get("config_hash"),
                 })
 
                 promo_result = _try_auto_promote(study_name, trial.number, params, m)
@@ -969,15 +1279,15 @@ def _objective_factory(study_name: str, guard: _GuardState, sess: dict):
                     promoted = True
                     print(f"[promote] AUTO_PROMOTED trial #{trial.number} -> new baseline pin "
                           f"CPCV={m.get('cpcv_mean')} DSR={m.get('dsr')} Sharpe={m.get('sharpe')}")
+                    _exp_hr_p = "━" * 22
                     _telegram(
-                        "<b>Explorer AUTO-PROMOTED</b>\n\n"
-                        f"Trial #{_h(trial.number)} is the new baseline pin.\n\n"
-                        "<pre>"
-                        f"CPCV     {_h(m.get('cpcv_mean'))}%\n"
-                        f"DSR      {_h(m.get('dsr'))}%\n"
-                        f"Sharpe   {_h(m.get('sharpe'))}\n"
-                        f"n        {_h(m.get('n'))}"
-                        "</pre>"
+                        "\U0001F389 <b>Explorer AUTO-PROMOTED</b>\n"
+                        f"\n{_exp_hr_p}\n"
+                        f"\n\U0001F947 <b>Trial #{_h(trial.number)}</b> is the new baseline pin"
+                        f"\n\n\U0001F4CA <b>CPCV:</b> {_h(m.get('cpcv_mean'))}%"
+                        f"\n\U0001F4CC <b>DSR:</b> {_h(m.get('dsr'))}%"
+                        f"\n\U0001F4C8 <b>Sharpe:</b> {_h(m.get('sharpe'))}"
+                        f"\n\U0001F9EA <b>n:</b> {_h(m.get('n'))}"
                     )
                     guard.pin_dsr = _read_pin_dsr()
                     guard.pin_run = _read_pin_run()
@@ -1001,12 +1311,13 @@ def _objective_factory(study_name: str, guard: _GuardState, sess: dict):
                     # spam if a persistent issue (e.g., promote_baseline.py
                     # subprocess crash) hits every PASS trial.
                     if not sess.get("promote_failure_telegram_sent"):
+                        _exp_hr_pf = "━" * 22
                         _telegram(
-                            "<b>Explorer AUTO-PROMOTE FAILED</b>\n\n"
-                            "<pre>"
-                            f"{_h(promo_result)}"
-                            "</pre>\n"
-                            "Further failures this session will be console-only."
+                            "❌ <b>Explorer AUTO-PROMOTE FAILED</b>\n"
+                            f"\n{_exp_hr_pf}\n"
+                            f"\n\U0001F4DD <b>Reason:</b> {_h(promo_result)}"
+                            f"\n\n{_exp_hr_pf}\n"
+                            "\n<i>Further failures this session will be console-only.</i>"
                         )
                         sess["promote_failure_telegram_sent"] = True
                         _write_session(sess)
@@ -1023,15 +1334,17 @@ def _objective_factory(study_name: str, guard: _GuardState, sess: dict):
             print(f"\n[explorer] GUARD TRIPPED: {guard_msg}")
             print(f"[explorer] No more trials this session. Optuna study preserved.")
             sys.stdout.flush()
+            _exp_hr_g = "━" * 22
             _telegram(
-                "<b>Explorer PAUSED  -  anti-overfit guard tripped</b>\n\n"
-                "<pre>"
-                f"Reason    {_h(guard_msg)}\n"
-                f"Trials    {_h(sess.get('trials_completed'))} done this session\n"
-                f"Best      CPCV {_h(sess.get('best_cpcv'))}%  DSR {_h(sess.get('best_dsr'))}%"
-                "</pre>\n"
-                "Optuna study preserved. Investigate cause, then resume with:\n"
-                "<code>sudo systemctl start tradeai-explorer</code>"
+                "\U0001F6A7 <b>Explorer PAUSED — anti-overfit guard tripped</b>\n"
+                f"\n{_exp_hr_g}\n"
+                f"\n⚠️ <b>Reason:</b> {_h(guard_msg)}"
+                f"\n\U0001F9EA <b>Trials:</b> {_h(sess.get('trials_completed'))} done this session"
+                f"\n\U0001F947 <b>Best:</b> CPCV {_h(sess.get('best_cpcv'))}% · "
+                f"DSR {_h(sess.get('best_dsr'))}%"
+                f"\n\n{_exp_hr_g}\n"
+                "\n<i>Optuna study preserved. Investigate cause, then resume with:</i>"
+                "\n<code>sudo systemctl start tradeai-explorer</code>"
             )
             raise optuna.exceptions.TrialPruned()
 
@@ -1111,13 +1424,17 @@ def run_study(study_name: str, n_trials: int, skip_precache: bool = False):
         print()
         sys.stdout.flush()
 
+        # 2026-05-28 redesign — match the clean Telegram style used across the
+        # rest of the bot (signal, exit, heartbeat, watchdog). Drops <pre>
+        # tables (no copy button) in favor of emoji-bullet fields + ━━━
+        # divider, and adds explicit emoji prefixes to the title.
+        _exp_hr = "━" * 22
         _telegram(
-            "<b>Explorer STARTED</b>\n\n"
-            "<pre>"
-            f"Study     {_h(study_name)}\n"
-            f"Trials    {_h(n_trials)}\n"
-            f"Baseline  Run-{_h(_read_pin_run())}  (DSR {_h(guard.pin_dsr)})"
-            "</pre>"
+            "\U0001F916 <b>Explorer STARTED</b>\n"
+            f"\n{_exp_hr}\n"
+            f"\n\U0001F50D <b>Study:</b> {_h(study_name)}"
+            f"\n\U0001F9EA <b>Trials:</b> {_h(n_trials)}"
+            f"\n\U0001F4CC <b>Baseline:</b> Run-{_h(_read_pin_run())} (DSR {_h(guard.pin_dsr)}%)"
         )
 
         # SIGTERM handler — systemctl stop sends SIGTERM. Calls study.stop()
@@ -1148,14 +1465,14 @@ def run_study(study_name: str, n_trials: int, skip_precache: bool = False):
             sess["pause_reason"] = "keyboard_interrupt"
             _write_session(sess)
             _telegram(
-                "<b>Explorer INTERRUPTED</b>\n\n"
-                "<pre>"
-                f"Reason    Ctrl+C from operator\n"
-                f"Trials    {_h(sess.get('trials_completed'))} / {_h(sess.get('trials_planned'))}\n"
-                f"Best      CPCV {_h(sess.get('best_cpcv'))}%"
-                "</pre>\n"
-                "Optuna study preserved. Resume with:\n"
-                "<code>sudo systemctl start tradeai-explorer</code>"
+                "\U0001F6D1 <b>Explorer INTERRUPTED</b>\n"
+                f"\n{_exp_hr}\n"
+                f"\n\U0001F4DD <b>Reason:</b> Ctrl+C from operator"
+                f"\n\U0001F9EA <b>Trials:</b> {_h(sess.get('trials_completed'))} / {_h(sess.get('trials_planned'))}"
+                f"\n\U0001F947 <b>Best:</b> CPCV {_h(sess.get('best_cpcv'))}%"
+                f"\n\n{_exp_hr}\n"
+                "\n<i>Optuna study preserved. Resume with:</i>"
+                "\n<code>sudo systemctl start tradeai-explorer</code>"
             )
             return
 
@@ -1165,17 +1482,18 @@ def run_study(study_name: str, n_trials: int, skip_precache: bool = False):
             _write_session(sess)
             _counts = sess.get("counts", {})
             _telegram(
-                "<b>Explorer STOPPED  -  guard tripped</b>\n\n"
-                "<pre>"
-                f"Reason    {_h(guard.pause_reason)}\n"
-                f"Trials    {_h(sess.get('trials_completed'))} / {_h(sess.get('trials_planned'))}\n"
-                f"Results   {_h(_counts.get('PASS',0))} PASS  "
-                f"{_h(_counts.get('FAIL',0))} FAIL  "
-                f"{_h(_counts.get('ERROR',0))} ERROR\n"
-                f"Best      CPCV {_h(sess.get('best_cpcv'))}%  DSR {_h(sess.get('best_dsr'))}%"
-                "</pre>\n"
-                "Optuna study preserved. Resume with:\n"
-                "<code>sudo systemctl start tradeai-explorer</code>"
+                "\U0001F6A7 <b>Explorer STOPPED — guard tripped</b>\n"
+                f"\n{_exp_hr}\n"
+                f"\n⚠️ <b>Reason:</b> {_h(guard.pause_reason)}"
+                f"\n\U0001F9EA <b>Trials:</b> {_h(sess.get('trials_completed'))} / {_h(sess.get('trials_planned'))}"
+                f"\n\U0001F4CA <b>Results:</b> {_h(_counts.get('PASS',0))} PASS · "
+                f"{_h(_counts.get('FAIL',0))} FAIL · "
+                f"{_h(_counts.get('ERROR',0))} ERROR"
+                f"\n\U0001F947 <b>Best:</b> CPCV {_h(sess.get('best_cpcv'))}% · "
+                f"DSR {_h(sess.get('best_dsr'))}%"
+                f"\n\n{_exp_hr}\n"
+                "\n<i>Optuna study preserved. Resume with:</i>"
+                "\n<code>sudo systemctl start tradeai-explorer</code>"
             )
         else:
             sess["ended_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1190,15 +1508,16 @@ def run_study(study_name: str, n_trials: int, skip_precache: bool = False):
                 print(f"[explorer] best params: {sess['best_params']}")
             _counts = sess.get("counts", {})
             _telegram(
-                "<b>Explorer DONE</b>\n\n"
-                "<pre>"
-                f"Trials    {_h(sess.get('trials_completed'))} / {_h(sess.get('trials_planned'))}\n"
-                f"Results   {_h(_counts.get('PASS',0))} PASS  "
-                f"{_h(_counts.get('FAIL',0))} FAIL  "
-                f"{_h(_counts.get('ERROR',0))} ERROR\n"
-                f"Best      CPCV {_h(sess.get('best_cpcv'))}%  DSR {_h(sess.get('best_dsr'))}%\n"
-                f"Baseline  Run-{_h(sess.get('pin_run'))}  (CPCV {_h(sess.get('pin_dsr'))}%)"
-                "</pre>"
+                "\U0001F3C1 <b>Explorer DONE</b>\n"
+                f"\n{_exp_hr}\n"
+                f"\n\U0001F9EA <b>Trials:</b> {_h(sess.get('trials_completed'))} / {_h(sess.get('trials_planned'))}"
+                f"\n\U0001F4CA <b>Results:</b> {_h(_counts.get('PASS',0))} PASS · "
+                f"{_h(_counts.get('FAIL',0))} FAIL · "
+                f"{_h(_counts.get('ERROR',0))} ERROR"
+                f"\n\U0001F947 <b>Best:</b> CPCV {_h(sess.get('best_cpcv'))}% · "
+                f"DSR {_h(sess.get('best_dsr'))}%"
+                f"\n\U0001F4CC <b>Baseline:</b> Run-{_h(sess.get('pin_run'))} "
+                f"(DSR {_h(sess.get('pin_dsr'))}%)"
             )
     finally:
         pid.release()

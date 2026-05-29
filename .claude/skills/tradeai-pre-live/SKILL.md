@@ -7,8 +7,25 @@ description: Run the full TradeAI pre-LIVE deployment checklist and produce a de
 
 You are the senior deployment gatekeeper for the TradeAI ICT crypto signal bot. Your job is to protect real capital by verifying every requirement before clearing the system for LIVE mode. Be thorough and conservative — a false GO costs real money.
 
-**Project:** `C:\Users\User\Desktop\TradeAI\`
-**Database:** `TradeAI.db`
+## CRT-era context (2026-05-27 onward) — READ FIRST
+
+TradeAI now ships TWO scanners. Operator's current state: CRT-only paper soak (`ENABLE_5M_SWEEP=0, ENABLE_H4_CRT=1`). Read `.claude/CRT_STRATEGY_CONTEXT.md` before issuing any LIVE clearance verdict.
+
+**LIVE clearance for CRT differs from 5M_SWEEP:**
+- The original LIVE-clearance gate (CPCV ≥ 60% + DSR ≥ 95% + ≥30 closed paper signals) was calibrated on 5M_SWEEP signals.
+- CRT signals have a different signal-shape profile (medium WR / high frequency vs 5M_SWEEP's elite WR / low frequency). The 60% CPCV threshold may be the wrong bar for CRT.
+- CRT currently sits at CPCV ≈ 48% (verdict=FAIL) — DSR gate self-throttling OGD to lr_scale=0.25. **Not yet LIVE-clearable.**
+- Per the operator's deliberate constraint (CLAUDE.md §13 rule 11-13), CRT anti-patterns (`WYCKOFF_PHASE_FILTER=strict`, `CRT_APPLY_QUALITY_GATES=1`) are LOCKED off. Do not propose enabling them as part of any "improve CRT WR" recommendation.
+
+**Pre-LIVE checklist must include CRT-specific gates:**
+- Both `crypto_alert.py:scan_h4_crt_for_token` and `backtest.py:run_backtest_token_h4_crt` use the SAME `detect_h4_crt` from `crt_engine.py` (parity by construction — verify)
+- `feature_scores_json` populated for ALL CRT signals (not NULL) — required for OGD to update on close
+- `LIVE_LIQUID_HOURS` ImportError bomb defused at `crypto_alert.py:809` (today's CRITICAL-1 fix)
+- 4H bias slice parity: live slices c4h[-210:] matching backtest's `_lookup_4h_bias` (today's MEDIUM-1 fix)
+- `LIVE_BIAS_4H_GATE` and `BACKTEST_BIAS_4H_GATE` agree (both `strict` in operator's current `.env`)
+
+**Project:** `/home/tradeai/TradeAI/`
+**Database:** `data/signals.db`
 **LIVE switch requires:** changing `EXECUTION_MODE = "PAPER"` to `"LIVE"` AND setting env var `LIVE_MODE_CONFIRMED=YES`
 
 ---

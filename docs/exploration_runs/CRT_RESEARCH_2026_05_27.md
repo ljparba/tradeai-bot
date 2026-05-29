@@ -302,7 +302,12 @@ def detect_h4_crt(c4h, c5m, c1h, consumed=None):
         c4h: dict with 'opens', 'highs', 'lows', 'closes', 'times' (last ~30 H4 bars)
         c5m: dict same shape (~300 5M bars within the recent H4 window)
         c1h: dict same shape (~50 1H bars — for future use, currently unused)
-        consumed: set of mitigated C1 ranges (tuple of (c1_idx, round(c1.high,6), round(c1.low,6)))
+        consumed: set of mitigated C1 ranges. C-CRT-1 fix (2026-05-27): keyed
+                  on (c1_time, round(c1.high,6), round(c1.low,6)) — the H4
+                  TIMESTAMP, not the array index. List indices shift the
+                  moment the H4 cache rotates (rolling window slides forward),
+                  which would silently re-fire signals on the same C1 zone
+                  every cycle. Timestamp survives cache rotations.
     
     Returns:
         dict with 'type' (BSL_CRT / SSL_CRT), 'c1_high', 'c1_low', 'sweep_wick',
@@ -327,7 +332,9 @@ def detect_h4_crt(c4h, c5m, c1h, consumed=None):
         c2_time  = c4h['times'][c2_idx]
         
         # Mitigation check — has this C1 range been used?
-        key = (c1_idx, round(c1_high, 6), round(c1_low, 6))
+        c1_time = c4h['times'][c1_idx]
+        # C-CRT-1 fix: key on timestamp, not list index (survives cache rotation)
+        key = (c1_time, round(c1_high, 6), round(c1_low, 6))
         if key in consumed:
             continue
         
@@ -564,7 +571,59 @@ gates between phases.
 
 ---
 
-## 16. Document History
+## 16. Session 3 Live-Integration Requirements (live/backtest parity gates)
+
+Surfaced by the Session 2 live-backtest-consistency-checker audit. These
+items MUST be honored by the Session 3 `crypto_alert.py` integration so
+live and backtest produce identical signals from identical OHLCV inputs.
+
+### LBC-H-1 — Live `signals` table must add `source` column (REQUIRED)
+- Live `signals` table currently has no `source` column (`crypto_alert.py`
+  schema migration block around lines 307-346).
+- Session 3 must add `ALTER TABLE signals ADD COLUMN source TEXT DEFAULT
+  '5M_SWEEP'` to the live migration list AND extend the live signal
+  INSERT statement to include the source value.
+- Without this: live CRT signals can't be written to DB; per-source
+  attribution queries break.
+
+### LBC-H-2 — `consumed_sweeps` mitigation set must persist to state_store (REQUIRED)
+- Backtest creates fresh `consumed` set per call. That's correct for a
+  365-day historical replay (each backtest is a clean simulation).
+- Live bot, however, must REMEMBER mitigated C1 zones across bot
+  restarts — otherwise a restart re-emits the same CRT signal on the
+  same C1 zone. Spec §15 explicitly calls for persistence.
+- Session 3 must serialize the `consumed` set to bot_state (or
+  state_store) as a list of (c1_time, c1_high, c1_low) tuples,
+  reload at bot start, and prune entries older than ~8h ×
+  H4_CRT_C2_LOOKBACK (zone has been swept past the lookback window).
+
+### LBC-H-3 — TP cascade helper must be shared between live + backtest (REQUIRED)
+- Session 2 backtest CRT scanner inlines the TP2/TP3 RR cascade
+  (1.5R / 2.0R from named module constants CRT_TP2_RR / CRT_TP3_RR
+  per H-3 fix).
+- Session 3 live integration must use the SAME logic. The safest way
+  is to extract `compute_crt_trade_plan(direction, entry, sl, ...)`
+  into `crt_engine.py` and have both backtest and live call it.
+- Without this: live and backtest could diverge on TP placement →
+  backtest WR % invalid as live predictor.
+
+### Implementation order for Session 3
+1. Extract `compute_crt_trade_plan()` into crt_engine.py FIRST (refactor
+   backtest.py to use it) — eliminates the duplication risk before any
+   new code lands.
+2. Add `source` column to live signals table migration list.
+3. Add `consumed` set persistence via state_store.
+4. Integrate `detect_h4_crt()` call into `scan_token()` parallel to the
+   existing 5M sweep call.
+5. Live signal Telegram formatting carries source tag for operator
+   visibility.
+
+These three live/BT parity gates are NOT bugs in Session 2 — they're
+gaps that Session 3 must be designed to close. Session 2's backtest
+implementation is correctly self-contained.
+
+
+## 17. Document History
 
 - **2026-05-27 (initial)** — Created. Research consolidated from Trading
   Wyckoff long-form article + 4 web searches across ICT/CRT topic space.
@@ -589,3 +648,46 @@ gates between phases.
   - Phased rollout v1 (foundation, 22-25h, 55-62% WR ceiling) → v2
     (research-best, +10-15h, 60-65% WR ceiling) with explicit gates
     between phases
+
+
+## 18. v2 Empirical Finding (Wyckoff phase filter — NEGATIVE RESULT)
+
+**Spec prediction (§ 7 v2 ceiling):** Wyckoff strict phase alignment was
+predicted to add +5–8pp WR by rejecting counter-phase CRT setups.
+
+**Test plan (Option KK + JJ):** 3-way backtest of CRT-only signals over
+the canonical 365-day window:
+
+| Run | Config | n | CPCV mean WR | DSR |
+|-----|--------|---|--------------|-----|
+| #138 baseline | `WYCKOFF_PHASE_FILTER=off`, bias_4h=none, FVG+OB | 534 | 50.94% | 55.4% |
+| #139 Test A | `WYCKOFF_PHASE_FILTER=off`, bias_4h=strict, FVG+OB | 210 | 57.62% | 88.4% |
+| #140 Test B | `WYCKOFF_PHASE_FILTER=strict`, bias_4h=strict, FVG+OB | 104 | 52.40% | 79.4% |
+
+**Result:** Wyckoff strict phase filter REDUCED CRT WR by **−5.22pp**
+(Test B vs Test A) and reduced signal count by half (104 vs 210), so
+the loss is not noise. The article's gold/forex calibration does NOT
+translate to the 10-token crypto baseline. Direction-aligned phases
+in crypto are NOT a reliable trend-following filter at the H4 timeframe
+— crypto regime changes faster than gold/EURUSD, so "MARKUP" phases
+flip to "DISTRIBUTION" before the H4 lookback catches it.
+
+**Decision (Option LL, 2026-05-27):**
+- Ship Test A config as **CRT v1 final**:
+  `ENABLE_H4_CRT=1`, `LIVE_BIAS_4H_GATE=strict`, `BACKTEST_BIAS_4H_GATE=strict`,
+  `WYCKOFF_PHASE_FILTER=off` (default).
+- Wyckoff context (`ACCUMULATION` / `DISTRIBUTION` / `MARKUP` / `MARKDOWN` /
+  `TRANSITION`) is still tagged into `entry_type` for every CRT signal
+  (`H4_CRT_FVG_MARKUP`, `H4_CRT_OB_ACCUMULATION`, etc.). The filter is
+  OFF but the **observation is preserved** so:
+  - OGD can learn per-phase confidence weights once we have ≥30 paper
+    trades in each context bucket.
+  - Future analysis can retroactively answer "did MARKUP-aligned BUYs
+    actually outperform DISTRIBUTION-aligned BUYs?" without re-running.
+  - If the empirical sign flips with more data, the filter can be
+    re-enabled via env knob without code changes.
+
+**Lesson:** Article predictions calibrated on a different market regime
+are HYPOTHESES, not facts. Confirm on TradeAI's own canonical baseline
+before locking a filter on. Backtest first, then ship — never the
+reverse.

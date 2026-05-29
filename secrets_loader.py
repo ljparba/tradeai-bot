@@ -91,8 +91,20 @@ def _parse_env_text(text: str) -> Dict[str, str]:
             _logger.debug(f"secrets_loader: skipping invalid env key {key!r}")
             continue
         value = value.strip()
+        # L-NEW-2 fix (cycle-9 audit 2026-05-28): strip inline `#` comments
+        # from UNQUOTED values. systemd's EnvironmentFile loader doesn't
+        # strip inline comments — operators who wrote `KEY=value # note`
+        # were getting `KEY` set to `value # note` literally, which caused
+        # the cycle-7 36-restart crash storm (env values like
+        # `ENABLE_H4_CRT=1 # CRT on` parsed as `"1 # CRT on"` and failed
+        # int conversion). Only applies to unquoted values — quoted strings
+        # are taken verbatim so `KEY="literal # hash"` works as intended.
+        _is_quoted = (len(value) >= 2 and value[0] == value[-1]
+                      and value[0] in ('"', "'"))
+        if not _is_quoted and " #" in value:
+            value = value.split(" #", 1)[0].rstrip()
         # Strip matching surrounding quotes (single or double).
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+        if _is_quoted:
             value = value[1:-1]
         out[key] = value
     return out

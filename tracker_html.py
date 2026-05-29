@@ -63,9 +63,9 @@ main{max-width:1500px;margin:0 auto;padding:1.75rem 2rem}
 .main-tab.active{background:var(--bg2);color:#fff;border-color:var(--border);
   border-bottom-color:var(--bg2)}
 .main-tab:hover:not(.active){color:var(--accent2)}
-.tab-count{background:var(--dim);color:var(--muted);padding:.1rem .45rem;
-  border-radius:10px;font-size:.72rem;font-weight:700;min-width:20px;text-align:center}
-.main-tab.active .tab-count{background:var(--accent);color:#fff}
+/* 2026-05-28: operator request — hide tab count pills (declutter). The DOM
+   nodes stay so existing updater JS (#openCount, #histCount, etc.) won't error. */
+.tab-count{display:none}
 
 /* TAB PANELS */
 .tab-panel{display:none}.tab-panel.active{display:block}
@@ -596,6 +596,40 @@ tr:hover td{background:rgba(37,37,56,.45)}
 .honest-status .honest-desc{text-align:center}
 .honest-section-intro{color:var(--muted);font-size:.82rem;line-height:1.5;margin:-.4rem 0 1rem 0;padding:.65rem .85rem;background:var(--bg);border-left:3px solid var(--accent);border-radius:4px}
 .honest-section-intro b{color:#eaeaea;font-weight:600}
+
+/* Open Positions 2-col layout — left: cards / intro; right: live AI activity feed */
+.open-2col-layout{display:flex;gap:1.25rem;align-items:flex-start}
+.open-col-left{flex:1 1 0;min-width:0}
+.open-col-right{flex:0 0 340px;position:sticky;top:1rem}
+@media (max-width:1000px){.open-2col-layout{flex-direction:column}.open-col-right{flex:1 1 100%;width:100%;position:static}}
+
+.activity-feed-wrap{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:.85rem .9rem;box-shadow:0 1px 0 rgba(0,0,0,.25)}
+.activity-feed-head{display:flex;justify-content:space-between;align-items:center;gap:.5rem;margin-bottom:.25rem}
+.activity-feed-title{font-size:.92rem;font-weight:600;color:#eaeaea;letter-spacing:.01em}
+.activity-feed-status{font-size:.7rem;color:#22c55e;font-weight:600;letter-spacing:.04em}
+.activity-feed-status.stale{color:#f59e0b}
+.activity-feed-status.err{color:#ef4444}
+.activity-feed-sub{font-size:.7rem;color:var(--muted);line-height:1.4;margin-bottom:.7rem;padding-bottom:.6rem;border-bottom:1px dashed var(--border)}
+.activity-feed-list{display:flex;flex-direction:column;gap:.3rem;max-height:640px;overflow-y:auto}
+.activity-feed-list::-webkit-scrollbar{width:6px}
+.activity-feed-list::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+.activity-item{font-size:.78rem;line-height:1.45;color:#cbd5e1;padding:.45rem .55rem;background:var(--bg);border-left:2px solid var(--border);border-radius:3px;word-break:break-word}
+.activity-item.cycle{border-left-color:#64748b;color:#94a3b8;font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;font-weight:600}
+.activity-item.macro{border-left-color:#06b6d4}
+.activity-item.signal{border-left-color:#22c55e;color:#bbf7d0;font-weight:600}
+.activity-item.blocked{border-left-color:#f59e0b}
+.activity-item.skipped{border-left-color:#64748b;opacity:.85}
+.activity-item.cooldown{border-left-color:#a78bfa}
+.activity-item.kill{border-left-color:#ef4444;color:#fecaca;font-weight:600}
+.activity-item.tokens{border-left-color:#a78bfa;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.7rem;line-height:1.5;color:#cbd5e1}
+.activity-item.tokens .tok-cell{display:inline-block;margin:1px 4px 1px 0;padding:1px 5px;background:rgba(99,102,241,.08);border-radius:3px;white-space:nowrap}
+.activity-item.tokens .tok-name{color:#fbbf24;font-weight:600}
+.activity-item.tokens .tok-bull{color:#22c55e}
+.activity-item.tokens .tok-bear{color:#ef4444}
+.activity-item.tokens .tok-neut{color:#94a3b8}
+.activity-item.tokens .tok-zones{color:#94a3b8}
+.activity-token{color:#fbbf24;font-weight:600}
+.activity-empty{font-size:.78rem;color:var(--muted);font-style:italic;text-align:center;padding:1rem .5rem}
 .honest-cell-desc{color:var(--muted);font-size:.7rem;line-height:1.4;margin-top:.5rem;padding-top:.45rem;border-top:1px dashed var(--border);font-style:italic}
 .honest-cell-desc code{background:var(--bg);padding:1px 5px;border-radius:3px;font-size:.95em}
 
@@ -606,6 +640,22 @@ tr:hover td{background:rgba(37,37,56,.45)}
 .honest-legend-dot.pass{background:var(--green)}
 .honest-legend-dot.marginal{background:#ffb84d}
 .honest-legend-dot.fail{background:#ff4444}
+
+/* ── Reports tab (2026-05-28) ────────────────────────────────────────────── */
+.rp-kpi-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:.6rem;margin:0 0 1rem 0}
+.rp-kpi{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:.7rem .9rem}
+.rp-kpi-lbl{color:var(--mute);font-size:.72rem;text-transform:uppercase;letter-spacing:.04em}
+.rp-kpi-val{color:#eaeaea;font-size:1.25rem;font-weight:600;margin-top:.25rem}
+.rp-pie-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:.8rem;margin:0 0 1rem 0}
+.rp-card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1rem 1.1rem;margin:0 0 1rem 0}
+.rp-card-header{display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;margin:0 0 .8rem 0;flex-wrap:wrap}
+.rp-card-title{color:#eaeaea;font-size:1rem;font-weight:600}
+.rp-card-sub{color:var(--mute);font-size:.78rem;margin:.15rem 0 .5rem 0}
+.rp-pie-card{display:flex;flex-direction:column}
+.rp-pie-wrap{position:relative;height:220px;margin-top:.4rem}
+.rp-bar-wrap{position:relative;height:240px;margin-top:.4rem}
+.rp-two-col{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:.8rem;margin:0 0 1rem 0}
+.rp-two-col > .rp-card{margin-bottom:0}
 </style>
 </head>
 <body>
@@ -637,20 +687,28 @@ tr:hover td{background:rgba(37,37,56,.45)}
 
   <!-- MAIN TABS -->
   <div class="main-tabs">
+    <!-- 2026-05-28 operator ordering: Open → History → Backtest → AI Intelligence
+         → Adaptive → Auto-Explorer → Honest Metrics. QuantStats stays hidden. -->
     <button class="main-tab active" id="tabBtnOpen" onclick="showTab('open',this)">
       Open Positions <span class="tab-count" id="openCount">0</span>
     </button>
     <button class="main-tab" id="tabBtnHistory" onclick="showTab('history',this)">
       Signal History <span class="tab-count" id="histCount">0</span>
     </button>
-    <button class="main-tab" id="tabBtnIntelligence" onclick="showTab('intelligence',this)">
-      AI Intelligence <span class="tab-count">&#9889;</span>
+    <button class="main-tab" id="tabBtnReports" onclick="showTab('reports',this);loadReports()">
+      &#128202; Reports <span class="tab-count" id="reportsPill">&middot;</span>
     </button>
     <button class="main-tab" id="tabBtnBacktest" onclick="showTab('backtest',this);loadBacktest();loadBaselinePin()">
       &#128202; Backtest <span class="tab-count" id="btRunCount">—</span>
     </button>
+    <button class="main-tab" id="tabBtnIntelligence" onclick="showTab('intelligence',this);loadIntelligence()">
+      AI Intelligence <span class="tab-count">&#9889;</span>
+    </button>
     <button class="main-tab" id="tabBtnAdaptive" onclick="showTab('adaptive',this);loadAdaptive()">
       &#129504; Adaptive <span class="tab-count" id="adaptCount">&#9679;</span>
+    </button>
+    <button class="main-tab" id="tabBtnExplorer" onclick="showTab('explorer',this);loadExplorer()">
+      &#129302; Auto-Explorer <span class="tab-count" id="explorerPill">&middot;</span>
     </button>
     <button class="main-tab" id="tabBtnHonest" onclick="showTab('honest',this);loadHonestMetrics()">
       &#128205; Honest Metrics <span class="tab-count" id="honestPill">&middot;</span>
@@ -666,47 +724,50 @@ tr:hover td{background:rgba(37,37,56,.45)}
             onclick="showTab('quantstats',this);loadQuantStats()">
       &#128201; QuantStats <span class="tab-count" id="qsPill">&middot;</span>
     </button>
-    <button class="main-tab" id="tabBtnExplorer" onclick="showTab('explorer',this);loadExplorer()">
-      &#129302; Auto-Explorer <span class="tab-count" id="explorerPill">&middot;</span>
-    </button>
   </div>
 
   <!-- OPEN POSITIONS PANEL -->
   <div id="panelOpen" class="tab-panel active">
-    <div class="honest-section-intro" style="margin:0 0 1rem 0">
-      <b>What is this tab?</b> Your <b>live action board</b>. Shows every signal that is still in-progress
-      (not yet hit TP1 / TP2 / SL / expiry) and the cumulative P&amp;L equity curve from all closed signals.
-      <br><br>
-      Each card is one active position with its entry, stop loss, take-profit ladder, real-time MFE/MAE,
-      and a manual close button (for when you exit before TP/SL fires &mdash; the bot will recompute the P&amp;L from your exit price).
-      The equity curve appears below once the first signal closes; toggle 30d / 90d / 1y to zoom.
-      <br><br>
-      <b>Tip:</b> "Open" count in the page header should match this tab's card count. If they diverge,
-      something fired but didn't render &mdash; check <b>Signal History</b> with the "Open" filter.
-      <br>
-      <button class="faq-learn-btn" onclick="openFAQ('open')">&#128214; Learn more &rarr;</button>
-    </div>
-    <!-- C1 (2026-05-22 tracker audit): Equity curve — cumulative P&L over closed signals.
-         Hidden until first data point arrives. -->
-    <div id="equityCurveWrap" class="equity-wrap" style="display:none">
-      <div class="equity-hdr">
-        <div class="equity-titles">
-          <div class="sec-title">Equity Curve</div>
-          <div class="equity-sub" id="equitySummary">—</div>
+    <div class="open-2col-layout">
+      <div class="open-col-left">
+        <div class="honest-section-intro" style="margin:0 0 1rem 0">
+          <b>What is this tab?</b> Your <b>live action board</b>. Shows every signal that is still in-progress
+          (not yet hit TP1 / TP2 / TP3 / SL and not past the outcome window &mdash; 48h for CRT, 24h for 5M_SWEEP).
+          For the cumulative P&amp;L equity curve, win/loss breakdowns, and other trade performance charts,
+          see the <b>&#128202; Reports</b> tab.
+          <br><br>
+          Each card is one active position with its entry, stop loss, take-profit ladder, real-time MFE/MAE,
+          and a manual close button (for when you exit before TP/SL fires &mdash; the bot will recompute the P&amp;L from your exit price).
+          <b>Tip:</b> "Open" count in the page header should match this tab's card count. If they diverge,
+          something fired but didn't render &mdash; check <b>Signal History</b> with the "Open" filter.
+          <br>
+          <button class="faq-learn-btn" onclick="openFAQ('open')">&#128214; Learn more &rarr;</button>
         </div>
-        <div class="equity-range">
-          <button class="ftab eq-range active" data-days="30" onclick="setEquityRange(30,this)">30d</button>
-          <button class="ftab eq-range" data-days="90" onclick="setEquityRange(90,this)">90d</button>
-          <button class="ftab eq-range" data-days="365" onclick="setEquityRange(365,this)">1y</button>
+        <!-- Equity Curve relocated to Reports tab on 2026-05-28 (operator request). -->
+        <div id="openList"></div>
+        <div class="pg-bar" id="openPgBar" style="display:none">
+          <button class="pg-btn" id="openPrevBtn" onclick="openChangePage(-1)">&#8249; Prev</button>
+          <span class="pg-info" id="openPgInfo"></span>
+          <button class="pg-btn" id="openNextBtn" onclick="openChangePage(1)">Next &#8250;</button>
         </div>
       </div>
-      <div class="equity-canvas-wrap"><canvas id="equityChart"></canvas></div>
-    </div>
-    <div id="openList"></div>
-    <div class="pg-bar" id="openPgBar" style="display:none">
-      <button class="pg-btn" id="openPrevBtn" onclick="openChangePage(-1)">&#8249; Prev</button>
-      <span class="pg-info" id="openPgInfo"></span>
-      <button class="pg-btn" id="openNextBtn" onclick="openChangePage(1)">Next &#8250;</button>
+
+      <!-- Live AI activity feed — last 20 plain-English milestones from logs/bot.log -->
+      <div class="open-col-right">
+        <div class="activity-feed-wrap">
+          <div class="activity-feed-head">
+            <span class="activity-feed-title">&#129302; Live AI Activity</span>
+            <span class="activity-feed-status" id="activityFeedStatus">&#8226; live</span>
+          </div>
+          <div class="activity-feed-sub">
+            What the bot is thinking right now &mdash; last 20 events, auto-refresh every 10s.
+            Ephemeral (not saved to DB).
+          </div>
+          <div class="activity-feed-list" id="activityFeedList">
+            <div class="activity-empty">Waiting for first scan cycle...</div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -771,6 +832,12 @@ tr:hover td{background:rgba(37,37,56,.45)}
         Real-time view of the filters the bot is currently applying. If <b>Conf Floor</b> rises, the bot
         is being stricter (only firing high-conviction signals). <b>Tokens w/ Floor↑</b> = tokens whose
         recent WR dropped below 35% and now have a tighter floor applied. Empty = no filters tightened.
+        <br><br>
+        Also active in the background: <b>Phase 5A template-safety gates</b> &mdash;
+        <code>INSUFFICIENT_SAMPLE</code> blocks a tier when n&lt;50 closed signals, <code>CIRCUIT_BREAKER</code>
+        blocks when rolling WR&lt;55%, <code>DAILY_CAP</code> blocks per-tier per UTC day (A=3, B=2, C=0).
+        When any of these trip, the bot stays silent in LIVE; check Signal History for the matched-tier
+        column to spot blocked patterns.
       </div>
       <div class="intel-cards">
         <div class="icard">
@@ -858,8 +925,9 @@ tr:hover td{background:rgba(37,37,56,.45)}
         </span>
       </div>
       <div class="honest-section-intro" style="margin:.4rem 0 .8rem 0;border-left-color:#06b6d4">
-        Win rate by hour-of-day (UTC) and day-of-week. Reveals timing edges. ICT killzones
-        (London 7&ndash;10 UTC, NY AM 12&ndash;15 UTC) typically show the strongest cells.
+        Win rate by hour-of-day (UTC) and day-of-week. Reveals timing edges &mdash; for the 5M_SWEEP
+        scanner the ICT killzones (London 7&ndash;10 UTC, NY AM 12&ndash;15 UTC) tend to dominate;
+        for CRT the edges concentrate around H4 candle closes (0/4/8/12/16/20 UTC).
         Cells with fewer than 2 signals are uncolored to avoid false confidence.
       </div>
       <div id="hourDayHeatmap" class="hm-wrap">
@@ -903,8 +971,10 @@ tr:hover td{background:rgba(37,37,56,.45)}
       &mdash; closed and open, winners and losers. This is your forensic view.
       <br><br>
       Filter chips above the table let you slice by <b>outcome</b> (Wins / Losses / Partial / Open / Expired)
-      and by <b>token</b>. Click any column header to sort. Click a row to expand the full signal context
-      (FVG quality, MSS quality, sweep type, session, ICT structure, OGD weights at fire-time, template match, etc.).
+      and by <b>token</b>. Click any column header to sort. Click a row to expand the full signal context.
+      Fields differ by scanner: 5M_SWEEP populates sweep_type / DR location / FVG quality; CRT populates
+      Wyckoff phase + confluence type (FVG/OB) / MSS quality. Both also show OGD weights at fire-time,
+      template tier match, and Phase A slippage + fill status.
       <br><br>
       <b>Tip:</b> Use this when investigating why a specific trade lost &mdash; the expanded row shows
       every feature value at signal-fire time, so you can spot patterns (e.g. "all my SELL losses were
@@ -932,13 +1002,17 @@ tr:hover td{background:rgba(37,37,56,.45)}
           <th class="sortable" onclick="histSetSort('id')">ID <span class="sort-ico on" id="sh-id">&#9660;</span></th>
           <th class="sortable" onclick="histSetSort('token')">Token <span class="sort-ico" id="sh-token"></span></th>
           <th class="sortable" onclick="histSetSort('signal')">Signal <span class="sort-ico" id="sh-signal"></span></th>
+          <th class="sortable" onclick="histSetSort('matched_template_id')" title="Template tier — CRT_A = FVG + MSS=HIGH (best); CRT_B = OB + MSS≥MEDIUM; CRT_C = paper-only catch-all (live_allowed=0). Legacy TIER_A/B/C apply to 5M_SWEEP signals. Daily LIVE caps: A=3, B=2, C=0.">Tier <span class="sort-ico" id="sh-matched_template_id"></span></th>
           <th>Entry</th><th>SL</th><th>TP1</th><th>TP2</th><th>TP3</th>
           <th class="sortable" onclick="histSetSort('rr1')">R:R <span class="sort-ico" id="sh-rr1"></span></th>
           <th class="sortable" onclick="histSetSort('confidence')">Conf <span class="sort-ico" id="sh-confidence"></span></th>
           <th>MTF</th><th>RSI</th><th>4H</th><th>1H</th><th>5M</th>
           <th>Session</th><th>Sweep</th><th>EV</th>
+          <th title="Slippage between fired signal price and live tick at save. Green ≤0.5%, yellow 0.5–2%, red >2% (CRT_SLIPPAGE_WARN_PCT=0.5, CRT_SLIPPAGE_CRIT_PCT=2.0).">Slip</th>
+          <th title="Did price retouch the entry within the limit-order fill window">Fill</th>
           <th class="sortable" onclick="histSetSort('outcome')">Result <span class="sort-ico" id="sh-outcome"></span></th>
-          <th class="sortable" onclick="histSetSort('profit_pct')">P&amp;L <span class="sort-ico" id="sh-profit_pct"></span></th>
+          <th class="sortable" onclick="histSetSort('profit_pct')" title="Maximum-greed P&amp;L — assumes 100% of position exits at whichever target hit (TP1 for PARTIAL_TP1, TP3 for WIN, SL for LOSS). What the bot fires.">P&amp;L (max) <span class="sort-ico" id="sh-profit_pct"></span></th>
+          <th title="Realistic 50/50 cascade P&amp;L — first 50% exits at TP1, remaining 50% runs to TP2/TP3 or trails to break-even after TP1 hits. Matches the ICT execution discipline + the backtest's realized_r formula.">P&amp;L (50/50)</th>
           <th class="sortable" onclick="histSetSort('timestamp')">Time <span class="sort-ico" id="sh-timestamp"></span></th>
         </tr></thead>
         <tbody id="histBody"></tbody>
@@ -950,18 +1024,126 @@ tr:hover td{background:rgba(37,37,56,.45)}
       <button class="pg-btn" id="histNextBtn" onclick="histChangePage(1)">Next &#8250;</button>
     </div>
   </div>
+
+  <!-- REPORTS PANEL — 2026-05-28: live/paper trading-performance dashboard. -->
+  <div id="panelReports" class="tab-panel">
+    <div id="reportsError" style="display:none" class="err-banner"></div>
+    <div class="honest-section-intro" style="margin:0 0 1rem 0">
+      <b>What is this tab?</b> Your <b>trading-performance report</b>. Pure paper/live trade analytics &mdash;
+      <em>no backtest data</em>, no learning weights, no bot internals. Just outcomes, P&amp;L, drawdown,
+      session breakdown and direction skew across every signal the bot has fired.
+      <br><br>
+      <b>P&amp;L convention:</b> All numbers here use the <b>50/50 cascade execution model</b> &mdash;
+      first 50% of position exits at TP1, remaining 50% trails to TP2 / TP3 or break-even after TP1.
+      This matches the backtest's <code>realized_r</code> formula and standard ICT TP discipline.
+      Signal History's "P&amp;L (max)" column shows the max-greed alternative (100%-at-target);
+      this tab uses the realistic cascade so equity curve and drawdown reflect actual booked profit.
+      <br><br>
+      <b>Empty?</b> The panel needs at least one closed signal to render. New paper accounts will see
+      empty cards until the first WIN / LOSS / PARTIAL / EXPIRED outcome lands.
+    </div>
+
+    <!-- ── Range selector ──────────────────────────────────────────────── -->
+    <div style="display:flex;gap:.5rem;align-items:center;margin:0 0 1rem 0">
+      <span style="color:var(--mute);font-size:.9rem">Range:</span>
+      <button class="ftab rp-range" data-days="30" onclick="setReportsRange(30,this)">30d</button>
+      <button class="ftab rp-range" data-days="90" onclick="setReportsRange(90,this)">90d</button>
+      <button class="ftab rp-range active" data-days="365" onclick="setReportsRange(365,this)">1y</button>
+      <button class="ftab rp-range" data-days="3650" onclick="setReportsRange(3650,this)">All</button>
+      <span style="margin-left:auto;color:var(--mute);font-size:.85rem" id="rpUpdated">&mdash;</span>
+    </div>
+
+    <!-- ── KPI row ─────────────────────────────────────────────────────── -->
+    <div class="rp-kpi-row">
+      <div class="rp-kpi"><div class="rp-kpi-lbl">Total Trades</div><div class="rp-kpi-val" id="rpKpiN">&mdash;</div></div>
+      <div class="rp-kpi"><div class="rp-kpi-lbl">Win Rate</div><div class="rp-kpi-val" id="rpKpiWr">&mdash;</div></div>
+      <div class="rp-kpi"><div class="rp-kpi-lbl">Total P&amp;L</div><div class="rp-kpi-val" id="rpKpiPnl">&mdash;</div></div>
+      <div class="rp-kpi"><div class="rp-kpi-lbl">Profit Factor</div><div class="rp-kpi-val" id="rpKpiPf">&mdash;</div></div>
+      <div class="rp-kpi"><div class="rp-kpi-lbl">Avg R</div><div class="rp-kpi-val" id="rpKpiR">&mdash;</div></div>
+      <div class="rp-kpi"><div class="rp-kpi-lbl">Best / Worst</div><div class="rp-kpi-val" id="rpKpiBw">&mdash;</div></div>
+      <div class="rp-kpi"><div class="rp-kpi-lbl">Max Drawdown</div><div class="rp-kpi-val" id="rpKpiDd">&mdash;</div></div>
+    </div>
+
+    <!-- ── Three pie charts ────────────────────────────────────────────── -->
+    <div class="rp-pie-row">
+      <div class="rp-card rp-pie-card">
+        <div class="rp-card-title">Outcomes</div>
+        <div class="rp-card-sub">WIN / PARTIAL / LOSS / EXPIRED</div>
+        <div class="rp-pie-wrap"><canvas id="rpOutcomeChart"></canvas></div>
+      </div>
+      <div class="rp-card rp-pie-card">
+        <div class="rp-card-title">Direction</div>
+        <div class="rp-card-sub">BUY vs SELL distribution</div>
+        <div class="rp-pie-wrap"><canvas id="rpDirChart"></canvas></div>
+      </div>
+      <div class="rp-card rp-pie-card">
+        <div class="rp-card-title">Win Rate by Session</div>
+        <div class="rp-card-sub">Asia / London / NY / Overnight</div>
+        <div class="rp-pie-wrap"><canvas id="rpSessionChart"></canvas></div>
+      </div>
+    </div>
+
+    <!-- ── Equity Curve (relocated from Open Positions) ────────────────── -->
+    <div class="rp-card">
+      <div class="rp-card-header">
+        <div>
+          <div class="rp-card-title">Equity Curve</div>
+          <div class="rp-card-sub" id="rpEquitySummary">Cumulative P&amp;L over closed signals (50/50 cascade)</div>
+        </div>
+        <div class="equity-range">
+          <button class="ftab eq-range active" data-days="30" onclick="setEquityRange(30,this)">30d</button>
+          <button class="ftab eq-range" data-days="90" onclick="setEquityRange(90,this)">90d</button>
+          <button class="ftab eq-range" data-days="365" onclick="setEquityRange(365,this)">1y</button>
+        </div>
+      </div>
+      <div id="equityCurveWrap" class="equity-canvas-wrap"><canvas id="equityChart"></canvas></div>
+    </div>
+
+    <!-- ── R-multiple distribution + Drawdown ──────────────────────────── -->
+    <div class="rp-two-col">
+      <div class="rp-card">
+        <div class="rp-card-title">R-Multiple Distribution</div>
+        <div class="rp-card-sub">How many trades closed in each realized-R bucket</div>
+        <div class="rp-bar-wrap"><canvas id="rpRChart"></canvas></div>
+      </div>
+      <div class="rp-card">
+        <div class="rp-card-title">Drawdown (Underwater)</div>
+        <div class="rp-card-sub">% below all-time-peak equity over time</div>
+        <div class="rp-bar-wrap"><canvas id="rpDdChart"></canvas></div>
+      </div>
+    </div>
+
+    <!-- ── Monthly P&L + Per-token bar ─────────────────────────────────── -->
+    <div class="rp-two-col">
+      <div class="rp-card">
+        <div class="rp-card-title">Monthly P&amp;L</div>
+        <div class="rp-card-sub">Cumulative profit per month (green=positive, red=negative)</div>
+        <div class="rp-bar-wrap"><canvas id="rpMonthlyChart"></canvas></div>
+      </div>
+      <div class="rp-card">
+        <div class="rp-card-title">Trades by Token</div>
+        <div class="rp-card-sub">Count and WR% per token (top 10 by volume)</div>
+        <div class="rp-bar-wrap"><canvas id="rpTokenChart"></canvas></div>
+      </div>
+    </div>
+
+  </div>
+  <!-- /panelReports -->
+
   <!-- BACKTEST PANEL -->
   <div id="panelBacktest" class="tab-panel">
 
     <div class="honest-section-intro" style="margin:0 0 1rem 0">
-      <b>What is this tab?</b> The <b>strategy validation</b> view. Runs the exact same ICT signal logic
-      that fires live signals, but over the last 365 days of historical data. Tells you whether
-      the strategy <em>would have worked</em> across many market conditions.
+      <b>What is this tab?</b> The <b>strategy validation</b> view. Runs the same scanners that fire live
+      signals (CRT by default; 5M_SWEEP when <code>ENABLE_5M_SWEEP=1</code>), but over the last 365 days
+      of historical data. Tells you whether the strategy <em>would have worked</em> across many market conditions.
       <br><br>
-      Click <b>Run Backtest</b> to execute (VPN required &mdash; Binance is the data source; ~15&ndash;30 min on 5M candles).
-      Results break down by token, regime, hour, day-of-week, sweep type, confluence template, and more.
-      The <b>Walk-Forward</b> section shows out-of-sample (OOS) vs in-sample (IS) win rates &mdash; a small or negative
-      overfit gap (IS &le; OOS) is a strong signal the edge is real.
+      Click <b>Run Backtest</b> to execute (VPN required &mdash; Binance is the data source).
+      Typical runtime: ~11 min with warm cache; up to ~30 min on a cold fetch of all 10 tokens.
+      Results break down by token, regime, hour, day-of-week, signal source (5M_SWEEP / H4_CRT),
+      confluence template, and more. The <b>Walk-Forward</b> section shows out-of-sample (OOS) vs
+      in-sample (IS) win rates &mdash; a small or negative overfit gap (IS &le; OOS) is a strong signal
+      the edge is real.
       <br><br>
       <b>Tip:</b> Backtest WR is the <em>headline</em> number (easy to overfit). For LIVE-readiness,
       cross-check the <b>Honest Metrics</b> tab (CPCV + DSR) and <b>QuantStats</b> (Sharpe, Sortino, Calmar, drawdown).
@@ -993,7 +1175,7 @@ tr:hover td{background:rgba(37,37,56,.45)}
         <div class="bt-progress-bar"><div class="bt-progress-fill" id="btProgressFill" style="width:0%"></div></div>
         <div class="bt-progress-msg" id="btProgressMsg">Ready</div>
       </div>
-      <small style="color:var(--muted)">&#9888; VPN required &nbsp;&#183;&nbsp; ~15-30 min (5M resolution) &nbsp;&#183;&nbsp; auto-saves to DB</small>
+      <small style="color:var(--muted)">&#9888; VPN required &nbsp;&#183;&nbsp; ~11 min warm cache (up to ~30 min cold fetch) &nbsp;&#183;&nbsp; auto-saves to DB</small>
     </div>
     <div id="btErrorLog" style="display:none;margin-top:10px;background:#1a0a0a;border:1px solid #ff4444;border-radius:8px;padding:12px;">
       <div style="color:#ff6666;font-size:11px;font-weight:600;margin-bottom:6px;">ERROR LOG</div>
@@ -1026,6 +1208,17 @@ tr:hover td{background:rgba(37,37,56,.45)}
         <div class="conf-breakdown" id="btRegimeList"></div>
       </div>
 
+      <!-- By Signal Source (CRT v1, 2026-05-27) — 5M_SWEEP vs H4_CRT mix -->
+      <div class="intel-sec">
+        <div class="intel-sec-title">
+          Win Rate by Signal Source
+          <span class="badge" style="font-size:.65rem;text-transform:none;letter-spacing:0;font-weight:400;color:var(--muted)">
+            5M_SWEEP = legacy 5M-sweep scanner (Run-168 baseline, dormant in operator's current .env) · H4_CRT = active CRT scanner
+          </span>
+        </div>
+        <div class="conf-breakdown" id="btSourceList"></div>
+      </div>
+
       <!-- By Confidence -->
       <div class="intel-sec">
         <div class="intel-sec-title">Win Rate by Confidence Level</div>
@@ -1038,9 +1231,9 @@ tr:hover td{background:rgba(37,37,56,.45)}
         <div class="conf-breakdown" id="btDirList"></div>
       </div>
 
-      <!-- ICT Kill Zone Session -->
+      <!-- Session Win Rate -->
       <div class="intel-sec">
-        <div class="intel-sec-title">Win Rate by ICT Kill Zone Session</div>
+        <div class="intel-sec-title">Win Rate by Session</div>
         <div class="conf-breakdown" id="btSessionList"></div>
       </div>
 
@@ -1330,13 +1523,13 @@ tr:hover td{background:rgba(37,37,56,.45)}
           <div class="honest-label">Bot Version</div>
           <div class="honest-value" id="hmBotVersion">—</div>
           <div class="honest-sub" id="hmExecutionMode">—</div>
-          <div class="honest-desc">Current strategy variant. PAPER mode = signals only, no auto-trades.</div>
+          <div class="honest-desc">Current build &amp; scanner mode (CRT-only / 5M-only / dual). PAPER mode = signals only, no auto-trades.</div>
         </div>
         <div class="honest-card honest-status">
           <div class="honest-label">Latest Audit Score</div>
           <div class="honest-value" id="hmAuditScore">—</div>
           <div class="honest-sub" id="hmAuditDate">—</div>
-          <div class="honest-desc">Out of 10 — combined verdict of 11 specialist code audits (ICT logic, risk, statistics, etc.). ≥9 is enterprise-grade.</div>
+          <div class="honest-desc">Out of 10 — combined verdict of 11 specialist code audits (CRT logic, ICT logic, risk, statistics, honest-metrics, etc.). ≥9 is enterprise-grade.</div>
         </div>
         <div class="honest-card honest-status">
           <div class="honest-label">OGD Health</div>
@@ -1373,6 +1566,18 @@ tr:hover td{background:rgba(37,37,56,.45)}
       <div class="honest-section">
         <div class="honest-section-title">&#129504; Latest Backtest &mdash; Honest Metrics</div>
         <div class="honest-section-intro">How the strategy performed on historical data. The <b>Headline WR</b> is the single-split number (easy to overfit). The <b>CPCV</b> and <b>DSR</b> numbers are the honest ones &mdash; they correct for the temptation to test 100 configs and pick the lucky winner. Gold-bordered cells are the metrics that decide LIVE-readiness.</div>
+        <!-- CRT v1 (2026-05-27): blend warning banner. Shown only when the latest
+             backtest mixes 5M_SWEEP + H4_CRT signals — current CPCV/DSR pipeline
+             averages both invisibly. Hidden by default; populated by loadHonestMetrics(). -->
+        <div id="hmBlendBanner" style="display:none;margin:0.4rem 0 0.8rem 0;padding:0.6rem 0.8rem;
+             background:rgba(245,166,35,0.08);border:1px solid var(--yellow);border-radius:6px;
+             color:var(--yellow);font-size:0.82rem;line-height:1.45">
+          <strong>&#9888; Mixed-source backtest</strong> &mdash; <span id="hmBlendDetail"></span>
+          Live mode is currently <strong>CRT-only</strong> (<code>ENABLE_5M_SWEEP=0</code>). The CPCV/DSR/Sharpe
+          metrics below average across both scanners &mdash; the headline could pass on a strong 5M_SWEEP
+          subset while the live H4_CRT path is actually weaker (or vice versa). Run a CRT-only backtest
+          (<code>ENABLE_5M_SWEEP=0</code> in <code>.env.explorer</code>) for an honest read.
+        </div>
         <div class="honest-grid">
           <div class="honest-cell">
             <div class="honest-cell-label">Latest Run</div>
@@ -1395,7 +1600,7 @@ tr:hover td{background:rgba(37,37,56,.45)}
           <div class="honest-cell honest-highlight">
             <div class="honest-cell-label">CPCV mean WR &#11088;</div>
             <div class="honest-cell-value" id="hmCpcvWr">—</div>
-            <div class="honest-cell-sub">Honest average (target &ge;58%)</div>
+            <div class="honest-cell-sub">Honest average (target &ge;60% for LIVE)</div>
             <div class="honest-cell-desc">Average win rate across 10 different time slices of the data. Resists overfitting. This is the WR you should actually trust.</div>
           </div>
           <div class="honest-cell">
@@ -1430,14 +1635,59 @@ tr:hover td{background:rgba(37,37,56,.45)}
           </div>
         </div>
         <div class="honest-verdict-row">
-          <span class="honest-verdict-label">Phase A Verdict:</span>
+          <span class="honest-verdict-label">Backtest Honest Verdict:</span>
           <span class="honest-verdict-value" id="hmVerdict">—</span>
         </div>
         <div class="honest-verdict-legend">
-          <span><span class="honest-legend-dot pass"></span> <b>PASS</b> = CPCV &ge;58% AND DSR &ge;95%. LIVE-ready.</span>
-          <span><span class="honest-legend-dot marginal"></span> <b>MARGINAL</b> = CPCV &ge;55% AND DSR &ge;95%. Acceptable, but not ideal.</span>
+          <span><span class="honest-legend-dot pass"></span> <b>PASS</b> = CPCV &ge;60% AND DSR &ge;95% AND N&ge;30 closed paper signals. LIVE-ready.</span>
+          <span><span class="honest-legend-dot marginal"></span> <b>MARGINAL</b> = CPCV in 55&ndash;60% AND DSR &ge;95%. Below LIVE gate &mdash; informational only, NOT ready for real money.</span>
           <span><span class="honest-legend-dot fail"></span> <b>FAIL</b> = below either threshold. NOT ready for LIVE.</span>
         </div>
+      </div>
+
+      <!-- Phase A — Limit-Order Discipline (2026-05-28) -->
+      <div class="honest-section">
+        <div class="honest-section-title">&#127919; Limit-Order Discipline (Phase A)</div>
+        <div class="honest-section-intro">
+          The bot publishes a <b>theoretical entry price</b> at signal time. Real fills happen
+          only if you actually post a limit order and price retouches that level within the
+          <b>30-minute</b> fill window (set by <code>CRT_LIMIT_FILL_WINDOW_MIN</code>). If price
+          never retouches, the limit cancels and the trade is SKIPPED in your real ledger &mdash;
+          even though the bot still tracks the theoretical outcome.
+          <br><br>
+          This panel measures both gaps that decide whether the backtest WR carries to
+          real money: <b>slippage</b> (how far live tick has drifted from the published entry)
+          and <b>fillability</b> (did price actually retouch within the 30-minute window).
+          Restricting your scorecard to <em>filled-only</em> signals is the honest read &mdash;
+          the "limit-only WR" is what you can realistically earn at the desk.
+        </div>
+        <div class="honest-grid">
+          <div class="honest-cell">
+            <div class="honest-cell-label">Fill Rate</div>
+            <div class="honest-cell-value" id="hmFillRate">—</div>
+            <div class="honest-cell-sub" id="hmFillRateSub">— filled / — evaluated</div>
+            <div class="honest-cell-desc">% of evaluated signals where price retouched the entry within the 30-minute fill window. Higher = fewer missed limits.</div>
+          </div>
+          <div class="honest-cell">
+            <div class="honest-cell-label">Avg |Slippage|</div>
+            <div class="honest-cell-value" id="hmAvgSlip">—</div>
+            <div class="honest-cell-sub" id="hmAvgSlipSub">Across tracked signals</div>
+            <div class="honest-cell-desc">Mean absolute gap between published entry and live tick at signal save (% of price). Lower = telegram price is closer to executable. Color bands at 0.5% (warn) and 2% (crit).</div>
+          </div>
+          <div class="honest-cell honest-highlight">
+            <div class="honest-cell-label">Limit-Only WR &#11088;</div>
+            <div class="honest-cell-value" id="hmLimitWr">—</div>
+            <div class="honest-cell-sub" id="hmLimitWrSub">— wins / — closed &amp; filled</div>
+            <div class="honest-cell-desc">WR restricted to closed signals that actually filled. This is the realistic limit-order edge &mdash; what live execution would book.</div>
+          </div>
+          <div class="honest-cell">
+            <div class="honest-cell-label">Waiting</div>
+            <div class="honest-cell-value" id="hmWaitCount">—</div>
+            <div class="honest-cell-sub">Still inside fill window</div>
+            <div class="honest-cell-desc">Signals fired in the last fill-window minutes &mdash; outcome pending until the window closes.</div>
+          </div>
+        </div>
+        <div class="honest-sub" style="margin-top:8px" id="hmLimitNote">—</div>
       </div>
 
       <!-- Cross-config sr_trial_std -->
@@ -1490,7 +1740,7 @@ tr:hover td{background:rgba(37,37,56,.45)}
       monthly heatmap, rolling Sharpe, and the full HTML report embedded below.
       <br><br>
       <b>Annualization is auto-scaled</b> to your actual trade frequency, not the default 252-day assumption &mdash; so the
-      Sharpe number is honest for sparse ICT signals.
+      Sharpe number is honest for sparse signal cadence (typical of both 5M_SWEEP and CRT scanners).
       <br><br>
       <b>Tip:</b> Toggle source between <b>Backtest</b> (historical validation) and <b>Paper</b> (live signals as they accumulate).
     </div>
@@ -1573,7 +1823,11 @@ tr:hover td{background:rgba(37,37,56,.45)}
       gates as manual backtests; auto-promoted winners (Pareto-improving + reproducible) become the new baseline pin
       automatically. <strong>Never auto-flips LIVE</strong> &mdash; that decision stays operator-deliberate.
       <br><br>
-      Start a session manually with <code style="background:var(--bg);padding:1px 5px;border-radius:3px">python scripts/autonomous_explorer.py --trials 30</code>.
+      Preferred start: <code style="background:var(--bg);padding:1px 5px;border-radius:3px">sudo systemctl start tradeai-explorer</code> (survives SSH disconnect).
+      Legacy tmux: <code style="background:var(--bg);padding:1px 5px;border-radius:3px">python scripts/autonomous_explorer.py --trials 30</code>.
+      Default search space tunes CRT params (CRT_TP1_MODE, CRT_TP2_RR/TP3_RR, H4_CRT_C2_LOOKBACK,
+      WYCKOFF_PHASE_FILTER off/loose, CRT_REQUIRE_1H_TREND, BACKTEST_BIAS_4H_GATE, CRT_FORWARD_BARS).
+      Set <code>EXPLORER_SEARCH_SPACE=5m</code> in <code>.env.explorer</code> for the legacy 5M_SWEEP space.
       Each trial = ~11 min. Status updates here every 15s while running.
       <br>
       <button class="faq-learn-btn" onclick="openFAQ('explorer')">&#128214; Learn more &rarr;</button>
@@ -1718,12 +1972,12 @@ tr:hover td{background:rgba(37,37,56,.45)}
 
   <div id="faq_open">
     <h3>What is this panel?</h3>
-    <p>The <strong>Open Positions</strong> tab is your <strong>live action board</strong>. It shows every signal the bot has fired that is still in-progress &mdash; meaning it has not yet hit TP1, TP2, TP3, the stop loss, or expired. It also displays the cumulative P&amp;L equity curve from all closed signals over the selected window.</p>
+    <p>The <strong>Open Positions</strong> tab is your <strong>live action board</strong>. It shows every signal the bot has fired that is still in-progress &mdash; meaning it has not yet hit the stop loss, any take-profit (TP1/TP2/TP3), or the outcome window expiry (48h for CRT, 24h for 5M_SWEEP). It also displays the cumulative P&amp;L equity curve from all closed signals over the selected window.</p>
     <h3>Why it exists</h3>
     <p>You need a single screen to answer: <em>"What real money am I exposed to right now?"</em> Every open card represents a trade the bot wants you to execute manually. Closing one early or letting it ride affects your real outcomes &mdash; this tab is where you make those decisions.</p>
     <h3>Section-by-section</h3>
     <h4>Open signal cards</h4>
-    <p>Each card represents one in-flight signal with: token, direction (BUY/SELL), entry price, stop loss, take-profit ladder (TP1 / TP2 / TP3), R:R ratios, confidence (1&ndash;10), live MFE/MAE, and a manual close button.</p>
+    <p>Each card represents one in-flight signal with: token, direction (BUY/SELL), entry price, stop loss, take-profit ladder (TP1 40% close / TP2 40% close / TP3 20% close &mdash; the <strong>set-and-forget cascade</strong>), R:R ratios, confidence (1&ndash;10), live MFE/MAE, and a manual close button. CRT signals expire after <strong>48 hours</strong>; 5M_SWEEP signals expire after <strong>24 hours</strong>.</p>
     <h4>Equity curve</h4>
     <p>Hidden until the first signal closes. Plots cumulative P&amp;L over closed trades. Annotated with peak equity and max drawdown. Range selector: 30d / 90d / 1y.</p>
     <h3>When to check it</h3>
@@ -1745,7 +1999,7 @@ tr:hover td{background:rgba(37,37,56,.45)}
     </table>
     <h3>Common scenarios</h3>
     <div class="faq-tip"><strong>Scenario A:</strong> Telegram pings at 3am with a BUY on AVAX. You wake at 7am, check Open Positions, see AVAX up 2% (already past TP1). You manually close at +2% via the modal &mdash; the bot logs this as a manual exit and computes P&amp;L from your exit price, not the bot's TP target.</div>
-    <div class="faq-warn"><strong>Scenario B:</strong> You see 4 open positions but only have time to execute 2. Adaptive tab shows MAX_OPEN_POSITIONS limit (20 in PAPER, 4 in LIVE) so the bot would have allowed all 4. Pick the 2 with highest confidence + best R:R from the cards.</div>
+    <div class="faq-warn"><strong>Scenario B:</strong> You see 4 open positions but only have time to execute 2. Adaptive tab shows MAX_OPEN_POSITIONS limit (20 in PAPER, 4 in LIVE). LIVE also caps per-tier per UTC day (CRT_A=3, CRT_B=2, CRT_C=0), so even if MAX_OPEN allowed 4, the daily cap may have already skipped some. Pick the 2 with highest tier (A &gt; B) + best R:R from the cards.</div>
     <h3>Glossary</h3>
     <ul>
       <li><strong>MFE (Maximum Favorable Excursion):</strong> the peak profit the position reached before reversing &mdash; how good it briefly looked</li>
@@ -1768,7 +2022,7 @@ tr:hover td{background:rgba(37,37,56,.45)}
     <h4>Main table</h4>
     <p>Sortable columns: ID, token, signal direction, entry, SL, TP1/2/3, R:R, confidence, timestamp, status. Click any column header to sort.</p>
     <h4>Row expansion</h4>
-    <p>Click a row to reveal the full feature snapshot at signal-fire time: market regime, sweep type, session, dealing-range location, MSS quality, FVG quality, SMT type, entry type, EV score, ICT bias, template match, OGD weights, and more.</p>
+    <p>Click a row to reveal the full feature snapshot at signal-fire time: regime, sweep type (5M_SWEEP) or Wyckoff phase + confluence (CRT), session, DR location, MSS quality, FVG quality, SMT type, entry type, EV score, 4H bias, matched tier (CRT_A/B/C or TIER_A/B/C), OGD weights at fire-time, Phase A slippage + fill status, and more.</p>
     <h3>When to check it</h3>
     <ul>
       <li>After a losing streak &mdash; filter by "Losses" + token to find common patterns</li>
@@ -1791,13 +2045,20 @@ tr:hover td{background:rgba(37,37,56,.45)}
     <div class="faq-warn"><strong>Scenario B:</strong> "Bot fired but I didn't get the Telegram." Filter by Open (or by token) + check the timestamp matches what you saw. If the row exists but Telegram failed, the issue is in the alert delivery, not the bot. Logs would have a [TG FAILED] line.</div>
     <h3>Glossary</h3>
     <ul>
-      <li><strong>OPEN:</strong> signal fired, in-flight, not yet TP/SL/expired</li>
-      <li><strong>WIN:</strong> hit TP3 fully (max profit)</li>
-      <li><strong>PARTIAL / PARTIAL_TP1 / PARTIAL_TP2:</strong> hit TP1 (and/or TP2), then reversed before TP3 &mdash; still counts as a winner in WR math</li>
-      <li><strong>LOSS:</strong> hit SL before any TP</li>
-      <li><strong>EXPIRED:</strong> entry window passed without hitting either TP or SL</li>
-      <li><strong>Sweep type:</strong> BSL (buy-side liquidity, used for SELL setup) or SSL (sell-side liquidity, used for BUY setup)</li>
+      <li><strong>OPEN:</strong> signal fired, outcome window still running</li>
+      <li><strong>WIN:</strong> reached TP3 fully OR (under the <strong>C6 priority rule</strong>) hit TP1 first and was later closed at full profit even if price subsequently reversed to SL</li>
+      <li><strong>PARTIAL / PARTIAL_TP1 / PARTIAL_TP2:</strong> hit TP1 (and/or TP2) then reversed before TP3 &mdash; partial-cascade outcomes count as a winner in WR math (PARTIAL = 0.5 of a WIN)</li>
+      <li><strong>LOSS:</strong> hit SL before any TP (C6: SL after TP1 was hit does NOT downgrade a WIN)</li>
+      <li><strong>EXPIRED:</strong> outcome window elapsed without hitting TP or SL (24h for 5M_SWEEP, <strong>48h for CRT</strong> &mdash; driven by <code>CRT_FORWARD_BARS=576</code> × 5min)</li>
+      <li><strong>Sweep type:</strong> BSL (buy-side liquidity, used for SELL setup) or SSL (sell-side liquidity, used for BUY setup). Populated on 5M_SWEEP signals; CRT uses BSL_CRT / SSL_CRT.</li>
       <li><strong>EV score:</strong> expected value rank (template-specific quality bonus)</li>
+      <li><strong>CRT_A_FVG_ALIGNED:</strong> highest-quality CRT tier &mdash; FVG confluence in C2 + MSS quality = HIGH</li>
+      <li><strong>CRT_B_OB_HIGH_MSS:</strong> medium-quality CRT tier &mdash; Order-Block confluence + MSS quality &ge; MEDIUM</li>
+      <li><strong>CRT_B_FVG_RELAXED:</strong> deprecated legacy tier (kept for historical-DB compatibility)</li>
+      <li><strong>CRT_C_OB_DEFAULT:</strong> catch-all paper-only CRT tier (live_allowed=0; never fires in LIVE)</li>
+      <li><strong>TIER_A / TIER_B / TIER_C:</strong> legacy 5M_SWEEP tier system (still used when ENABLE_5M_SWEEP=1)</li>
+      <li><strong>Daily LIVE cap by tier:</strong> A=3, B=2, C=0 signals per UTC day (Phase 5A safety)</li>
+      <li><strong>Wyckoff phase tag:</strong> shown on each CRT signal but <em>not</em> used to gate entry &mdash; empirical test (Run #140 Test B) showed strict Wyckoff gating costs &minus;5.22pp WR. Phase is fed into OGD for per-phase learning instead.</li>
     </ul>
   </div>
 
@@ -1869,9 +2130,9 @@ tr:hover td{background:rgba(37,37,56,.45)}
 
   <div id="faq_backtest">
     <h3>What is this panel?</h3>
-    <p>The <strong>Backtest</strong> tab is the <strong>strategy validation</strong> view. It runs the same ICT signal logic that fires live, but over historical data (last 365 days of 5M Binance candles). Tells you whether the strategy <em>would have worked</em> across many market conditions.</p>
+    <p>The <strong>Backtest</strong> tab is the <strong>strategy validation</strong> view. It runs the same scanners that fire live (CRT by default, plus 5M_SWEEP when <code>ENABLE_5M_SWEEP=1</code>), but over historical data (last 365 days of 5M Binance candles, plus H4 for the CRT scanner). Tells you whether the strategy <em>would have worked</em> across many market conditions.</p>
     <h3>Why it exists</h3>
-    <p>Live trading data accumulates slowly (3-5 signals/month). Backtest fills the gap by simulating the strategy over a year of historical data in ~11 minutes. It gives you statistical power (n=40+) for decisions that would otherwise wait 8+ months of paper trading.</p>
+    <p>Live trading data accumulates slowly (CRT: ~15 signals/month; 5M_SWEEP: ~2-3 signals/month historically). Backtest fills the gap by simulating the strategy over a year of historical data in ~11 minutes. It gives you statistical power (n=80+ for CRT) for decisions that would otherwise wait many months of paper trading.</p>
     <p><strong>Important nuance:</strong> backtest WR is the <em>headline</em> number (easy to overfit). For LIVE-readiness, cross-check the <strong>Honest Metrics</strong> tab (CPCV + DSR).</p>
     <h3>Section-by-section</h3>
     <h4>Baseline pin banner</h4>
@@ -1882,7 +2143,7 @@ tr:hover td{background:rgba(37,37,56,.45)}
       <li>&#x26D4; <strong>Mismatch:</strong> latest differs from pin &mdash; investigate</li>
     </ul>
     <h4>Run Controls</h4>
-    <p>Click <strong>Run Backtest</strong> to execute. VPN required (Binance blocked in PH). Cached candle data makes re-runs ~3-5 min. Auto-saves to DB.</p>
+    <p>Click <strong>Run Backtest</strong> to execute. VPN required (Binance blocked in PH). Cached candle data makes re-runs ~11 min (vs ~30 min cold). Auto-saves to DB.</p>
     <h4>Meta bar</h4>
     <p>Run date, period, resolution, total signals, headline WR, avg R:R, cost model (slippage + fee).</p>
     <h4>Performance by Token</h4>
@@ -1953,13 +2214,20 @@ tr:hover td{background:rgba(37,37,56,.45)}
         <tr><td>Same Direction (BUY or SELL)</td><td>10</td><td>2</td></tr>
         <tr><td>Capital at Risk</td><td>100%</td><td>3%</td></tr>
         <tr><td>Drawdown Halt</td><td>20%</td><td>10%</td></tr>
+        <tr><td>Daily LIVE cap by tier</td><td>n/a</td><td>A=3, B=2, C=0 (per UTC day)</td></tr>
       </tbody>
     </table>
     <p>When a bar turns red, the bot skips new signals in that direction until a position closes.</p>
+    <p><strong>Phase 5A template safety</strong> adds three more silent gates in LIVE:
+      <strong>INSUFFICIENT_SAMPLE</strong> (n&lt;50 closed signals at the tier),
+      <strong>CIRCUIT_BREAKER</strong> (rolling WR&lt;55%),
+      <strong>DAILY_CAP</strong> (per-tier per-UTC-day). Blocked signals appear as fired-then-blocked
+      entries in Signal History.</p>
     <h4>Per-Token OGD Weight Matrix</h4>
     <p>For each token, 6 features have a weight summing to 100%:</p>
     <ul>
-      <li>FVG quality, MSS quality, session, confidence, trend strength, DR location</li>
+      <li>FVG quality, MSS quality, session, confidence, trend strength, DR location.
+          <small>(As of 2026-05-28: CRT signals now populate DR location and SMT correctly &mdash; both were stubbed pre-F-1 fix.)</small></li>
     </ul>
     <p>Dotted vertical line marks the default 16.7% (equal weight). Green = above default (stronger predictor for that token). Below = weaker. Weights update only on signal close. A token pinned to all-floor weights signals <em>degeneration</em> (flagged red).</p>
     <h4>Concept Drift Baselines</h4>
@@ -2112,6 +2380,8 @@ tr:hover td{background:rgba(37,37,56,.45)}
     <table>
       <thead><tr><th>Command</th><th>What it does</th></tr></thead>
       <tbody>
+        <tr><td><code>sudo systemctl start tradeai-explorer</code></td><td><strong>Preferred:</strong> starts via systemd, survives SSH disconnect, restart-on-crash up to 3&times;/10min</td></tr>
+        <tr><td><code>sudo systemctl stop tradeai-explorer</code></td><td>Clean SIGTERM &mdash; finishes current trial, persists state</td></tr>
         <tr><td><code>--trials 30</code></td><td>Run 30 trials (~5.5 hours)</td></tr>
         <tr><td><code>--study-name &lt;name&gt;</code></td><td>Optuna study label (same name = Bayesian continuity)</td></tr>
         <tr><td><code>--status</code></td><td>Print current session state + Pareto top-5</td></tr>
@@ -2124,7 +2394,7 @@ tr:hover td{background:rgba(37,37,56,.45)}
     <h3>Common scenarios</h3>
     <div class="faq-tip"><strong>Scenario A:</strong> Started 30-trial session before bed. Wake up: dashboard shows 28 trials done (2 ERROR from timeouts), 5 PASS, no auto-promotions. PASS trials match baseline closely (no Pareto improvement). Run <code>--digest 12</code> for summary. No action needed.</div>
     <div class="faq-warn"><strong>Scenario B:</strong> Dashboard shows AUTO_PROMOTED row from 03:14am. New baseline is Run-X. Check Backtest tab &mdash; pin banner shows OK status with new Run-X. Review trial details; if happy, do nothing. If concerned, rollback via CLI.</div>
-    <div class="faq-danger"><strong>Scenario C:</strong> Session paused with "code_drift" reason. You edited <code>ict_engine.py</code> or <code>backtest.py</code> while explorer was running. Restart the session after your edits are complete.</div>
+    <div class="faq-danger"><strong>Scenario C:</strong> Session paused with "code_drift" reason. You edited <code>ict_engine.py</code>, <code>crt_engine.py</code>, <code>backtest.py</code>, or another tracked source file while explorer was running. Restart the session after your edits are complete.</div>
     <h3>Glossary</h3>
     <ul>
       <li><strong>Optuna:</strong> Bayesian hyperparameter search library. TPE sampler learns from prior trials to pick smart next ones</li>
@@ -2347,7 +2617,7 @@ async function loadAll(){
     }
   }catch(e){console.error('health',e)}
 
-  await Promise.all([loadStats(), loadOpen(), loadHistory(), loadIntelligence(), loadEquityCurve(), loadHourDayHeatmap()]);
+  await Promise.all([loadStats(), loadOpen(), loadHistory(), loadIntelligence(), loadEquityCurve(), loadHourDayHeatmap(), loadActivity()]);
   document.getElementById('lastUpdated').textContent=
     'Updated: '+new Date().toLocaleTimeString();
 }
@@ -2756,13 +3026,15 @@ function setEquityRange(days, btn){
 }
 async function loadEquityCurve(){
   const wrap = document.getElementById('equityCurveWrap');
-  const sub  = document.getElementById('equitySummary');
+  // 2026-05-28: equity card moved to Reports tab — summary now lives at #rpEquitySummary.
+  const sub  = document.getElementById('rpEquitySummary') || document.getElementById('equitySummary');
   if(!wrap) return;
   try{
     const r = await fetch('/api/equity-curve?days='+_equityRangeDays);
     const d = await r.json();
     if(!d.ok || !Array.isArray(d.points) || d.points.length === 0){
       wrap.style.display = 'none';
+      if(sub) sub.innerHTML = 'No closed signals yet — chart will appear after the first WIN / LOSS / PARTIAL.';
       return;
     }
     wrap.style.display = 'block';
@@ -2771,7 +3043,7 @@ async function loadEquityCurve(){
     const s = d.summary || {};
     const finalSign = (s.final||0) >= 0 ? '+' : '';
     const ddSign    = (s.max_dd||0) <= 0 ? '' : '+';
-    sub.innerHTML =
+    if(sub) sub.innerHTML =
       '<span style="color:'+((s.final||0)>=0?'var(--green)':'var(--red)')+'">'
       + finalSign + (s.final||0).toFixed(2) + '%</span>'
       + ' &nbsp;·&nbsp; n=' + (s.n||0)
@@ -2846,6 +3118,276 @@ async function loadEquityCurve(){
   }
 }
 
+// ── REPORTS TAB (2026-05-28) ─────────────────────────────────────────────────
+// Trading-performance dashboard. LIVE/PAPER only — backtest excluded server-side.
+let _rpRangeDays = 365;
+let _rpCharts = {outcome:null, dir:null, session:null, r:null, monthly:null, token:null, dd:null};
+
+function setReportsRange(days, btn){
+  _rpRangeDays = days;
+  document.querySelectorAll('.rp-range').forEach(b => b.classList.remove('active'));
+  if(btn) btn.classList.add('active');
+  loadReports();
+}
+
+function _rpFmtPct(v){
+  v = Number(v||0);
+  return (v>=0?'+':'') + v.toFixed(2) + '%';
+}
+
+function _rpColor(s){
+  // Outcome colors aligned with the rest of the dashboard
+  const map = {
+    WIN:'#22c55e', PARTIAL:'#fbbf24', LOSS:'#ef4444', EXPIRED:'#94a3b8',
+    BUY:'#22c55e', SELL:'#ef4444',
+    ASIA_KZ:'#a78bfa', LONDON_KZ:'#60a5fa', NY_AM_KZ:'#fbbf24',
+    OVERNIGHT:'#64748b', UNKNOWN:'#475569',
+  };
+  return map[s] || '#475569';
+}
+
+async function loadReports(){
+  const err = document.getElementById('reportsError');
+  if(err) err.style.display = 'none';
+  try{
+    const r = await fetch('/api/reports?days='+_rpRangeDays);
+    const d = await r.json();
+    if(!d.ok){
+      if(err){ err.textContent = 'Reports load failed: '+(d.error||'unknown'); err.style.display = 'block'; }
+      return;
+    }
+    _rpRenderKpi(d.kpi || {});
+    _rpRenderOutcomes(d.outcomes || {});
+    _rpRenderDirections(d.directions || {});
+    _rpRenderSessions(d.sessions || []);
+    _rpRenderRDist(d.r_dist || {});
+    _rpRenderMonthly(d.monthly || []);
+    _rpRenderTokens(d.tokens || []);
+    _rpRenderDrawdown(d.underwater || []);
+    // Equity curve uses the existing endpoint + chart
+    loadEquityCurve();
+    const upd = document.getElementById('rpUpdated');
+    if(upd) upd.textContent = 'Updated ' + new Date().toLocaleTimeString();
+    // Tab pill: show total trade count
+    const pill = document.getElementById('reportsPill');
+    if(pill) pill.textContent = (d.kpi && d.kpi.n) ? String(d.kpi.n) : '·';
+  }catch(e){
+    if(err){ err.textContent = 'Reports fetch error: '+e.message; err.style.display = 'block'; }
+  }
+}
+
+function _rpRenderKpi(k){
+  const set = (id,v) => { const el = document.getElementById(id); if(el) el.textContent = v; };
+  set('rpKpiN',  k.n || 0);
+  set('rpKpiWr', (k.wr_pct||0).toFixed(1) + '%');
+  const pnlEl = document.getElementById('rpKpiPnl');
+  if(pnlEl){
+    pnlEl.textContent = _rpFmtPct(k.total_pnl_pct);
+    pnlEl.style.color = (k.total_pnl_pct||0) >= 0 ? '#22c55e' : '#ef4444';
+  }
+  set('rpKpiPf', k.profit_factor === null || k.profit_factor === undefined ? '∞' : k.profit_factor.toFixed(2));
+  set('rpKpiR',  (k.avg_r||0).toFixed(2));
+  set('rpKpiBw', _rpFmtPct(k.best) + ' / ' + _rpFmtPct(k.worst));
+  const ddEl = document.getElementById('rpKpiDd');
+  if(ddEl){
+    ddEl.textContent = _rpFmtPct(k.max_dd_pct);
+    ddEl.style.color = '#ef4444';
+  }
+}
+
+function _rpDoughnut(canvasId, labels, data, colors, cssText){
+  const el = document.getElementById(canvasId);
+  if(!el) return null;
+  const ctx = el.getContext('2d');
+  if(_rpCharts[cssText]){ _rpCharts[cssText].destroy(); _rpCharts[cssText] = null; }
+  const total = data.reduce((a,b)=>a+(Number(b)||0),0);
+  return new Chart(ctx, {
+    type:'doughnut',
+    data:{labels:labels, datasets:[{data:data, backgroundColor:colors, borderColor:'#0f0f17', borderWidth:2}]},
+    options:{
+      responsive:true, maintainAspectRatio:false, cutout:'62%',
+      plugins:{
+        legend:{position:'bottom', labels:{color:'#cbd5e1', font:{size:11}, padding:10, usePointStyle:true}},
+        tooltip:{
+          backgroundColor:'rgba(18,18,29,0.96)', borderColor:'#252538', borderWidth:1,
+          callbacks:{
+            label:(ctx)=>{
+              const v = Number(ctx.parsed||0);
+              const pct = total > 0 ? (v/total*100).toFixed(1)+'%' : '0%';
+              return ctx.label + ': ' + v + ' (' + pct + ')';
+            }
+          }
+        }
+      }
+    }
+  });
+}
+
+function _rpRenderOutcomes(o){
+  const labels = ['WIN','PARTIAL','LOSS','EXPIRED'];
+  const data   = labels.map(k => o[k] || 0);
+  const colors = labels.map(_rpColor);
+  _rpCharts.outcome = _rpDoughnut('rpOutcomeChart', labels, data, colors, 'outcome');
+}
+
+function _rpRenderDirections(dir){
+  const labels = ['BUY','SELL'];
+  const data   = labels.map(k => dir[k] || 0);
+  const colors = labels.map(_rpColor);
+  _rpCharts.dir = _rpDoughnut('rpDirChart', labels, data, colors, 'dir');
+}
+
+function _rpRenderSessions(sessions){
+  // Donut showing trade count per session — tooltip shows WR%.
+  const labels = sessions.map(s => s.session);
+  const data   = sessions.map(s => s.n);
+  const colors = labels.map(_rpColor);
+  const el = document.getElementById('rpSessionChart');
+  if(!el) return;
+  const ctx = el.getContext('2d');
+  if(_rpCharts.session){ _rpCharts.session.destroy(); _rpCharts.session = null; }
+  const total = data.reduce((a,b)=>a+(Number(b)||0),0);
+  _rpCharts.session = new Chart(ctx, {
+    type:'doughnut',
+    data:{labels:labels, datasets:[{data:data, backgroundColor:colors, borderColor:'#0f0f17', borderWidth:2}]},
+    options:{
+      responsive:true, maintainAspectRatio:false, cutout:'62%',
+      plugins:{
+        legend:{position:'bottom', labels:{color:'#cbd5e1', font:{size:11}, padding:10, usePointStyle:true}},
+        tooltip:{
+          backgroundColor:'rgba(18,18,29,0.96)', borderColor:'#252538', borderWidth:1,
+          callbacks:{
+            label:(ctx)=>{
+              const idx = ctx.dataIndex;
+              const sess = sessions[idx] || {};
+              const v = Number(ctx.parsed||0);
+              const pct = total > 0 ? (v/total*100).toFixed(1)+'%' : '0%';
+              return ctx.label + ': ' + v + ' trades (' + pct + ')  ·  WR ' + (sess.wr||0).toFixed(1) + '%';
+            }
+          }
+        }
+      }
+    }
+  });
+}
+
+function _rpRenderRDist(rd){
+  const labels = ['<-1R','-1..0R','0..1R','1..2R','2..3R','>3R'];
+  const data   = labels.map(k => rd[k] || 0);
+  const colors = labels.map(l => l.startsWith('<') || l.startsWith('-') ? '#ef4444' : '#22c55e');
+  const el = document.getElementById('rpRChart');
+  if(!el) return;
+  const ctx = el.getContext('2d');
+  if(_rpCharts.r){ _rpCharts.r.destroy(); _rpCharts.r = null; }
+  _rpCharts.r = new Chart(ctx, {
+    type:'bar',
+    data:{labels:labels, datasets:[{label:'Trades', data:data, backgroundColor:colors, borderRadius:4}]},
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{legend:{display:false}},
+      scales:{
+        x:{ticks:{color:'#94a3b8',font:{size:10}}, grid:{color:'rgba(37,37,56,0.3)'}},
+        y:{beginAtZero:true, ticks:{color:'#94a3b8',font:{size:10}, precision:0}, grid:{color:'rgba(37,37,56,0.3)'}}
+      }
+    }
+  });
+}
+
+function _rpRenderMonthly(arr){
+  const labels = arr.map(m => m.month);
+  const data   = arr.map(m => m.pnl);
+  const colors = data.map(v => v >= 0 ? '#22c55e' : '#ef4444');
+  const el = document.getElementById('rpMonthlyChart');
+  if(!el) return;
+  const ctx = el.getContext('2d');
+  if(_rpCharts.monthly){ _rpCharts.monthly.destroy(); _rpCharts.monthly = null; }
+  _rpCharts.monthly = new Chart(ctx, {
+    type:'bar',
+    data:{labels:labels, datasets:[{label:'Monthly P&L %', data:data, backgroundColor:colors, borderRadius:4}]},
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{
+        legend:{display:false},
+        tooltip:{
+          callbacks:{
+            label:(ctx)=>{
+              const idx = ctx.dataIndex; const m = arr[idx] || {};
+              return (m.pnl>=0?'+':'')+m.pnl.toFixed(2)+'%  ·  n='+m.n+'  ·  WR '+m.wr.toFixed(1)+'%';
+            }
+          }
+        }
+      },
+      scales:{
+        x:{ticks:{color:'#94a3b8',font:{size:10}}, grid:{color:'rgba(37,37,56,0.3)'}},
+        y:{ticks:{color:'#94a3b8',font:{size:10}, callback:(v)=>(v>=0?'+':'')+v.toFixed(1)+'%'}, grid:{color:'rgba(37,37,56,0.3)'}}
+      }
+    }
+  });
+}
+
+function _rpRenderTokens(arr){
+  const labels = arr.map(t => t.token);
+  const data   = arr.map(t => t.n);
+  const colors = arr.map(t => t.wr >= 60 ? '#22c55e' : (t.wr < 40 ? '#ef4444' : '#fbbf24'));
+  const el = document.getElementById('rpTokenChart');
+  if(!el) return;
+  const ctx = el.getContext('2d');
+  if(_rpCharts.token){ _rpCharts.token.destroy(); _rpCharts.token = null; }
+  _rpCharts.token = new Chart(ctx, {
+    type:'bar',
+    data:{labels:labels, datasets:[{label:'Trades', data:data, backgroundColor:colors, borderRadius:4}]},
+    options:{
+      indexAxis:'y',
+      responsive:true, maintainAspectRatio:false,
+      plugins:{
+        legend:{display:false},
+        tooltip:{
+          callbacks:{
+            label:(ctx)=>{
+              const idx = ctx.dataIndex; const t = arr[idx] || {};
+              return t.n + ' trades  ·  WR ' + t.wr.toFixed(1) + '%  ·  P&L ' + (t.pnl>=0?'+':'') + t.pnl.toFixed(2) + '%';
+            }
+          }
+        }
+      },
+      scales:{
+        x:{beginAtZero:true, ticks:{color:'#94a3b8',font:{size:10}, precision:0}, grid:{color:'rgba(37,37,56,0.3)'}},
+        y:{ticks:{color:'#94a3b8',font:{size:10}}, grid:{display:false}}
+      }
+    }
+  });
+}
+
+function _rpRenderDrawdown(arr){
+  const labels = arr.map(p => (p.ts || '').substring(5,16));
+  const data   = arr.map(p => p.dd_pct);
+  const el = document.getElementById('rpDdChart');
+  if(!el) return;
+  const ctx = el.getContext('2d');
+  if(_rpCharts.dd){ _rpCharts.dd.destroy(); _rpCharts.dd = null; }
+  _rpCharts.dd = new Chart(ctx, {
+    type:'line',
+    data:{labels:labels, datasets:[{
+      label:'Drawdown %', data:data,
+      borderColor:'#ef4444', backgroundColor:'rgba(239,68,68,0.18)',
+      borderWidth:2, fill:true, tension:0.18, pointRadius:0
+    }]},
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{
+        legend:{display:false},
+        tooltip:{
+          callbacks:{label:(ctx)=>'DD: ' + Number(ctx.parsed.y||0).toFixed(2) + '%'}
+        }
+      },
+      scales:{
+        x:{ticks:{color:'#94a3b8',font:{size:10}, maxRotation:0, autoSkip:true, maxTicksLimit:8}, grid:{color:'rgba(37,37,56,0.3)'}},
+        y:{ticks:{color:'#94a3b8',font:{size:10}, callback:(v)=>v.toFixed(1)+'%'}, grid:{color:'rgba(37,37,56,0.3)'}}
+      }
+    }
+  });
+}
+
 async function loadStats(){
   try{
     const r=await fetch('/api/stats');
@@ -2862,6 +3404,29 @@ async function loadStats(){
   }catch(e){showErr('Failed to load stats: '+e.message)}
 }
 
+// Timezone helper (2026-05-28 operator request): the bot writes UTC timestamps
+// as "YYYY-MM-DD HH:MM:SS" with NO timezone marker. Reading them raw in the
+// dashboard misled the operator into thinking 17:02 UTC was 5pm local time
+// when it's actually 01:02 AM PH (UTC+8). This helper parses the string as
+// explicit UTC (appends 'Z') then formats in browser-local time so every
+// signal/backtest row shows the operator's actual local timezone.
+//
+// Format: "MM-DD HH:MM" (short — matches the existing slice(0,16) length but
+// in 12-char form). Returns '—' on empty/invalid input.
+function _localTime(utcStr){
+  if(!utcStr) return '—';
+  // Append 'Z' so Date() parses as UTC; SQL format is "YYYY-MM-DD HH:MM:SS"
+  // (space separator). Replace ' ' with 'T' for ISO-8601, then append 'Z'.
+  let s = String(utcStr).replace(' ', 'T');
+  if(!s.endsWith('Z') && !s.includes('+') && !s.match(/-\d\d:\d\d$/)) s += 'Z';
+  const d = new Date(s);
+  if(isNaN(d.getTime())) return String(utcStr).slice(0,16); // fallback
+  // Localized short: "May 28, 01:02" style
+  const mo  = d.toLocaleString('en-US', {month:'short', day:'2-digit'});
+  const hm  = d.toLocaleString('en-US', {hour:'2-digit', minute:'2-digit', hour12:false});
+  return mo + ' ' + hm;
+}
+
 function trendClass(t){
   if(!t) return 'neutral';
   const l=t.toLowerCase();
@@ -2870,6 +3435,118 @@ function trendClass(t){
   if(l==='strong_bear') return 'strong-bear';
   if(l==='bear') return 'bear';
   return 'neutral';
+}
+
+// Phase B (2026-05-28) — Template tier cell. CRT_A_* / CRT_B_* / CRT_C_*
+// = CRT tier system; TIER_A/B/C = legacy 5M_SWEEP; otherwise muted dash.
+function _tierCell(r){
+  const t = r.matched_template_id || '';
+  if(!t || t === 'NONE') return '<td style="color:var(--muted);font-size:.72rem">—</td>';
+  let label = t, color = 'var(--muted)', bg = 'transparent';
+  if(t.startsWith('CRT_A_') || t === 'TIER_A'){
+    label = 'A'; color = '#0f0a02'; bg = 'rgba(212,175,55,.85)';   // gold pill
+  } else if(t.startsWith('CRT_B_') || t === 'TIER_B'){
+    label = 'B'; color = '#0a0a0a'; bg = 'rgba(192,192,192,.7)';   // silver pill
+  } else if(t.startsWith('CRT_C_') || t === 'TIER_C'){
+    label = 'C'; color = '#fff';    bg = 'rgba(176,141,87,.6)';    // bronze pill
+  }
+  return '<td><span title="'+t+'" style="display:inline-block;min-width:1.4rem;'
+    +'text-align:center;padding:.05rem .35rem;border-radius:4px;'
+    +'font-weight:700;font-size:.72rem;background:'+bg+';color:'+color+'">'
+    +label+'</span></td>';
+}
+
+// Phase A — Slippage cell. Colors based on CRT_SLIPPAGE_WARN/CRIT thresholds.
+// Pre-Phase-A signals have NULL slippage_pct → muted dash.
+function _slipCell(r){
+  const sp = r.slippage_pct;
+  if(sp==null) return '<td style="color:var(--muted);font-size:.72rem">—</td>';
+  const a = Math.abs(Number(sp));
+  const warn = (window._slipWarnPct!=null)?window._slipWarnPct:0.5;
+  const crit = (window._slipCritPct!=null)?window._slipCritPct:2.0;
+  const c = a>crit?'var(--red)':(a>warn?'var(--yellow)':'var(--green)');
+  const sign = Number(sp)>0?'+':'';
+  return '<td class="mono" style="color:'+c+';font-size:.74rem" title="signal price vs live tick at save">'
+    +sign+Number(sp).toFixed(3)+'%</td>';
+}
+
+// Phase A — Honest Metrics tab: limit-order discipline summary. Computed from
+// allSigs (already loaded by loadSignals → renderTable). If allSigs is empty
+// (Honest tab loaded before Signals tab in this session), fetch /api/signals
+// once and reuse.
+async function _renderLimitDiscipline(){
+  let sigs = (typeof allSigs !== 'undefined' && Array.isArray(allSigs)) ? allSigs : [];
+  if(!sigs.length){
+    try {
+      const r = await fetch('/api/signals');
+      if(r.ok) sigs = await r.json();
+    } catch(e) { sigs = []; }
+  }
+  // Only count signals that actually carry Phase-A tracking
+  const tracked = sigs.filter(r => r.slippage_pct != null);
+  const evaluated = tracked.filter(r => r.limit_fillable != null);
+  const filled    = tracked.filter(r => Number(r.limit_fillable) === 1);
+  const missed    = tracked.filter(r => Number(r.limit_fillable) === 0);
+  const waiting   = tracked.filter(r => r.limit_fillable == null);
+
+  const fillRate = evaluated.length ? (filled.length / evaluated.length * 100) : null;
+  const avgSlip  = tracked.length ?
+    (tracked.reduce((a,r)=>a+Math.abs(Number(r.slippage_pct)||0), 0) / tracked.length) : null;
+
+  // Limit-only WR — only filled signals that have closed with a result
+  const closedFilled = filled.filter(r => {
+    const o = (r.outcome || '').toUpperCase();
+    return o === 'WIN' || o === 'LOSS' || o.startsWith('PARTIAL');
+  });
+  const wins = closedFilled.filter(r => {
+    const o = (r.outcome || '').toUpperCase();
+    return o === 'WIN' || o.startsWith('PARTIAL_TP');  // C6 rule: TP1 hit = WIN
+  });
+  const limitWr = closedFilled.length ? (wins.length / closedFilled.length * 100) : null;
+
+  const setText = (id, txt) => { const el = document.getElementById(id); if(el) el.textContent = txt; };
+
+  setText('hmFillRate',    fillRate != null ? fillRate.toFixed(1) + '%' : '—');
+  setText('hmFillRateSub', filled.length + ' filled / ' + evaluated.length + ' evaluated'
+                           + (missed.length ? '  ·  ' + missed.length + ' missed' : ''));
+  setText('hmAvgSlip',     avgSlip != null ? avgSlip.toFixed(3) + '%' : '—');
+  setText('hmAvgSlipSub',  'n=' + tracked.length + ' tracked signals');
+  setText('hmLimitWr',     limitWr != null ? limitWr.toFixed(1) + '%' : '—');
+  setText('hmLimitWrSub',  wins.length + ' wins / ' + closedFilled.length + ' closed & filled');
+  setText('hmWaitCount',   waiting.length);
+
+  const note = document.getElementById('hmLimitNote');
+  if(note){
+    if(!tracked.length){
+      note.textContent = 'No Phase-A-tracked signals yet — restart bot after the Phase A '
+        + 'migration and the next fired signal will populate this panel.';
+    } else if(!evaluated.length){
+      note.textContent = 'All ' + tracked.length + ' tracked signals are still inside the limit-fill window. '
+        + 'Re-check after the window expires.';
+    } else if(closedFilled.length < 5){
+      note.textContent = 'Only ' + closedFilled.length + ' filled signal(s) have closed — '
+        + 'limit-only WR is not yet statistically meaningful (need ≥10 closed for a stable read).';
+    } else {
+      note.textContent = 'Limit-only WR reflects what real money would have booked. '
+        + 'Compare to headline WR above — large gaps reveal fillability drag.';
+    }
+  }
+}
+
+// Phase A — Limit-order fillability cell. NULL = WAITING (within fill window),
+// 1 = FILLED, 0 = MISSED. Pre-Phase-A signals (no slippage tracked) show "—".
+function _fillCell(r){
+  const sp = r.slippage_pct;
+  if(sp==null) return '<td style="color:var(--muted);font-size:.72rem">—</td>';
+  const lf = r.limit_fillable;
+  if(lf==null)
+    return '<td style="color:var(--yellow);font-size:.74rem" title="Still within '
+      +'limit-order fill window">⏳ WAIT</td>';
+  if(Number(lf)===1)
+    return '<td style="color:var(--green);font-size:.74rem;font-weight:600" '
+      +'title="Limit order would have filled">✓ FILL</td>';
+  return '<td style="color:var(--red);font-size:.74rem;font-weight:600" '
+    +'title="Price never retouched entry — limit order missed">✗ MISS</td>';
 }
 
 function _expiryLabel(expiresAt){
@@ -2906,12 +3583,46 @@ function _openCardHtml(r){
     +' &rarr; 1H: <strong style="color:var(--text)">'+(r.trend_1h||'—')+'</strong>'
     +' &rarr; 5M: <strong style="color:var(--text)">'+(r.trend_5m||'—')+'</strong>'
     +' &nbsp;|&nbsp; '+_expiryLabel(r.expires_at)+'</div>'
-    +'<div class="card-sub" style="font-size:.76rem">'
-    +'Sweep: <strong style="color:var(--text)">'+(r.sweep_type||'—')+'</strong>'
-    +' &nbsp;|&nbsp; MSS: <strong style="color:var(--text)">'+(r.mss_quality||'—')+'</strong>'
-    +' &nbsp;|&nbsp; FVG: <strong style="color:var(--text)">'+(r.fvg_quality||'—')+'</strong>'
-    +' &nbsp;|&nbsp; DR: <strong style="color:var(--text)">'+(r.dr_location||'—')+'</strong>'
-    +' &nbsp;|&nbsp; EV: <strong style="color:var(--text)">'+(r.ev_status||'—')+'</strong>'+(r.ev_score!=null?' ('+Number(r.ev_score).toFixed(1)+'%)':'')+'</div>'
+    + (function(){
+        // CRT v1 (2026-05-27): source-branched bottom row. The 5M_SWEEP layout
+        // (Sweep / MSS / FVG / DR / EV) is meaningless for H4_CRT signals
+        // because the CRT scanner doesn't populate sweep_type / dr_location
+        // (would render as a wall of em-dashes). For CRT we surface the
+        // attributes that ARE populated: source tag, entry_type with Wyckoff
+        // phase, MSS+FVG quality grades. EV scoring is shared, kept on both.
+        const _src=(r.source||'5M_SWEEP').toUpperCase();
+        const _et=String(r.entry_type||'');
+        if (_src==='H4_CRT' || _et.indexOf('H4_CRT')===0) {
+          // Parse "H4_CRT_<FVG|OB>_<PHASE>" — fall back to raw entry_type otherwise.
+          const _parts=_et.split('_');
+          const _conf=_parts[2] || '—';   // FVG or OB
+          const _phase=_parts.slice(3).join('_') || '—'; // ACCUMULATION, MARKUP, etc.
+          const _phaseColor={
+            'ACCUMULATION':'var(--green)','MARKUP':'var(--green)',
+            'DISTRIBUTION':'var(--red)','MARKDOWN':'var(--red)',
+            'TRANSITION':'var(--muted)'
+          }[_phase]||'var(--text)';
+          return '<div class="card-sub" style="font-size:.76rem">'
+            +'<span style="background:var(--accent2);color:#0a0e14;padding:1px 6px;border-radius:3px;font-weight:600;font-size:.7rem;font-family:JetBrains Mono,monospace">H4_CRT</span>'
+            +' &nbsp;|&nbsp; Confluence: <strong style="color:var(--text)">'+_conf+'</strong>'
+            +' &nbsp;|&nbsp; Phase: <strong style="color:'+_phaseColor+'">'+_phase+'</strong>'
+            +' &nbsp;|&nbsp; MSS: <strong style="color:var(--text)">'+(r.mss_quality||'—')+'</strong>'
+            +' &nbsp;|&nbsp; FVG: <strong style="color:var(--text)">'+(r.fvg_quality||'—')+'</strong>'
+            +' &nbsp;|&nbsp; EV: <strong style="color:var(--text)">'+(r.ev_status||'—')+'</strong>'+(r.ev_score!=null?' ('+Number(r.ev_score).toFixed(1)+'%)':'')+'</div>';
+        }
+        // 5M_SWEEP (default) — original layout, with source tag prefix
+        // when explicitly set (legacy NULL rows preserve old appearance).
+        const srcTag = _src==='5M_SWEEP'
+          ? '<span style="background:var(--blue);color:#0a0e14;padding:1px 6px;border-radius:3px;font-weight:600;font-size:.7rem;font-family:JetBrains Mono,monospace">5M_SWEEP</span> &nbsp;|&nbsp; '
+          : '';
+        return '<div class="card-sub" style="font-size:.76rem">'
+          +srcTag
+          +'Sweep: <strong style="color:var(--text)">'+(r.sweep_type||'—')+'</strong>'
+          +' &nbsp;|&nbsp; MSS: <strong style="color:var(--text)">'+(r.mss_quality||'—')+'</strong>'
+          +' &nbsp;|&nbsp; FVG: <strong style="color:var(--text)">'+(r.fvg_quality||'—')+'</strong>'
+          +' &nbsp;|&nbsp; DR: <strong style="color:var(--text)">'+(r.dr_location||'—')+'</strong>'
+          +' &nbsp;|&nbsp; EV: <strong style="color:var(--text)">'+(r.ev_status||'—')+'</strong>'+(r.ev_score!=null?' ('+Number(r.ev_score).toFixed(1)+'%)':'')+'</div>';
+      })()
     +'<div class="dots">'
     +'<div class="dot-tp'+(r.tp1_hit?' hit':'')+'" title="TP1"></div>'
     +'<div class="dot-tp'+(r.tp2_hit?' hit':'')+'" title="TP2"></div>'
@@ -2974,6 +3685,96 @@ async function loadOpen(){
   }catch(e){showErr('Failed to load open positions: '+e.message)}
 }
 
+// ── Live AI activity feed ─────────────────────────────────────────────────
+// Tails logs/bot.log via /api/activity for plain-English [ACTIVITY] lines.
+// Renders into the Open Positions tab's right-side panel.
+function _classifyActivity(msg){
+  const m = msg.toLowerCase();
+  if(m.startsWith('tokens:')) return 'tokens';
+  if(m.includes('signal fired')) return 'signal';
+  if(m.includes('kill switch')) return 'kill';
+  if(m.includes('cycle') && m.includes('start')) return 'cycle';
+  if(m.startsWith('btc macro')) return 'macro';
+  if(m.includes('cooldown')) return 'cooldown';
+  if(m.includes('blocked')) return 'blocked';
+  if(m.includes('skipped') || m.includes('waiting')) return 'skipped';
+  return '';
+}
+// Per-cycle 10-token snapshot — render as colored chip grid
+// Bot emits: "Tokens: BTC(sBEAR/BEAR/1) ETH(sBEAR/BEAR/1) ..."
+// We split into per-token chips so the operator can scan it.
+function _renderTokenSnapshot(msg){
+  const body = msg.slice(7).trim();  // strip leading "Tokens:"
+  // Match "TOKEN(1h/4h/zones)" patterns
+  const cells = body.match(/[A-Z]+\([^)]+\)/g) || [];
+  if(cells.length === 0) return _escapeHtml(msg);
+  return cells.map(cell => {
+    const openP = cell.indexOf('(');
+    const name = cell.slice(0, openP);
+    const inner = cell.slice(openP+1, -1);  // "sBEAR/BEAR/1"
+    const parts = inner.split('/');
+    const tr1h = parts[0] || '';
+    const b4h  = parts[1] || '';
+    const zones = parts[2] || '0';
+    const t1cls = tr1h.includes('BULL') ? 'tok-bull' : tr1h.includes('BEAR') ? 'tok-bear' : 'tok-neut';
+    const b4cls = b4h === 'BULL' ? 'tok-bull' : b4h === 'BEAR' ? 'tok-bear' : 'tok-neut';
+    return '<span class="tok-cell">'
+         +   '<span class="tok-name">'+_escapeHtml(name)+'</span> '
+         +   '<span class="'+t1cls+'">'+_escapeHtml(tr1h)+'</span>'
+         +   '<span class="tok-zones">|</span>'
+         +   '<span class="'+b4cls+'">'+_escapeHtml(b4h)+'</span>'
+         +   '<span class="tok-zones">|'+_escapeHtml(zones)+'z</span>'
+         + '</span>';
+  }).join('');
+}
+function _renderActivityItem(msg){
+  const cls = _classifyActivity(msg);
+  let html;
+  if(cls === 'tokens'){
+    html = _renderTokenSnapshot(msg);
+  } else {
+    // Highlight the leading token name (e.g. "BTC: foo") in amber for scannability
+    const colonIdx = msg.indexOf(':');
+    if(colonIdx > 0 && colonIdx < 8){
+      const tok = msg.slice(0, colonIdx);
+      const rest = msg.slice(colonIdx);
+      html = '<span class="activity-token">'+_escapeHtml(tok)+'</span>'+_escapeHtml(rest);
+    } else {
+      html = _escapeHtml(msg);
+    }
+  }
+  return '<div class="activity-item '+cls+'">'+html+'</div>';
+}
+function _escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+async function loadActivity(){
+  try{
+    const r = await fetch('/api/activity?limit=20');
+    if(!r.ok) throw new Error('activity '+r.status);
+    const data = await r.json();
+    const list = document.getElementById('activityFeedList');
+    const status = document.getElementById('activityFeedStatus');
+    if(!list) return;
+    if(!data.ok || !Array.isArray(data.entries) || data.entries.length === 0){
+      list.innerHTML = '<div class="activity-empty">'+(data.error || 'Waiting for first scan cycle...')+'</div>';
+      if(status){ status.textContent='• idle'; status.className='activity-feed-status stale'; }
+      return;
+    }
+    list.innerHTML = data.entries.map(_renderActivityItem).join('');
+    // Freshness indicator — green if log updated <90s ago, amber if older
+    if(status){
+      const ageS = data.log_mtime ? (Date.now()/1000 - data.log_mtime) : 9999;
+      if(ageS < 90){ status.textContent='• live'; status.className='activity-feed-status'; }
+      else if(ageS < 300){ status.textContent='• '+Math.round(ageS)+'s ago'; status.className='activity-feed-status stale'; }
+      else { status.textContent='• stale'; status.className='activity-feed-status err'; }
+    }
+  }catch(e){
+    const status = document.getElementById('activityFeedStatus');
+    if(status){ status.textContent='• error'; status.className='activity-feed-status err'; }
+  }
+}
+
 async function loadHistory(){
   try{
     const r=await fetch('/api/signals');
@@ -3022,7 +3823,7 @@ function toggleAutoRefresh(btn){
     clearInterval(_autoRefresh); _autoRefresh=null;
     btn.textContent='Auto Off'; btn.classList.remove('ar-on');
   } else {
-    _autoRefresh=setInterval(()=>{loadOpen();loadStats();},30000);
+    _autoRefresh=setInterval(()=>{loadOpen();loadStats();loadActivity();},30000);
     btn.textContent='Auto On'; btn.classList.add('ar-on');
   }
 }
@@ -3053,28 +3854,53 @@ function renderTable(){
   const body=document.getElementById('histBody');
   const pgBar=document.getElementById('histPgBar');
   if(!total){
-    body.innerHTML='<tr><td colspan="21" class="empty">'
+    body.innerHTML='<tr><td colspan="25" class="empty">'
       +(allSigs.length===0
         ?'No signals yet — bot will save signals here once running'
         :'No signals matching this filter')
       +'</td></tr>';
     pgBar.style.display='none'; return;
   }
+  // 50/50 cascade P&L formula (mirrors backtest._calc_realized_r):
+  //   LOSS         : full sl_pct (already negative)
+  //   PARTIAL_TP1  : 0.5 × tp1_pct  (first half exits TP1, runner trails to BE = 0)
+  //   PARTIAL_TP2  : 0.5 × tp1_pct + 0.5 × tp2_pct
+  //   WIN          : 0.5 × tp1_pct + 0.5 × tp3_pct
+  //   EXPIRED      : if tp1 was hit → 0.5 × tp1_pct (TP1 banked, runner BE);
+  //                  else → 0
+  //   OPEN         : null (not closed yet)
+  const _cascadePnl = (r) => {
+    const out = r.outcome || 'OPEN';
+    const t1 = Number(r.tp1_pct || 0), t2 = Number(r.tp2_pct || 0),
+          t3 = Number(r.tp3_pct || 0), sl = Number(r.sl_pct || 0);
+    if(out === 'WIN')          return 0.5 * t1 + 0.5 * t3;
+    if(out === 'PARTIAL_TP2')  return 0.5 * t1 + 0.5 * t2;
+    if(out === 'PARTIAL_TP1' || out === 'PARTIAL') return 0.5 * t1;
+    if(out === 'LOSS')         return sl;     // sl_pct stored negative
+    if(out === 'EXPIRED')      return r.tp1_hit ? 0.5 * t1 : 0;
+    return null;  // OPEN
+  };
   body.innerHTML=pageRows.map(r=>{
     const out=r.outcome||'OPEN';
     const pnl=r.profit_pct!=null?Number(r.profit_pct):0;
     const pnlHtml=pnl>0?'<span class="pnl-p">+'+pnl.toFixed(2)+'%</span>'
       :pnl<0?'<span class="pnl-n">'+pnl.toFixed(2)+'%</span>':'<span style="color:var(--muted)">—</span>';
+    const cascade = _cascadePnl(r);
+    const cascadeHtml = cascade === null ? '<span style="color:var(--muted)">—</span>'
+      : cascade > 0 ? '<span class="pnl-p">+'+cascade.toFixed(2)+'%</span>'
+      : cascade < 0 ? '<span class="pnl-n">'+cascade.toFixed(2)+'%</span>'
+      : '<span style="color:var(--muted)">0.00%</span>';
     const conf=r.confidence||0;
     const segs=Array.from({length:5},(_,i)=>
       '<div class="cseg'+(i<Math.round(conf/2)?' on':'')+'"></div>').join('');
     const sigC=r.signal==='BUY'?'var(--green)':'var(--red)';
-    const ts=r.timestamp?r.timestamp.slice(0,16):'—';
+    const ts=_localTime(r.timestamp);  // UTC → browser-local (2026-05-28 fix)
     const t4h=r.trend_4h||'—'; const t1h=r.trend_1h||'—'; const t5m=r.trend_5m||'—';
     return '<tr>'
       +'<td style="color:var(--muted);font-size:.75rem">'+r.id+'</td>'
       +'<td class="tok">'+r.token+'</td>'
       +'<td><span style="color:'+sigC+';font-weight:700;font-size:.82rem">'+r.signal+'</span></td>'
+      +_tierCell(r)
       +'<td class="mono">$'+Number(r.entry_price||0).toFixed(4)+'</td>'
       +'<td class="mono" style="color:var(--red)">$'+Number(r.sl||0).toFixed(4)+'</td>'
       +'<td class="mono" style="color:'+(r.tp1_hit?'var(--green)':'var(--text)')+'">$'+Number(r.tp1||0).toFixed(4)+'</td>'
@@ -3090,8 +3916,11 @@ function renderTable(){
       +'<td style="font-size:.72rem;color:var(--muted)">'+(r.session||'—').replace('_KZ','')+'</td>'
       +'<td style="font-size:.72rem;color:var(--muted)">'+(r.sweep_type||'—')+'</td>'
       +'<td style="font-size:.72rem;color:'+(r.ev_status==='POSITIVE'?'var(--green)':r.ev_status==='NEGATIVE'?'var(--red)':r.ev_status?'var(--yellow)':'var(--muted)')+'">'+(r.ev_status||'—')+(r.ev_score!=null?' '+Number(r.ev_score).toFixed(0)+'%':'')+'</td>'
+      +_slipCell(r)
+      +_fillCell(r)
       +'<td><span class="out '+out+'">'+out+'</span></td>'
       +'<td>'+pnlHtml+'</td>'
+      +'<td>'+cascadeHtml+'</td>'
       +'<td style="color:var(--muted);white-space:nowrap;font-size:.78rem">'+ts+'</td>'
       +'</tr>';
   }).join('');
@@ -3104,6 +3933,11 @@ function renderTable(){
 }
 
 async function loadIntelligence(){
+  // Reset any stale error banner from a prior failed load — without this,
+  // re-clicking the tab leaves the old "Failed to fetch" message visible
+  // even after a successful retry.
+  const _errReset = document.getElementById('intelError');
+  if(_errReset){ _errReset.style.display='none'; _errReset.textContent=''; }
   try{
     const r=await fetch('/api/intelligence');
     if(!r.ok) throw new Error('intelligence '+r.status);
@@ -3354,13 +4188,39 @@ async function loadBacktest(){
       ?'<div class="bt-meta-item"><div class="bt-meta-label">Resolution</div>'
         +'<div class="bt-meta-val a" style="font-size:.95rem">'+cm.timeframe.toUpperCase()+'</div></div>'
       :'';
+    // Source mix tile (CRT v1, 2026-05-27) — surfaces 5M_SWEEP vs H4_CRT
+    // counts so the headline WR isn't a silent blend. e.g. "29 SWEEP / 285 CRT"
+    // Falls back to a single-source label when only one scanner produced signals.
+    const _bs=(rr.summary||{}).by_source||{};
+    const _sw=(_bs['5M_SWEEP']||{}).signals||0;
+    const _ch=(_bs['H4_CRT']||{}).signals||0;
+    let srcMixHtml='';
+    if (_sw + _ch > 0) {
+      const _swWr=(_bs['5M_SWEEP']||{}).wr;
+      const _chWr=(_bs['H4_CRT']||{}).wr;
+      const _swPart=_sw>0 ? '<span style="color:var(--blue)">'+_sw+' SWEEP@'+(_swWr!=null?_swWr+'%':'—')+'</span>' : '';
+      const _chPart=_ch>0 ? '<span style="color:var(--accent2)">'+_ch+' CRT@'+(_chWr!=null?_chWr+'%':'—')+'</span>' : '';
+      const _sep=(_sw>0 && _ch>0) ? '<span style="color:var(--muted)"> · </span>' : '';
+      srcMixHtml='<div class="bt-meta-item"><div class="bt-meta-label">Source Mix</div>'
+        +'<div class="bt-meta-val" style="font-size:.78rem;line-height:1.5">'+_swPart+_sep+_chPart+'</div></div>';
+    }
+    // config_hash chip — short 8-char prefix lets operator distinguish CRT-Pro
+    // variants (CRT_TP1_MODE, ENABLE_5M_SWEEP, quality gates) that share otherwise
+    // identical run-date / period / signal-count rows.
+    const _ch8=(rr.config_hash||'').slice(0,8);
+    const cfgHashHtml=_ch8
+      ? '<div class="bt-meta-item"><div class="bt-meta-label">Config Hash</div>'
+        +'<div class="bt-meta-val" style="font-family:var(--mono);font-size:.78rem;color:var(--muted)" title="config_hash full: '+rr.config_hash+'">'+_ch8+'</div></div>'
+      : '';
     document.getElementById('btMetaBar').innerHTML=
-      '<div class="bt-meta-item"><div class="bt-meta-label">Run Date</div><div class="bt-meta-val" style="font-size:.95rem;color:var(--muted)">'+rr.run_date.slice(0,16)+'</div></div>'
+      '<div class="bt-meta-item"><div class="bt-meta-label">Run Date</div><div class="bt-meta-val" style="font-size:.95rem;color:var(--muted)">'+_localTime(rr.run_date)+'</div></div>'
       +'<div class="bt-meta-item"><div class="bt-meta-label">Period</div><div class="bt-meta-val a">'+rr.days+'d</div></div>'
       +tfHtml
       +'<div class="bt-meta-item"><div class="bt-meta-label">Total Signals</div><div class="bt-meta-val a">'+rr.total_signals+'</div></div>'
+      +srcMixHtml
       +'<div class="bt-meta-item"><div class="bt-meta-label">Win Rate</div><div class="bt-meta-val '+wrC+'">'+wr+'%</div></div>'
       +'<div class="bt-meta-item"><div class="bt-meta-label">Avg R:R</div><div class="bt-meta-val g">1:'+rr.avg_rr+'</div></div>'
+      +cfgHashHtml
       +cmHtml;
 
     const sum=rr.summary||{};
@@ -3390,6 +4250,19 @@ async function loadBacktest(){
         +'<div class="cl-stats">'+d.wr+'% WR</div>'
         +'<div class="cl-count">'+d.signals+' sigs</div></div>';
     }).join(''):'<div class="empty">No data</div>';
+
+    // By Signal Source — 5M_SWEEP vs H4_CRT mix (CRT v1, 2026-05-27)
+    // tok_entry shape is used, so we have avg_net_rr + avg_conf available
+    const sources=Object.entries(sum.by_source||{}).sort((a,b)=>b[1].signals-a[1].signals);
+    const srcLabel={'5M_SWEEP':'5M_SWEEP (Run-168 baseline)','H4_CRT':'H4_CRT (Candle Range Theory)'};
+    document.getElementById('btSourceList').innerHTML=sources.length?sources.map(([src,d])=>{
+      const c=d.wr>=65?'var(--green)':d.wr>=50?'var(--yellow)':'var(--red)';
+      const lbl=srcLabel[src]||src;
+      return '<div class="clrow"><div class="cl-label" style="width:220px;font-size:.72rem">'+lbl+'</div>'
+        +'<div class="cl-bar-wrap"><div class="cl-bar-fill" style="width:'+d.wr+'%;background:'+c+'"></div></div>'
+        +'<div class="cl-stats">'+d.wr+'% WR</div>'
+        +'<div class="cl-count">'+d.signals+' sigs · R:R 1:'+(d.avg_net_rr!=null?d.avg_net_rr:'—')+'</div></div>';
+    }).join(''):'<div class="empty">No per-source data — run a backtest with both scanners enabled to populate</div>';
 
     // Confidence bars
     const confs=Object.entries(sum.by_conf||{}).sort((a,b)=>+a[0]-+b[0]);
@@ -3748,15 +4621,23 @@ function _renderBtHistory(){
   if(btHistPage > pages) btHistPage = pages;
   const start = (btHistPage - 1) * BT_HIST_PAGE_SIZE;
   const page  = _btHistData.slice(start, start + BT_HIST_PAGE_SIZE);
-  list.innerHTML = page.map(r =>
-    '<div class="hist-run">'
-    +'<div class="hist-run-date">'+r.run_date.slice(0,16)+'</div>'
+  list.innerHTML = page.map(r => {
+    // CRT v1 (2026-05-27): config_hash short prefix lets operator distinguish
+    // CRT-Pro variant runs that share otherwise-identical date / signal-count.
+    const _ch8 = (r.config_hash || '').slice(0,8);
+    const cfgChip = _ch8
+      ? '<span class="hist-stat" style="color:var(--muted);font-family:var(--mono);font-size:.7rem" title="config_hash: '+r.config_hash+'">'+_ch8+'</span>'
+      : '';
+    return '<div class="hist-run">'
+    +'<div class="hist-run-date">'+_localTime(r.run_date)+'</div>'
     +'<div class="hist-run-stats">'
     +'<span class="hist-stat">'+r.total_signals+' signals</span>'
     +'<span class="hist-stat" style="color:var(--green)">WR: '+r.overall_wr+'%</span>'
     +'<span class="hist-stat" style="color:var(--accent2)">R:R: 1:'+r.avg_rr+'</span>'
     +'<span class="hist-stat" style="color:var(--muted)">'+r.days+'d</span>'
+    +cfgChip
     +'</div></div>'
+;}
   ).join('');
   if(pgBar){
     pgBar.style.display = pages > 1 ? 'flex' : 'none';
@@ -3907,6 +4788,18 @@ async function loadHonestMetrics(){
       lr.id !== null ? 'Run-' + lr.id : '—';
     document.getElementById('hmRunDate').textContent = lr.date || '—';
     document.getElementById('hmRunN').textContent = lr.n !== null ? lr.n : '—';
+    // CRT v1 (2026-05-27): show/hide blend warning banner based on latest_run.blended
+    const banner = document.getElementById('hmBlendBanner');
+    if (banner) {
+      if (lr.blended) {
+        const _sw = lr.n_5m_sweep || 0, _ch = lr.n_h4_crt || 0;
+        document.getElementById('hmBlendDetail').innerHTML =
+          'Run-' + lr.id + ' contains <b>' + _sw + ' 5M_SWEEP</b> + <b>' + _ch + ' H4_CRT</b> signals. ';
+        banner.style.display = 'block';
+      } else {
+        banner.style.display = 'none';
+      }
+    }
     document.getElementById('hmRunWr').textContent =
       lr.wr !== null ? lr.wr.toFixed(1) + '%' : '—';
     document.getElementById('hmCpcvWr').textContent =
@@ -3943,6 +4836,9 @@ async function loadHonestMetrics(){
       cs.mean_oos_sharpe !== null ? cs.mean_oos_sharpe.toFixed(4) : '—';
     document.getElementById('hmStdComputed').textContent = cs.computed_at || '—';
     document.getElementById('hmStdNote').textContent = cs.note || '—';
+
+    // ─── Phase A — Limit-order discipline (computed client-side from /api/signals)
+    _renderLimitDiscipline();
 
     // ─── Update tab pill with alert level ───────────────────
     const pill = document.getElementById('honestPill');
@@ -4519,11 +5415,21 @@ async function loadBaselinePin(){
       (pin.label ? '(' + pin.label + ')' : '') +
       (pin.promoted_at ? '  ·  promoted ' + pin.promoted_at : '');
     document.getElementById('baselinePinMsg').textContent = d.message || '';
+    // M-CY11-4 fix (audit 2026-05-28 cycle-11): pin's `expected.dsr_pct` split
+    // into `dsr_pct_at_promote` (figure at promotion time) and
+    // `dsr_pct_post_pool_refresh` (honest figure with current sr_trial_std).
+    // Surface the post-refresh value as the canonical figure; fall back to
+    // the legacy `dsr_pct` field for back-compat with older pin files.
+    const _dsr_show = (
+      exp.dsr_pct_post_pool_refresh != null ? exp.dsr_pct_post_pool_refresh + '%'
+      : exp.dsr_pct != null ? exp.dsr_pct + '%'
+      : '?'
+    );
     document.getElementById('baselinePinExpected').textContent =
       'Expected: n=' + (exp.n||'?') + '  ·  WR=' + (exp.wr_pct||'?') + '%' +
       '  ·  CPCV mean=' + (exp.cpcv_wr_mean_pct||'?') + '%' +
       '  ·  Sharpe=' + (exp.cpcv_sharpe_mean||'?') +
-      '  ·  DSR=' + (exp.dsr_pct||'?') + '%' +
+      '  ·  DSR=' + _dsr_show +
       '   |   Latest in DB: Run-' + (lat.id||'?') +
       ' (n=' + (lat.n||'?') + ', WR=' + (lat.wr||'?') + '%)';
   }catch(e){ /* silent */ }
@@ -4592,6 +5498,10 @@ async function loadQuantStats(){
 }
 
 setInterval(loadAll, 30000);
+// Dedicated 10s tick for the live AI activity feed — independent from the
+// 30s page-wide refresh so the operator sees fresh per-token milestones
+// closer to real-time. Endpoint is cheap (64KB tail read).
+setInterval(loadActivity, 10000);
 loadAll();
 </script>
 </body>

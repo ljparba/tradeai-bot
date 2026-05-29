@@ -80,6 +80,14 @@ if OGD_DSR_GATE_MODE not in ("strict", "soft", "off"):
           f"falling back to 'soft'")
     OGD_DSR_GATE_MODE = "soft"
 OGD_DSR_FAIL_LR_SCALE = 0.25   # soft-mode LR multiplier when verdict=FAIL
+# CY12-DSR-STALE-FALLBACK constants (round-2 audit 2026-05-29 NEW-CY12-A):
+# When the stored verdict's config_hash doesn't match the pin's, the
+# original drift guard returned 1.0 (no throttling). After OGD_DSR_STALE_GRACE_HOURS,
+# we escalate to OGD_DSR_STALE_LR_SCALE so a stale-too-long verdict
+# applies SOME caution rather than full-rate learning. Defaults give the
+# operator 48h to run a backtest under the new pin before throttling kicks in.
+OGD_DSR_STALE_LR_SCALE   = float(os.environ.get("OGD_DSR_STALE_LR_SCALE", 0.5))
+OGD_DSR_STALE_GRACE_HOURS = float(os.environ.get("OGD_DSR_STALE_GRACE_HOURS", 48))
 
 # R9 fix (master audit 2026-05-26): learning-freeze predicate.
 # Detects abnormal conditions and either logs (shadow) or actually
@@ -385,6 +393,47 @@ class AdaptiveWeightEngine:
             self._weights[token][feature]  = float(weight)
             self._velocity[token][feature] = float(velocity or 0.0)
             self._n[token]                 = max(self._n.get(token, 0), int(n_updates or 0))
+
+        # M-CY13-1 fix (cycle-13 audit 2026-05-29): hydrate _n[token] from
+        # weight_history.signal_close row count when token_weights.n_updates
+        # is zero/missing. Pre-fix: a restart immediately after a fresh
+        # bootstrap zeroes token_weights.n_updates, which then makes
+        # monitoring.py and tracker.py report `n_updates=0` for every token
+        # — indistinguishable from "we have never learned." TON has 5
+        # signal_close rows in weight_history but token_weights.n_updates
+        # was being reset to 0 by the bootstrap path. Now we treat the
+        # weight_history audit trail as the authoritative learning count.
+        # The bootstrap-warm-started weights are still used (preserves the
+        # warm-start advantage), but `_n` reflects real learning history
+        # so monitoring observability is accurate.
+        try:
+            conn = _connect()
+            # H-CY14-1 fix (cycle-14 audit 2026-05-29): pre-fix this used
+            # `COUNT(*)` which counted weight_history rows, but each close
+            # writes ONE ROW PER FEATURE (6 rows per close × 6 features).
+            # The hydration therefore inflated `_n[token]` by 6× — TON's
+            # 2 real closes hydrated to _n=12 instead of n=2. On the next
+            # `_persist_token` call, token_weights.n_updates would jump
+            # from the true value to the inflated value, corrupting the
+            # very observability metric this fix was meant to repair.
+            # `COUNT(DISTINCT recorded_at)` counts unique close events
+            # regardless of how many features write rows per event.
+            wh_rows = conn.execute(
+                "SELECT token, COUNT(DISTINCT recorded_at) "
+                "FROM weight_history "
+                "WHERE trigger='signal_close' GROUP BY token"
+            ).fetchall()
+            conn.close()
+            for tok, n_hist in wh_rows:
+                if not tok:
+                    continue
+                # Only HYDRATE — never downgrade. If token_weights already
+                # had a higher value (live updates between bootstrap and
+                # this read) that wins.
+                self._n[tok] = max(self._n.get(tok, 0), int(n_hist or 0))
+        except Exception:
+            # weight_history may not exist on first-ever startup. Non-fatal.
+            pass
             # Populate last_update_time from DB so 7-day decay suppression survives restarts.
             if updated_at:
                 try:
@@ -402,6 +451,16 @@ class AdaptiveWeightEngine:
                 "SELECT token, feature, weight, velocity FROM backtest_token_weights"
             ).fetchall()
             conn.close()
+            # M-CY12-6 fix (cycle-12 audit 2026-05-29): collect tokens that
+            # got warm-started so we can force-persist a token_weights row
+            # for each. Pre-fix, warm-started-only tokens (n=0) never had a
+            # row in `token_weights` because `_persist_token` only fires when
+            # `any_change=True` in decay (delta < 0.0001 typical per-cycle).
+            # Result: HBAR (and any token without live closes) was invisible
+            # to monitoring.py's per-token degeneracy / floor-pin / entropy
+            # alerts. The force-persist guarantees every token the engine
+            # knows about has a row, making the observability surface complete.
+            _warm_started_tokens: set = set()
             for token, feature, weight, velocity in bt_rows:
                 if feature not in feature_set:
                     continue
@@ -409,6 +468,13 @@ class AdaptiveWeightEngine:
                     self._ensure_token(token)
                     self._weights[token][feature]  = float(weight)
                     self._velocity[token][feature] = float(velocity or 0.0)
+                    _warm_started_tokens.add(token)
+            # Force-persist each warm-started token so monitoring sees them
+            for token in _warm_started_tokens:
+                try:
+                    self._persist_token(token)
+                except Exception:
+                    pass  # persist failure is non-fatal
         except Exception:
             pass  # backtest table may not have data yet — not a failure
 
@@ -486,11 +552,47 @@ class AdaptiveWeightEngine:
         except Exception:
             return None
 
+    def _baseline_pin_config_hash(self) -> Optional[str]:
+        """Return the canonical baseline_pin.json config_hash, or None.
+
+        Used by `_dsr_gate_lr_scale()` to verify the stored CPCV verdict was
+        produced by a backtest of the CURRENTLY-PROMOTED config. Without this
+        check a verdict from an unrelated trial (different config_hash) can
+        silently downscale OGD on signals of the new baseline — the exact
+        stale-verdict pollution pattern the explorer's WRITE_CPCV_VERDICT=0
+        flag tries to prevent at the WRITE side. This is the symmetric READ
+        side: if the stored verdict's config_hash ≠ baseline_pin's hash, we
+        treat the gate as inert (`stale_verdict_config_drift`) regardless of
+        verdict value.
+        """
+        try:
+            import os as _os
+            _pin = _os.path.join(
+                _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                "TradeAI", "data", "baseline_pin.json",
+            )
+            # Robust path: walk up to project root
+            _here = _os.path.dirname(_os.path.abspath(__file__))
+            _pin  = _os.path.join(_here, "data", "baseline_pin.json")
+            if not _os.path.exists(_pin):
+                return None
+            with open(_pin) as f:
+                blob = json.load(f)
+            h = blob.get("config_hash")
+            return h if isinstance(h, str) and len(h) >= 16 else None
+        except Exception:
+            return None
+
     def _dsr_gate_lr_scale(self) -> Tuple[float, str]:
         """R1 + S-CY7-1: returns (lr_scale, reason). Called from update().
 
         Policy:
           - mode='off' → (1.0, "off")
+          - **2026-05-28 stale-verdict drift guard:** if the stored verdict's
+            config_hash differs from the canonical baseline_pin.json hash,
+            the gate goes inert (`stale_verdict_config_drift`). Prevents a
+            FAIL verdict from a trial of an UNRELATED config from silently
+            downscaling OGD on signals of the promoted baseline.
           - mode='strict' + verdict FAIL → (0.0, "strict_fail")
           - mode='soft' + verdict FAIL → (OGD_DSR_FAIL_LR_SCALE, "soft_fail")
           - **S-CY7-1 (any non-off mode):** verdict MARGINAL + dsr_gate_applied=False
@@ -507,6 +609,50 @@ class AdaptiveWeightEngine:
         v = blob.get("verdict") if isinstance(blob.get("verdict"), str) else None
         if v not in ("PASS", "MARGINAL", "FAIL"):
             return (1.0, "inert")
+        # Stale-verdict drift guard (2026-05-28): the gate trusts the verdict
+        # ONLY if it was produced by a backtest of the currently-promoted
+        # config. Pin hash MUST exist to compare; if absent, fall through to
+        # the pre-2026-05-28 behavior (no regression).
+        #
+        # CY12-DSR-STALE-FALLBACK fix (round-2 audit 2026-05-29 adaptive
+        # NEW-CY12-A): the original drift guard returned (1.0, "...") which
+        # leaves OGD learning at FULL rate during the "silent-inert window"
+        # after every promotion (until a fresh backtest is run under the new
+        # pin hash). With FAIL verdicts being ignored at full rate, the bot
+        # is unprotected during exactly the window where the operator might
+        # still be evaluating the new baseline. Now we escalate to a
+        # CONSERVATIVE scale (OGD_DSR_STALE_LR_SCALE, default 0.5) after the
+        # mismatch has persisted for OGD_DSR_STALE_GRACE_HOURS (default 48h).
+        # During the grace window we still return 1.0 so a recent promotion
+        # isn't immediately throttled, but past the grace window we treat
+        # "no fresh verdict" as evidence of operator inattention rather than
+        # trusting the bot to learn at full rate against an unmeasured config.
+        _pin_hash = self._baseline_pin_config_hash()
+        _verdict_hash = blob.get("config_hash") if isinstance(blob.get("config_hash"), str) else None
+        if _pin_hash and _verdict_hash and _pin_hash != _verdict_hash:
+            # Compute how long the drift has persisted by reading the verdict
+            # blob's `written_at` (set at backtest time). Fallback to grace
+            # period if the field is absent (legacy verdicts).
+            import time as _time
+            _written_at_iso = blob.get("written_at") or blob.get("ts") or ""
+            try:
+                # Verdict blobs are written with UTC ISO-8601 strings; parse
+                # and compare to wall-clock UTC epoch.
+                from datetime import datetime as _dt
+                _written_ts = _dt.fromisoformat(
+                    _written_at_iso.replace("Z", "+00:00")
+                ).timestamp() if _written_at_iso else 0.0
+            except Exception:
+                _written_ts = 0.0
+            _grace_s = float(OGD_DSR_STALE_GRACE_HOURS) * 3600.0
+            if _written_ts > 0 and (_time.time() - _written_ts) > _grace_s:
+                # Stale-too-long: escalate to conservative scale so a FAIL
+                # verdict against the previous config still partially throttles
+                # learning, on the principle that "we have no fresh evidence
+                # this strategy is working".
+                return (OGD_DSR_STALE_LR_SCALE,
+                        "stale_verdict_config_drift_past_grace")
+            return (1.0, "stale_verdict_config_drift")
         # FAIL path — existing R1 behavior
         if v == "FAIL":
             if OGD_DSR_GATE_MODE == "strict":
@@ -565,6 +711,19 @@ class AdaptiveWeightEngine:
                 return False
             blob = json.loads(row[0])
             if blob.get("verdict") != "FAIL":
+                return False
+            # H-CY11-1 fix (audit 2026-05-28 cycle-11): symmetric stale-verdict
+            # drift guard. _dsr_gate_lr_scale() correctly returns inert when
+            # the stored verdict's config_hash differs from baseline_pin's.
+            # This sister trigger must honor the same invariant — otherwise
+            # a stale FAIL streak from an UNRELATED config can trip the
+            # 24h freeze on signals belonging to the currently-promoted
+            # baseline. Shadow-mode harmless today; learning-loss bug under
+            # OGD_FREEZE_MODE=active. Falls through (no regression) when
+            # either hash is absent.
+            _pin = self._baseline_pin_config_hash()
+            _vh  = blob.get("config_hash") if isinstance(blob.get("config_hash"), str) else None
+            if _pin and _vh and _pin != _vh:
                 return False
             # Prefer first_fail_onset (tight semantics); fall back to updated_at
             onset_iso = blob.get("first_fail_onset") or blob.get("updated_at")
@@ -724,7 +883,16 @@ class AdaptiveWeightEngine:
         # caller's contract is `profit_pct as fraction` per the comment
         # above; this alert catches contract violations silently corrupting
         # the gradient signal.
-        if abs(reward) > 1.2:
+        # M-NEW-2 fix (cycle-9 audit 2026-05-28): conjunction gate. Pre-fix
+        # this warned on every legitimate large CRT win — e.g. a clean
+        # PARTIAL_TP2 with profit_pct=0.06 (fraction = 6% P&L) and reward=1.5
+        # would spam the misleading "verify profit_pct is a fraction" message
+        # even though the units were correct. Real contract-violation
+        # (profit_pct passed as percentage instead of fraction) only triggers
+        # outsized reward when the underlying profit_pct also exceeds the
+        # plausible range — adding `|profit_pct| > 0.5` (= 50% P&L) suppresses
+        # the false-alarm path without losing the genuine-contract-bug signal.
+        if abs(reward) > 1.2 and profit_pct is not None and abs(profit_pct) > 0.5:
             print(f"[ADAPTIVE] WARN reward magnitude {reward:+.3f} on {token} "
                   f"outcome={outcome} profit_pct={profit_pct} — verify "
                   f"profit_pct is a fraction (e.g. -0.0085 for -0.85% P&L), "
@@ -746,6 +914,18 @@ class AdaptiveWeightEngine:
             self._n[token] = n + 1
             if persist:
                 self._persist_token(token)
+                # M-NEW-7 fix (cycle-9 audit 2026-05-28): record a forensic
+                # snapshot row even when the gradient step is suppressed.
+                # Pre-fix, the first OGD_WARMUP_FLOOR-1 closes per token never
+                # appeared in weight_history → dashboard "OGD updates over
+                # time" chart had silent gaps and operator couldn't see "this
+                # token received closes but didn't learn yet." Sparse row
+                # (gradient_l1 = 0, weight_before == weight_after) keeps the
+                # timeline honest.
+                self._snapshot_weights(
+                    trigger="warmup_skip", token_filter=token,
+                    reward=reward, profit_pct=profit_pct, regime=regime,
+                )
                 print(f"[ADAPTIVE] {token} — accumulating samples ({n+1}/{OGD_WARMUP_FLOOR}) "
                       f"before OGD warmup activates")
             return
@@ -774,8 +954,23 @@ class AdaptiveWeightEngine:
         # gradient contribution) while still counting toward n.
         _dsr_lr_scale, _dsr_reason = self._dsr_gate_lr_scale()
         if _dsr_lr_scale < 1.0:
+            # L-CY11-7 fix (audit 2026-05-28 cycle-11): log the actual verdict
+            # value (was hardcoded "FAIL"; can be MARGINAL for marginal_no_dsr).
+            _blob_for_log = self._latest_cpcv_verdict_blob() or {}
+            _vfor_log = _blob_for_log.get("verdict", "?")
             print(f"[ADAPTIVE] DSR gate {_dsr_reason}: lr_scale={_dsr_lr_scale:.2f} "
-                  f"(latest CPCV verdict is FAIL) — learning {'suppressed' if _dsr_lr_scale == 0 else 'softened'}")
+                  f"(latest CPCV verdict is {_vfor_log}) — learning {'suppressed' if _dsr_lr_scale == 0 else 'softened'}")
+        elif _dsr_reason == "stale_verdict_config_drift":
+            # M-CY11-2 fix (audit 2026-05-28 cycle-11): surface stale-verdict
+            # state for operator visibility. Without this log, OGD silently
+            # learns at full LR after a FAIL run because the pin moved — the
+            # operator cannot distinguish "gate inert because PASS" from
+            # "gate inert because stale verdict from different config."
+            _blob_for_log = self._latest_cpcv_verdict_blob() or {}
+            _vh_short = (_blob_for_log.get("config_hash") or "")[:16] + "..."
+            _ph_short = (self._baseline_pin_config_hash() or "")[:16] + "..."
+            print(f"[ADAPTIVE] DSR gate {_dsr_reason}: stored verdict hash="
+                  f"{_vh_short} != baseline_pin hash={_ph_short} — gate inert, full LR.")
         _lr = _lr * _dsr_lr_scale
 
         for feat in FEATURES:
@@ -933,12 +1128,25 @@ class AdaptiveWeightEngine:
         """
         try:
             conn  = _connect()
+            # 2026-05-27 CRT fix: original WHERE clause required fvg_quality
+            # NOT IN ('', 'NONE') — a 5M_SWEEP-era assumption (5M sweep REQUIRES
+            # FVG confluence). For CRT signals using OB-only confluence,
+            # fvg_quality is legitimately 'NONE' but mss_quality is fully
+            # populated. The old gate excluded 90% of CRT signals from
+            # bootstrap learning. Now we admit a row when AT LEAST ONE of
+            # fvg_quality OR mss_quality is meaningful (not NULL/NONE/'').
+            # This keeps the original 5M_SWEEP behavior identical (since all
+            # 5M_SWEEP rows have both populated) and adds the OB-only CRT
+            # rows that carry valid MSS+session+trend+confidence signal.
             query = """
                 SELECT token, signal, outcome, fvg_quality, mss_quality,
                        session, confidence, trend_1h, dr_location
                 FROM backtest_signals
                 WHERE outcome IS NOT NULL AND outcome != ''
-                  AND fvg_quality IS NOT NULL AND fvg_quality NOT IN ('', 'NONE')
+                  AND (
+                       (fvg_quality IS NOT NULL AND fvg_quality NOT IN ('', 'NONE'))
+                    OR (mss_quality IS NOT NULL AND mss_quality NOT IN ('', 'NONE'))
+                  )
             """
             params: tuple = ()
             if run_id is not None:
@@ -1222,8 +1430,29 @@ class AdaptiveWeightEngine:
         import time as _time
         now = _time.time()
 
-        # Protect freshly learned weights (M-I)
-        if now - self._last_update_time.get(token, 0.0) < 7 * 86400:
+        # Protect freshly learned weights (M-I).
+        # M-NEW-8 investigation outcome (cycle-9 audit 2026-05-28): TON's
+        # `last_decay_times = 0.0` was flagged as a potential anomaly because
+        # TON had 5+ OGD updates yet no decay timestamp. The investigation
+        # confirmed this is CORRECT BEHAVIOR — the M-I 7-day guard below
+        # suppresses decay for any token with a recent OGD update. The
+        # last_decay_time stays at its init value until 7 days pass without
+        # learning. We add a one-shot debug log here so the suppression is
+        # visible in the bot.log instead of silently invisible.
+        _last_upd = self._last_update_time.get(token, 0.0)
+        if now - _last_upd < 7 * 86400:
+            if _last_upd > 0:
+                # Only log when we actually have a recent update — not the
+                # cold-start case where _last_upd is 0 and decay correctly
+                # passes through.
+                _hours_since = (now - _last_upd) / 3600.0
+                _hours_left  = (7 * 86400 - (now - _last_upd)) / 3600.0
+                # Single-line FYI (rate-limited indirectly via min_interval_sec
+                # gate up-stream — apply_decay_if_due is only invoked from the
+                # main loop every PERF_CHECK_INTERVAL anyway).
+                print(f"[ADAPTIVE] {token} decay suppressed — M-I 7-day guard "
+                      f"({_hours_since:.1f}h since last OGD update, "
+                      f"{_hours_left:.1f}h until decay re-enables)")
             return False
 
         # Rate-limit between decay applications

@@ -112,6 +112,44 @@ def _env_choice(name: str, default: str, choices: tuple) -> str:
 EXECUTION_MODE: str = _env_choice("EXECUTION_MODE", "PAPER", ("PAPER", "LIVE"))
 
 
+# ── SIGNAL SOURCE TOGGLES ─────────────────────────────────────────────────────
+# Per-scanner kill-switch env knobs. The bot runs TWO independent scanners in
+# parallel by default — 5M_SWEEP (the canonical Run-168 baseline) and H4_CRT
+# (Candle Range Theory, gated by ENABLE_H4_CRT in crt_engine.py). These flags
+# let the operator A/B-test scanners in isolation without code changes.
+#
+# Default = ON (1) for back-compat — the canonical PAPER ship runs both.
+# Set ENABLE_5M_SWEEP=0 in .env to disable the original scanner and run
+# CRT-only paper trades (useful when measuring CRT-only attribution).
+#
+# Safety note: if BOTH ENABLE_5M_SWEEP=0 AND ENABLE_H4_CRT=0, the bot will
+# never emit signals — operator must enable at least one or restart will be
+# pointless. No assertion here; the silence is its own diagnostic.
+ENABLE_5M_SWEEP: bool = _env_bool("ENABLE_5M_SWEEP", True)
+
+
+# ── LIMIT-ORDER DISCIPLINE TRACKING (Phase A, 2026-05-28) ────────────────────
+# Operator chose Option 1 (limit orders at bot's entry_price) as the live
+# execution discipline. These knobs control the empirical measurement layer.
+#
+# CRT_LIMIT_FILL_WINDOW_MIN — how long to wait for price to retouch the bot's
+#                              entry_price after the signal fires. If retouch
+#                              happens within this window → limit order would
+#                              have filled. If not → signal marked MISSED and
+#                              the operator's discipline says skip it.
+#                              Default 30 min: balance between giving price
+#                              time to retrace (H4 strategy, moves develop over
+#                              hours) AND avoiding stale entries (after 30 min
+#                              the move has typically fully played out).
+CRT_LIMIT_FILL_WINDOW_MIN: int = _env_int("CRT_LIMIT_FILL_WINDOW_MIN", 30)
+
+# Slippage thresholds for dashboard color-coding (UX only — no behavior gate)
+# Slippage = how much the live market price at alert time differed from the
+# bot's recorded entry_price. Negative = market filled worse than bot ref.
+CRT_SLIPPAGE_WARN_PCT: float = _env_float("CRT_SLIPPAGE_WARN_PCT", 0.5)  # yellow above this
+CRT_SLIPPAGE_CRIT_PCT: float = _env_float("CRT_SLIPPAGE_CRIT_PCT", 2.0)  # red above this
+
+
 # ── BINANCE / DATA SOURCE INFRASTRUCTURE ──────────────────────────────────────
 BINANCE_BASE: str    = "https://api.binance.com/api/v3"
 COINGECKO_GLOBAL: str = "https://api.coingecko.com/api/v3/global"
@@ -170,6 +208,16 @@ SIGNAL_COOLDOWN: int = _env_int("SIGNAL_COOLDOWN", 40)      # minutes — matche
 NEAR_LEVEL_PROX: float = _env_float("NEAR_LEVEL_PROX", 0.025)  # fixed 2.5% S/R proximity
 SR_LOOKBACK: int     = _env_int("SR_LOOKBACK", 50)
 STALE_CANDLE_THRESHOLD: int = _env_int("STALE_CANDLE_THRESHOLD", CHECK_INTERVAL * 3)  # alert > 3 cycles old
+# M-CY13-2/3 fix (audit cycle-13 2026-05-29): elevate BTC stale-cache
+# threshold from a hardcoded local constant in fetch_btc_state to an
+# env-overridable config knob. Pre-fix the 600s value lived inline at
+# crypto_alert.py:2499 with no relationship to STALE_CANDLE_THRESHOLD;
+# this created a 270-600s window where the IF-branch freshness check
+# (270s threshold) updated last_candle_fetch_ok while the silent-stale
+# flip (600s threshold) hadn't tripped — leaving feed_ok=True with
+# 5-10min old data. Default 600s preserves original behavior; operator
+# can tighten via env.
+BTC_STALE_FEED_S: int = _env_int("BTC_STALE_FEED_S", 600)
 
 EXPIRY_BY_REGIME: dict = {
     "TRENDING_BULL":      12,
@@ -221,8 +269,23 @@ TIER_DAILY_LIVE_CAPS: dict = {  # max ACTIVE signals per template per UTC day
     "TIER_B": 2,
     "TIER_C": 0,   # hard zero — Tier C is paper/backtest only; never live
     "NONE":   1,
+    # RISK-GAP-NEW-1 fix (cycle-10 audit 2026-05-28): CRT tier IDs missing
+    # from this map caused evaluate_template_status() to default the cap
+    # lookup to 0, marking every CRT signal PAPER_ONLY even after T-1/T-2
+    # tier ordering recovery. Caps mirror the 5M_SWEEP topology
+    # (A=3 / B=2 / C=0); CRT_B_FVG_RELAXED is deprecated under A1/A2 but
+    # listed for back-compat with historical signals.
+    "CRT_A_FVG_ALIGNED": 3,
+    "CRT_B_OB_HIGH_MSS": 2,
+    "CRT_B_FVG_RELAXED": 2,
+    "CRT_C_OB_DEFAULT":  0,
 }
-BLOCK_RANGING_TEMPLATES: set = {"TIER_B", "NONE"}  # block live exec in RANGING regime
+BLOCK_RANGING_TEMPLATES: set = {"TIER_B", "NONE",
+                                # RISK-GAP-NEW-1 cycle-10 (2026-05-28):
+                                # CRT mid-tier also blocked in RANGING regime
+                                # for parity with the 5M_SWEEP TIER_B rule.
+                                "CRT_B_OB_HIGH_MSS",
+                                "CRT_B_FVG_RELAXED"}
 
 
 # ── MACRO EVENT FILTER (Sprint 3 / Phase A item #4 completion) ───────────────
@@ -405,4 +468,13 @@ __all__ = [
     "WEIGHTS", "SIGNAL_THRESHOLD", "REGIME_RULES",
     # gate config kwargs (consumed by strategy_engine.py)
     "LIVE_CONFIG_KWARGS", "BACKTEST_CONFIG_KWARGS",
+    # L-NEW-5 fix (cycle-9 audit 2026-05-28): scanner kill switch + Phase A
+    # tracking env knobs were defined in the module but absent from __all__,
+    # so `from config import *` consumers (e.g. the explorer's _runtime_env
+    # snapshot, audit tools) couldn't see them. All four are operator-tunable
+    # and operationally important.
+    "ENABLE_5M_SWEEP",
+    "CRT_LIMIT_FILL_WINDOW_MIN",
+    "CRT_SLIPPAGE_WARN_PCT",
+    "CRT_SLIPPAGE_CRIT_PCT",
 ]
