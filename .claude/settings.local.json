@@ -104,7 +104,15 @@
       "Read(//tmp/**)",
       "Bash(echo \"[2026-05-29] | tradeai-audit | overall=9.25/10 \\(11 dims\\) | CRITICAL=0 HIGH=3 MEDIUM=10 LOW=13 | GO \\(paper\\) / NO-GO \\(LIVE\\) | cycle-12 post Run-1749 + T1.2/T1.3/Stage B wave: slight regression -0.05 from cycle-11 ATH \\(9.30\\). 3 convergent HIGH all M24-class around confidence-bonus arithmetic asymmetry — H-CY12-1 live applies funding+btc_corr confidence bonus, backtest doesn't \\(3 agents converge: config + live-BT + template\\); H-CY12-2 classify_btc_corr vocab mismatch \\(expects STRONG_BULL, gets BULLISH from bias_4h → ALIGNED_HIGH unreachable\\); H-CY12-3 Tier A inverted under Run-338 TP geometry \\(post-T-1 cumulative n=803: B=62.2% > C=58.9% > A=58.3%\\). ICT 9.6→9.7 \\(+0.1: EQH/EQL canonical, OTE faithful\\), OGD 9.4→9.5 \\(+0.1: Run #1749 bootstrap clean 0 degenerate\\), Honest Metrics 9.25→9.30 \\(+0.05: Run #1749 figures honest\\), Resilience 9.7 flat \\(watchdog 1s fresh, fapi can't crash\\). Templates 8.7→8.5 \\(-0.2: Tier A inversion\\), Config 9.85→9.45 \\(-0.40: 9-knob payload clean but bonus formula asymmetric\\), Live/BT 9.4→9.3 \\(-0.1: Stage B funding parity ✓ but bonus drift NEW\\), Data 9.3→9.2 \\(-0.1: BTC vocab mismatch + fapi 429 not distinguished\\). T1.1 portfolio risk STILL NOT STARTED \\(only Tier 1 LIVE blocker\\). All 23+ cycle-11 fixes VERIFIED INTACT via multi-agent convergence; Run #1749 reproduces Run-1056 byte-identical \\(different config_hash only\\); DSR pool n=7 with 2 duplicate-strategy pairs \\(Runs 1749/1056 + 576/338\\) slightly understates sr_std → DSR overstated ~1.7pp. Highest-impact fix: H-CY12-1 mirror bonus in backtest.py:1770 \\(~15 LoC + schema + parity test\\) closes M24-isomorphic asymmetry. ~100min total for Patches 1-6 closes 2 HIGH + 4 MED + 1 LOW. Bot healthy PID 296881 cycle 4336+ paper-soak unaffected \\(bonus dormant at defaults\\).\" >> /home/tradeai/TradeAI/.claude/reports/HISTORY.md && echo \"HISTORY appended\"; tail -1 /home/tradeai/TradeAI/.claude/reports/HISTORY.md | head -c 250)",
       "Bash(echo \"═══ Append to HISTORY.md ═══\" *)",
-      "Bash(DATE=$\\(date +%Y-%m-%d\\) *)"
+      "Bash(DATE=$\\(date +%Y-%m-%d\\) *)",
+      "Bash(mkdir -p /home/tradeai/TradeAI/.claude/workflows /home/tradeai/TradeAI/.claude/skills/parallel-work)",
+      "Edit(/.claude/skills/parallel-work/**)",
+      "Bash(mkdir -p .claude/reports/tradeai-audit 2>/dev/null; date \"+%Y-%m-%d %H:%M UTC\")",
+      "Bash(tail -3 .claude/reports/HISTORY.md 2>/dev/null; echo \"---\"; echo \"[2026-05-30] | tradeai-audit | overall=9.35/10 | CRITICAL=0 HIGH=2 | PAPER-GO LIVE-NO-GO | NEW ATH \\(+0.04 vs cycle-14\\). 2 NEW HIGH from ATOM/BCH token expansion: TOKEN_RT_COST gap + CORRELATED set gap. Template Calibration +0.9 biggest gain \\(H-CY14-T1 verified in production\\).\" >> .claude/reports/HISTORY.md && tail -3 .claude/reports/HISTORY.md)",
+      "Bash(mkdir -p .claude/agents/_bak_before_opus_sonnet_2026_05_30)",
+      "Bash(cp .claude/agents/*.md .claude/agents/_bak_before_opus_sonnet_2026_05_30/)",
+      "Bash(mkdir -p .claude/reports/autonomous-loop 2>/dev/null; date \"+%Y-%m-%d %H:%M UTC\")",
+      "Bash(echo \"=== 1. Delete backup directory ===\" *)"
     ],
     "additionalDirectories": [
       "C:\\Users\\User\\Desktop\\TradeAI\\.claude\\reports",
@@ -124,7 +132,10 @@
       "/home/tradeai/TradeAI/.claude/reports/template-tier-calibrator",
       "/home/tradeai/TradeAI/.claude/reports/crash-recovery-auditor",
       "/home/tradeai/TradeAI/.claude/reports/risk-management-auditor",
-      "/home/tradeai/TradeAI/.claude/reports/tradeai-audit"
+      "/home/tradeai/TradeAI/.claude/reports/tradeai-audit",
+      "/home/tradeai/TradeAI/.claude",
+      "/tmp",
+      "/home/tradeai/TradeAI/.claude/agents/_bak_before_opus_sonnet_2026_05_30"
     ]
   },
   "mcpServers": {

@@ -178,6 +178,27 @@ BINANCE_TOKENS: dict = {
     # LTC removed: A-3 REJECTED (n=2, WR=50% — below 55% floor, insufficient sample)
     # SUI removed: B-2 REJECTED (n=3, WR=0.0% - zero win rate, fails 60% threshold)
     "TON":  "TONUSDT",   # B-4: top-9 by market cap, strong trend-following behavior (Session 4)
+    # E-3 ACCEPTED (2026-05-30): ATOM added after isolation backtest #2744/2745.
+    # Bit-exact repro: n=10, WR=60.0%, avg R=1.29x, per-trade expectancy +0.30R.
+    # ATOM outperforms HBAR (52.9%) and TON (55.6%) on per-token WR; cleared
+    # the historical reject floor (<50% WR or negative expectancy). CPCV std
+    # tightened (-1.18pp) — strategy got MORE consistent with ATOM in pool.
+    # 24h vol $24M (yellow flag for LIVE, fine for PAPER). Pin NOT re-promoted
+    # yet — paper soak required to validate 60% WR holds in live data over
+    # next 5-10 ATOM closes. Cosmos ecosystem diversification. Remove if paper
+    # WR drops <50% in next 30 days.
+    "ATOM": "ATOMUSDT",
+    # E-4 ACCEPTED (2026-05-30): BCH added after isolation backtests #2746/2747
+    # (combined w/ ATOM) and #2748 (BCH solo). Bit-exact repro across all runs.
+    # Per-token: n=6, WR=66.7%, avg R=1.12x, per-trade expectancy +0.48R.
+    # BCH SOLO test vs Run-2156 baseline: CPCV mean -0.59pp, std -0.05pp,
+    # Sharpe -0.005 — essentially flat pin disruption (lowest of all 4
+    # candidates tested). PoW market structure = only PoW token in list
+    # (others all PoS/permissioned). $122M 24h vol above institutional floor.
+    # 8+ years history. Pin NOT re-promoted yet — paper soak validates BCH+ATOM
+    # 12-token universe vs Run-2156 10-token reference. Remove if paper WR
+    # drops <45% in 12 months (extended window vs ATOM's 30d due to low freq).
+    "BCH":  "BCHUSDT",
 }
 
 TIMEFRAMES: dict = {

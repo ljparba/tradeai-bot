@@ -234,10 +234,10 @@ def _assert_anti_pattern_locks() -> None:
 
 # Anti-overfit guard thresholds
 GUARD = {
-    "consecutive_fail_max":     150,   # PAUSE if N consecutive FAIL verdicts. H2 fix (explorer audit cycle-12 2026-05-29): lowered from 500 to 150. At ~11min/trial, 500 = 92h of continuous failure before tripping — effectively disables invariant #12. 150 = ~27h, still allows tolerant Bayesian exploration in productive regions but doesn't let a broken session run unattended for ~4 days. Operator can stop manually anytime. (Prior raise 100→500 on 2026-05-28 PM was overcorrection for config_hash collision investigation — collisions are now impossible per CR-CY11-1 patch, so 100-150 is the right band.)
+    "consecutive_fail_max":     1000,  # PAUSE if N consecutive FAIL verdicts. Operator override 2026-05-30: raised 500→1000 for very long basin-walk sessions where FAIL is the default verdict (LIVE DSR≥95% gate rarely satisfied at current pool). At ~30s/trial cache-hot, 1000 = ~8h continuous-fail before pause. Operator can stop manually anytime.
     "sr_trial_std_jump_pct":    25.0,  # PAUSE if cross-config std rises >X% mid-session
     "best_dsr_drop_vs_pin_pp":  5.0,   # PAUSE if best-of-session DSR < pin DSR - X pp
-    "consecutive_error_max":    3,     # PAUSE if N consecutive ERROR (timeouts/crashes)
+    "consecutive_error_max":    20,    # PAUSE if N consecutive ERROR (timeouts/crashes). Operator override 2026-05-29: raised 3→20 to tolerate transient Binance/network blips without aborting overnight sessions.
 }
 
 # Phase 3 auto-promotion criteria (must ALL pass to promote)

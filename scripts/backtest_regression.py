@@ -66,7 +66,11 @@ _DEFAULT_MIN_Z      = float(os.environ.get("BACKTEST_GATE_MIN_Z",   "2.5"))
 # that touch config.py or backtest.py.
 _EXPECTED_PARAMS: Dict[str, Any] = {
     "BACKTEST_DAYS":   730,   # Fix #38 (2026-05-22 cycle 13): bumped 365→730 for rolling-WF stability
-    "COOLDOWN_BARS":   8,
+    # COOLDOWN_BARS removed from fixed-expectation guard (cycle-15-loop, 2026-05-30):
+    # backtest.py:265 now derives COOLDOWN_BARS from SIGNAL_COOLDOWN env to match live cadence.
+    # The value legitimately varies with the operator's pin choice — it is no longer
+    # a fixed constant to drift-guard against. Live↔BT cadence is now enforced
+    # structurally rather than via a stale numeric snapshot here.
     "ENTRY_WINDOW":    72,
     "ICT_SWING_N":     2,
     "MIN_TP1_MULT":    1.5,

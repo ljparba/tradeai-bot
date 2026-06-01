@@ -633,8 +633,19 @@ class AdaptiveWeightEngine:
             # Compute how long the drift has persisted by reading the verdict
             # blob's `written_at` (set at backtest time). Fallback to grace
             # period if the field is absent (legacy verdicts).
+            #
+            # C15L-loop run #2 (2026-05-31): added `updated_at` to the fallback
+            # chain because the actual persistence path in backtest.py writes
+            # `updated_at` (not `written_at` or `ts`). Without this addition the
+            # blob's timestamp parse returned 0.0, the `_written_ts > 0` guard
+            # at line 648 was never satisfied, and the stale-grace escalation
+            # never fired — meaning a stale-FAIL verdict against the wrong
+            # config_hash held the OGD at 1.0× LR indefinitely (gate failed
+            # OPEN). Adding `updated_at` restores the intended 48h-grace
+            # throttle to 0.5× without requiring any operator action.
             import time as _time
-            _written_at_iso = blob.get("written_at") or blob.get("ts") or ""
+            _written_at_iso = (blob.get("written_at") or blob.get("ts")
+                               or blob.get("updated_at") or "")
             try:
                 # Verdict blobs are written with UTC ISO-8601 strings; parse
                 # and compare to wall-clock UTC epoch.
@@ -1839,7 +1850,12 @@ class PortfolioRiskLayer:
     # Fix #34 (2026-05-22 cycle 9 audit): added XRP and ADA — both exhibit >0.65
     # Pearson correlation with BTC during 2024-2025 stress events. HBAR/POL remain
     # outside the set (genuinely lower-beta majors). SOL excluded from live (T-1).
-    CORRELATED = frozenset({"BTC", "ETH", "BNB", "AVAX", "XRP", "ADA"})
+    # HIGH-CY15-2 (audit 2026-05-30): added BCH — PoW twin to BTC, ~0.85 Pearson
+    # during risk-off / liquidation cascades. Without this entry, a same-side
+    # BCH+BTC cluster bypasses the correlation guard and double-exposes directional
+    # risk. ATOM (Cosmos PoS, ~0.65-0.75 beta) deferred — monitor first 10 paper
+    # closes before adding; current paper exposure too small to over-restrict.
+    CORRELATED = frozenset({"BTC", "ETH", "BNB", "AVAX", "XRP", "ADA", "BCH"})
 
     def check(self, token: str, signal: str,
               risk_per_trade_pct: float) -> Tuple[bool, str, list]:

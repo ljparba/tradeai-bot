@@ -75,6 +75,12 @@ TOKEN_RT_COST: dict = {
     "ADA":  0.004,
     "POL":  0.005,
     "HBAR": 0.005,
+    "TON":  0.004,   # TON: top-9 mkt cap, ~$80M 24h vol, 0.10-0.15% spread tier
+    # HIGH-CY15-1 (audit 2026-05-30): added with new tokens. ATOM tier matches
+    # ADA — $24M 24h vol = 0.10-0.15% one-way spread plausible → 0.40% RT.
+    # BCH tier matches BTC/ETH — $122M 24h vol, deep PoW orderbook → 0.30% RT.
+    "ATOM": 0.004,
+    "BCH":  0.003,
 }
 MAX_BREAKEVEN_WR     = 0.60    # relaxed - ICT structural SLs are larger
 # Cycle-12 explorer-axis (2026-05-29): env-overridable so Optuna can sweep

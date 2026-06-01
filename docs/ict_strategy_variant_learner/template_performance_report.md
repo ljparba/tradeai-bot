@@ -1,8 +1,8 @@
 # ICT Strategy Variant Learner — Template Performance Report
 
-**Generated:** 2026-05-29 10:31  
+**Generated:** 2026-05-31 16:25  
 **Strategy Version:** v2  
-**Total signals:** 95 (Train: 39, Holdout: 56)  
+**Total signals:** 65 (Train: 29, Holdout: 36)  
 **Holdout from:** 2025-11-03  
 
 > Grouping: **Best Match Only** — each signal assigned to its highest-tier matching template.
@@ -92,9 +92,9 @@ _Signals that matched no ICT template_
 
 | Template | Train N | Train WR% | Holdout N | Holdout WR% | Avg MFE% | Avg MAE% | Avg realR |
 |----------|---------|-----------|-----------|-------------|----------|----------|----------|
-| Tier A — Strict | 1 | 100.0% | 0 | — | +1.9422% | +0.4065% | +1.2900R |
-| Tier B — Balanced | 13 | 61.5% | 13 | 61.5% | +2.6756% | +1.1159% | +0.5654R |
-| Tier C — Exploratory (paper-only) | 11 | 54.5% | 11 | 54.5% | +2.0992% | +0.9206% | +0.3336R |
+| Tier A — Strict | 0 | — | 0 | — | — | — | — |
+| Tier B — Balanced | 5 | 80.0% | 6 | 100.0% | +3.6452% | +1.3054% | +1.1240R |
+| Tier C — Exploratory (paper-only) | 3 | 66.7% | 4 | 100.0% | +1.9177% | +0.6758% | +0.6133R |
 
 ---
 
@@ -142,13 +142,13 @@ _Concentration threshold: >= 70% of signals in one regime or session_
 | Safety Rule | Trigger Condition | Signals Blocked | % of All |
 |------------|-------------------|-----------------|----------|
 | PAPER_ONLY — Tier C | `matched_template_id == TIER_C` | 0 | 0.0% |
-| PAPER_ONLY — cap=0 | Tier ['TIER_C', 'CRT_C_OB_DEFAULT'] daily cap = 0 | 16 | 16.8% |
-| BLOCKED_BY_REGIME_SAFETY | RANGING + template in ['CRT_B_FVG_RELAXED', 'CRT_B_OB_HIGH_MSS', 'NONE', 'TIER_B'] | 37 | 38.9% |
+| PAPER_ONLY — cap=0 | Tier ['TIER_C', 'CRT_C_OB_DEFAULT'] daily cap = 0 | 7 | 10.8% |
+| BLOCKED_BY_REGIME_SAFETY | RANGING + template in ['CRT_B_FVG_RELAXED', 'CRT_B_OB_HIGH_MSS', 'NONE', 'TIER_B'] | 30 | 46.2% |
 | INSUFFICIENT_SAMPLE | < 50 closed trades per template | **requires live DB** | — |
 | PAUSED_BY_CIRCUIT_BREAKER | Rolling 20-trade WR < 55% | **requires live DB** | — |
 | DAILY_CAP_REACHED | Daily live count ≥ cap per tier | **requires live DB** | — |
 
-**Subtotal (simulatable rules):** 53 / 95 signals (55.8%) would be blocked before reaching live execution.
+**Subtotal (simulatable rules):** 37 / 65 signals (56.9%) would be blocked before reaching live execution.
 
 ### Regime Safety — RANGING Breakdown by Template
 

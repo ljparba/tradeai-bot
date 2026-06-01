@@ -2586,8 +2586,14 @@ def fetch_btc_state():
     print(f"[BTC] 1H:{BTC_STATE['trend_1h']} 15M:{BTC_STATE['trend_15m']} feed_ok={BTC_STATE['feed_ok']}")
     # [ACTIVITY] feed — BTC macro context appears once per cycle in the
     # dashboard's live AI feed so the operator knows the overall regime.
+    # Includes BTC dominance + direction (CoinGecko, refreshed every
+    # DOM_FETCH_INTERVAL ≈ 30 min) so the operator sees the market-wide
+    # rotation signal alongside BTC's own trend.
+    _dom_pct  = BTC_STATE.get("dominance", 0.0) or 0.0
+    _dom_dir  = BTC_STATE.get("dom_dir", "NEUTRAL")
+    _dom_str  = f"Dom {_dom_pct:.1f}% {_dom_dir}" if _dom_pct > 0 else "Dom (pending)"
     print(f"[ACTIVITY] BTC macro: 1H trend {BTC_STATE['trend_1h']}, "
-          f"15M trend {BTC_STATE['trend_15m']}")
+          f"15M trend {BTC_STATE['trend_15m']}, {_dom_str}")
 
     if now - BTC_STATE["last_dom_fetch"] >= DOM_FETCH_INTERVAL:
         try:
@@ -4273,6 +4279,13 @@ def main():
                         f"regime classification may diverge from backtest")
                 logger.warning(_msg)
                 print(_msg)
+                # Mirror the warning into the dashboard activity feed so
+                # the operator sees the startup drift state alongside the
+                # cycle activity, in plain English. Fired once per restart;
+                # never spams during normal cycles.
+                _trend_note = "calmer" if _delta < 0 else "trendier"
+                print(f"[ACTIVITY] {_tok}: regime drift — market is {_trend_note} "
+                      f"than backtest baseline (ADX delta {_delta:+.1f})")
                 _drift_warnings.append(f"{_tok}: adx_trend={_live_adx} ({_delta:+.1f})")
         except Exception as _e:
             logger.warning(f"[DRIFT-GATE] Could not read threshold for {_tok}: {_e}")
@@ -4575,8 +4588,10 @@ def main():
     while True:
         try:
             start=time.time(); cycle+=1
+            _tokens_scanned = len(BINANCE_TOKENS)
+            _tokens_fetched_ok = 0   # M-CY15-3: per-cycle fetch attestation
             print(f"\n[{datetime.now().strftime('%H:%M')}] === Cycle {cycle} ===")
-            print(f"[ACTIVITY] === Cycle {cycle} start — scanning 10 tokens for setups ===")
+            print(f"[ACTIVITY] === Cycle {cycle} start — scanning {_tokens_scanned} tokens for setups ===")
             if time.time() - _last_perf_load >= PERF_CHECK_INTERVAL:
                 load_performance_state(); _last_perf_load = time.time()
                 # R6 fix (master audit 2026-05-26): event-driven decay replaces
@@ -4592,7 +4607,9 @@ def main():
             for token in BINANCE_TOKENS:
                 print(f"  Fetching {token}...")
                 pd=update_token_state(token)
-                if pd.get("price"): current_prices[token]=pd["price"]
+                if pd.get("price"):
+                    current_prices[token]=pd["price"]
+                    _tokens_fetched_ok += 1   # M-CY15-3: count successful fetch
                 # Persist drift windows periodically
                 if cycle % _DRIFT_PERSIST_EVERY == 0:
                     drift_detector.persist(token)
@@ -4611,6 +4628,12 @@ def main():
                     open_signals=_port_st["total_open"],
                     threshold_adj=_signal_threshold_adj,
                     consecutive_errors=_consecutive_errors,
+                    # M-CY15-3: per-cycle token-fetch attestation. Without this,
+                    # silent geo-blocking of a few symbols (Binance regional ban
+                    # mid-session) would never trigger the watchdog because the
+                    # heartbeat would keep updating from the surviving fetches.
+                    tokens_scanned=_tokens_scanned,
+                    tokens_fetched_ok=_tokens_fetched_ok,
                 )
             except Exception as _hbe:
                 logger.error(f"[HEARTBEAT] beat failed: {_hbe}")
@@ -5077,6 +5100,94 @@ def main():
             except Exception as _act_e:
                 # Snapshot is observability-only — never let it kill the cycle
                 print(f"[ACTIVITY] (snapshot failed: {_act_e})")
+
+            # [ACTIVITY] market-overlay summary — aggregates per-token funding
+            # rate classification + BTC correlation classification across the
+            # 10 tokens so the operator sees which structural overlays the
+            # CRT engine considered this cycle. These values are already
+            # computed inside scan_h4_crt_for_token at signal-emit time but
+            # are silent on the no-setup path. Recompute here from the
+            # cached funding (5-min TTL) + already-cached BTC candles —
+            # cheap enough at end-of-cycle, never touches the hot loop.
+            try:
+                from funding_rate_client import (
+                    get_funding_rate, classify_funding_extreme,
+                    is_funding_fetch_failed,
+                )
+                from btc_correlation import (
+                    compute_btc_correlation, classify_btc_corr,
+                )
+                _btc_raw_c5m = (
+                    STATE["BTC"]["candles"].get("5m", {})
+                    if "BTC" in STATE
+                       and STATE["BTC"]["candles"].get("5m", {}).get("closes")
+                    else BTC_STATE.get("candles", {}).get("5m", {})
+                )
+                _btc_5m_closes = _btc_raw_c5m.get("closes", [])
+                _btc_5m_times  = (_btc_raw_c5m.get("times")
+                                  or _btc_raw_c5m.get("timestamps") or [])
+                # Strip BTC's forming bar to match the live BTC-corr path
+                if len(_btc_5m_closes) > 1:
+                    _btc_5m_closed = _btc_5m_closes[:-1]
+                else:
+                    _btc_5m_closed = _btc_5m_closes
+                # Bucket-counts so the line stays compact
+                _fund_buckets = {"EXTREME": 0, "NEUT": 0, "FAIL": 0, "DIS": 0}
+                _corr_buckets = {"ALIGNED_H": 0, "ALIGNED_L": 0, "DIVERG": 0,
+                                 "AMBIG": 0, "UNK": 0}
+                for _tok in BINANCE_TOKENS:
+                    # Funding side — cached 5min so re-call is essentially free
+                    try:
+                        _fr = get_funding_rate(_tok)
+                        _ff = is_funding_fetch_failed(_tok)
+                        _fc = classify_funding_extreme(_fr, "BUY",
+                                                        fetch_failed=_ff)
+                        # Aggregate the 5 raw classifications into 4 buckets
+                        if _fc.startswith("EXTREME"):
+                            _fund_buckets["EXTREME"] += 1
+                        elif _fc == "FETCH_FAILED":
+                            _fund_buckets["FAIL"] += 1
+                        elif _fc == "DISABLED":
+                            _fund_buckets["DIS"] += 1
+                        else:
+                            _fund_buckets["NEUT"] += 1
+                    except Exception:
+                        _fund_buckets["FAIL"] += 1
+                    # BTC correlation side — skip BTC vs itself
+                    if _tok == "BTC":
+                        continue
+                    try:
+                        _tok_c5m = STATE[_tok]["candles"].get("5m", {})
+                        _tok_closes = _tok_c5m.get("closes", [])
+                        if _tok_closes and _btc_5m_closed:
+                            _corr = compute_btc_correlation(
+                                _btc_5m_closed, _tok_closes, window=60,
+                            )
+                            _tr1h_tok = STATE[_tok].get("trend_1h", "NEUTRAL")
+                            _cc = classify_btc_corr(_corr, "BUY", _tr1h_tok)
+                            if _cc == "ALIGNED_HIGH":
+                                _corr_buckets["ALIGNED_H"] += 1
+                            elif _cc == "ALIGNED_LOW":
+                                _corr_buckets["ALIGNED_L"] += 1
+                            elif _cc == "DIVERGENT":
+                                _corr_buckets["DIVERG"] += 1
+                            elif _cc == "AMBIGUOUS":
+                                _corr_buckets["AMBIG"] += 1
+                            else:
+                                _corr_buckets["UNK"] += 1
+                        else:
+                            _corr_buckets["UNK"] += 1
+                    except Exception:
+                        _corr_buckets["UNK"] += 1
+                # Render only buckets with >0 count for compactness
+                _fund_txt = " ".join(f"{k}:{v}"
+                                     for k, v in _fund_buckets.items() if v > 0)
+                _corr_txt = " ".join(f"{k}:{v}"
+                                     for k, v in _corr_buckets.items() if v > 0)
+                print(f"[ACTIVITY] Overlays: funding[{_fund_txt}]  "
+                      f"BTC-corr[{_corr_txt}]")
+            except Exception as _ov_e:
+                print(f"[ACTIVITY] (overlay summary failed: {_ov_e})")
 
             elapsed=time.time()-start
             sleep_t=max(0,CHECK_INTERVAL-elapsed)

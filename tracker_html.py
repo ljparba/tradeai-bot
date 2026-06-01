@@ -610,10 +610,10 @@ tr:hover td{background:rgba(37,37,56,.45)}
 .activity-feed-status.stale{color:#f59e0b}
 .activity-feed-status.err{color:#ef4444}
 .activity-feed-sub{font-size:.7rem;color:var(--muted);line-height:1.4;margin-bottom:.7rem;padding-bottom:.6rem;border-bottom:1px dashed var(--border)}
-.activity-feed-list{display:flex;flex-direction:column;gap:.3rem;max-height:640px;overflow-y:auto}
+.activity-feed-list{display:flex;flex-direction:column;gap:0;max-height:640px;overflow-y:auto}
 .activity-feed-list::-webkit-scrollbar{width:6px}
 .activity-feed-list::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
-.activity-item{font-size:.78rem;line-height:1.45;color:#cbd5e1;padding:.45rem .55rem;background:var(--bg);border-left:2px solid var(--border);border-radius:3px;word-break:break-word}
+.activity-item{font-size:.78rem;line-height:1.45;color:#cbd5e1;padding:0 .55rem;background:var(--bg);border-left:2px solid var(--border);border-radius:3px;word-break:break-word}
 .activity-item.cycle{border-left-color:#64748b;color:#94a3b8;font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;font-weight:600}
 .activity-item.macro{border-left-color:#06b6d4}
 .activity-item.signal{border-left-color:#22c55e;color:#bbf7d0;font-weight:600}
@@ -621,6 +621,9 @@ tr:hover td{background:rgba(37,37,56,.45)}
 .activity-item.skipped{border-left-color:#64748b;opacity:.85}
 .activity-item.cooldown{border-left-color:#a78bfa}
 .activity-item.kill{border-left-color:#ef4444;color:#fecaca;font-weight:600}
+.activity-item.overlays{border-left-color:#3b82f6;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.7rem;line-height:1.5;color:#cbd5e1}
+.activity-item.overlays .overlay-key{color:#fbbf24;font-weight:600;text-transform:uppercase}
+.activity-item.drift{border-left-color:#eab308;color:#fef3c7;font-style:italic}
 .activity-item.tokens{border-left-color:#a78bfa;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.7rem;line-height:1.5;color:#cbd5e1}
 .activity-item.tokens .tok-cell{display:inline-block;margin:1px 4px 1px 0;padding:1px 5px;background:rgba(99,102,241,.08);border-radius:3px;white-space:nowrap}
 .activity-item.tokens .tok-name{color:#fbbf24;font-weight:600}
@@ -3691,6 +3694,8 @@ async function loadOpen(){
 function _classifyActivity(msg){
   const m = msg.toLowerCase();
   if(m.startsWith('tokens:')) return 'tokens';
+  if(m.startsWith('overlays:')) return 'overlays';
+  if(m.includes('regime drift')) return 'drift';
   if(m.includes('signal fired')) return 'signal';
   if(m.includes('kill switch')) return 'kill';
   if(m.includes('cycle') && m.includes('start')) return 'cycle';

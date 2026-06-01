@@ -254,7 +254,15 @@ HELD_OUT_DAYS  = int(os.environ.get("HELD_OUT_DAYS", "0") or "0")
 WARMUP_BARS    = 210    # 5M bars before first signal (~17.5H warmup)
 FORWARD_BARS   = 288    # 5M bars to look ahead for TP/SL = 24H  (extended for 2.0R targets)
 REGIME_WINDOW  = 360    # 5M bars for rolling regime = 30H window (was 120×15M)
-COOLDOWN_BARS  = 8      # rollback: F-8/F-9/F-10 reverted to F-4 level (40min); quality config
+# M-CY15-loop fix (audit 2026-05-30 PM): derive COOLDOWN_BARS from the
+# SIGNAL_COOLDOWN env var (which the live bot honors at crypto_alert.py via
+# config.SIGNAL_COOLDOWN) so backtest cadence cannot silently drift from live
+# cadence when the operator pins a non-default value. Previously hardcoded at 8
+# (=40min); when .env pinned SIGNAL_COOLDOWN=60, the backtest still ran at 40min
+# → ~28% more signals in backtest than live can reproduce. Default 40 preserved
+# for back-compat with all prior baselines whose pin used the default.
+# Floor of 1 bar prevents zero-cooldown pathologies if env is set <5.
+COOLDOWN_BARS  = max(1, int(os.environ.get("SIGNAL_COOLDOWN", "40")) // 5)
 ENTRY_WINDOW   = 72     # P-3 ACCEPTED: 48→72 (4H→6H); E-1 (72→96) rejected — 0 new signals
 OUTPUT_FILE    = os.path.join(_ROOT, "data", "backtest_results.json")
 
@@ -1397,6 +1405,20 @@ def run_backtest_token_h4_crt(token, c5m, c4h, c1h=None, config=None,
     # same fallback semantics as the 5M_SWEEP path.
     btc5m_ind_crt = precompute_tf(btc_c5m) if btc_c5m else None
 
+    # C15L3-CRT-1 fix (cycle-15-loop run #3, 2026-05-31): live↔BT cooldown
+    # parity for the CRT scanner. The 5M_SWEEP backtest enforces COOLDOWN_BARS
+    # at line 1086, and the live CRT scanner at crypto_alert.py:4891-4900
+    # enforces the same SIGNAL_COOLDOWN gate per-direction per-token. But the
+    # CRT backtest path historically had no cooldown gate — `consumed` set
+    # prevents same-C1 re-fire but NOT cross-C1 same-direction firings within
+    # the cooldown window. Result: backtest could fire two same-direction
+    # signals on the same token within 60min where live would suppress the
+    # second. This is a live↔BT divergence (CRITICAL per audit-loop spec).
+    # Initialize cooldown state so the gate at the per-setup loop can enforce
+    # the same minutes-between-signals semantics as live.
+    crt_last_signal_bar = -(COOLDOWN_BARS + 1)
+    crt_last_signal_dir = None
+
     # Walk H4 candles forward, scanning a sliding window at each step.
     for h4_end in range(h4_window, n4):
         h4_start = h4_end - h4_window
@@ -1461,6 +1483,16 @@ def run_backtest_token_h4_crt(token, c5m, c4h, c1h=None, config=None,
             continue
         entry_price = c5m["opens"][entry_bar]
         direction = setup["direction"]
+
+        # C15L3-CRT-1 cooldown gate (cycle-15-loop run #3, 2026-05-31): mirror
+        # the 5M_SWEEP gate at line 1086 + the live CRT gate at
+        # crypto_alert.py:4891-4900. Reject same-direction same-token signals
+        # that would fire within COOLDOWN_BARS of the previous one. This
+        # restores live↔BT parity for the CRT scanner cooldown semantics.
+        if (crt_last_signal_dir == direction
+                and (entry_bar - crt_last_signal_bar) < COOLDOWN_BARS):
+            rej["crt_cooldown"] = rej.get("crt_cooldown", 0) + 1
+            continue
 
         # ── OTE overlay (2026-05-28) — tagging only, no gate ─────────────
         # Mirror crypto_alert.py:1043+. Impulse leg = C2 wick → 5M MSS extreme.
@@ -1832,6 +1864,12 @@ def run_backtest_token_h4_crt(token, c5m, c4h, c1h=None, config=None,
                     _c4h_for_dr_highs, _c4h_for_dr_lows, entry_price)
         except Exception:
             pass
+
+        # C15L3-CRT-1: mark this signal's bar/direction for the next iteration's
+        # cooldown gate. Set immediately before append so any append failure
+        # downstream doesn't pollute the state (matches 5M_SWEEP pattern).
+        crt_last_signal_bar = entry_bar
+        crt_last_signal_dir = direction
 
         signals.append({
             "token":           token,

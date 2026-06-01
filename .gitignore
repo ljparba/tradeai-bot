@@ -38,6 +38,8 @@ data/backtest_run_*.txt
 data/cy*_*.log
 data/monitoring/
 data/signals_baseline_*.db
+data/signals_baseline_*.db-shm
+data/signals_baseline_*.db-wal
 data/*.bak_*
 
 # Legacy DB location (pre-VPS migration; lives in data/signals.db now)
@@ -49,6 +51,14 @@ backtest_reports/
 # Local env backups (pre-promotion snapshots, operator-local)
 .env.bak_*
 .env.explorer
+
+# Root-level .py backups created during interactive editing/audit sessions.
+# Pattern matches `crypto_alert.py.bak_pre_cy15`, `config.py.bak_before_doge`,
+# etc. Pre-existing data/*.bak_* covers DB backups but did NOT cover .py code
+# backups, which would otherwise show as untracked in `git status` and risk
+# accidental `git add .` commits of stale code.
+# (C15L3-2 fix, cycle-15-loop run #3, 2026-05-31.)
+*.py.bak_*
 
 # Watchdog liveness marker — written every poll, operational-only
 data/watchdog_alive.txt
