@@ -42,6 +42,11 @@ data/signals_baseline_*.db-shm
 data/signals_baseline_*.db-wal
 data/*.bak_*
 
+# Phase C-Breakout local DB (regenerable from OHLCV cache + run_grid.py in ~3 min)
+data/breakout.db
+data/breakout.db-shm
+data/breakout.db-wal
+
 # Legacy DB location (pre-VPS migration; lives in data/signals.db now)
 TradeAI.db
 

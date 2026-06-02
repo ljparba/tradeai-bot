@@ -1,0 +1,496 @@
+{
+  "grid": {
+    "H4_BREAKOUT_CLOSE_BUFFER_PCT": [
+      0.0,
+      0.001
+    ],
+    "TP_SCHEME": [
+      [
+        1.5,
+        2.5,
+        3.5
+      ],
+      [
+        2.0,
+        3.0,
+        4.0
+      ]
+    ],
+    "H4_BREAKOUT_C2_LOOKBACK": [
+      4,
+      8
+    ],
+    "H4_BREAKOUT_MSS_HORIZON": [
+      15,
+      30
+    ]
+  },
+  "n_configs": 16,
+  "total_elapsed": 147.35,
+  "results": [
+    {
+      "config_id": 1,
+      "run_id": 1,
+      "config": {
+        "H4_BREAKOUT_CLOSE_BUFFER_PCT": 0.0,
+        "H4_BREAKOUT_C2_LOOKBACK": 4,
+        "H4_BREAKOUT_MSS_HORIZON": 15,
+        "BREAKOUT_TP1_RR": 1.5,
+        "BREAKOUT_TP2_RR": 2.5,
+        "BREAKOUT_TP3_RR": 3.5
+      },
+      "tp_scheme_label": "1.5/2.5/3.5R",
+      "n_signals": 263,
+      "by_token": {
+        "BTC": 17,
+        "ETH": 29,
+        "XRP": 25,
+        "HBAR": 9,
+        "AVAX": 37,
+        "LINK": 39,
+        "BNB": 12,
+        "ADA": 21,
+        "POL": 10,
+        "TON": 18,
+        "ATOM": 19,
+        "BCH": 27
+      },
+      "elapsed_sec": 9.0
+    },
+    {
+      "config_id": 2,
+      "run_id": 2,
+      "config": {
+        "H4_BREAKOUT_CLOSE_BUFFER_PCT": 0.0,
+        "H4_BREAKOUT_C2_LOOKBACK": 4,
+        "H4_BREAKOUT_MSS_HORIZON": 30,
+        "BREAKOUT_TP1_RR": 1.5,
+        "BREAKOUT_TP2_RR": 2.5,
+        "BREAKOUT_TP3_RR": 3.5
+      },
+      "tp_scheme_label": "1.5/2.5/3.5R",
+      "n_signals": 287,
+      "by_token": {
+        "BTC": 18,
+        "ETH": 33,
+        "XRP": 28,
+        "HBAR": 10,
+        "AVAX": 39,
+        "LINK": 38,
+        "BNB": 12,
+        "ADA": 22,
+        "POL": 10,
+        "TON": 20,
+        "ATOM": 23,
+        "BCH": 34
+      },
+      "elapsed_sec": 8.63
+    },
+    {
+      "config_id": 3,
+      "run_id": 3,
+      "config": {
+        "H4_BREAKOUT_CLOSE_BUFFER_PCT": 0.0,
+        "H4_BREAKOUT_C2_LOOKBACK": 8,
+        "H4_BREAKOUT_MSS_HORIZON": 15,
+        "BREAKOUT_TP1_RR": 1.5,
+        "BREAKOUT_TP2_RR": 2.5,
+        "BREAKOUT_TP3_RR": 3.5
+      },
+      "tp_scheme_label": "1.5/2.5/3.5R",
+      "n_signals": 268,
+      "by_token": {
+        "BTC": 17,
+        "ETH": 31,
+        "XRP": 25,
+        "HBAR": 10,
+        "AVAX": 37,
+        "LINK": 39,
+        "BNB": 12,
+        "ADA": 21,
+        "POL": 10,
+        "TON": 18,
+        "ATOM": 20,
+        "BCH": 28
+      },
+      "elapsed_sec": 9.18
+    },
+    {
+      "config_id": 4,
+      "run_id": 4,
+      "config": {
+        "H4_BREAKOUT_CLOSE_BUFFER_PCT": 0.0,
+        "H4_BREAKOUT_C2_LOOKBACK": 8,
+        "H4_BREAKOUT_MSS_HORIZON": 30,
+        "BREAKOUT_TP1_RR": 1.5,
+        "BREAKOUT_TP2_RR": 2.5,
+        "BREAKOUT_TP3_RR": 3.5
+      },
+      "tp_scheme_label": "1.5/2.5/3.5R",
+      "n_signals": 295,
+      "by_token": {
+        "BTC": 19,
+        "ETH": 35,
+        "XRP": 28,
+        "HBAR": 11,
+        "AVAX": 39,
+        "LINK": 38,
+        "BNB": 13,
+        "ADA": 22,
+        "POL": 10,
+        "TON": 21,
+        "ATOM": 24,
+        "BCH": 35
+      },
+      "elapsed_sec": 9.17
+    },
+    {
+      "config_id": 5,
+      "run_id": 5,
+      "config": {
+        "H4_BREAKOUT_CLOSE_BUFFER_PCT": 0.0,
+        "H4_BREAKOUT_C2_LOOKBACK": 4,
+        "H4_BREAKOUT_MSS_HORIZON": 15,
+        "BREAKOUT_TP1_RR": 2.0,
+        "BREAKOUT_TP2_RR": 3.0,
+        "BREAKOUT_TP3_RR": 4.0
+      },
+      "tp_scheme_label": "2.0/3.0/4.0R",
+      "n_signals": 2121,
+      "by_token": {
+        "BTC": 151,
+        "ETH": 273,
+        "XRP": 275,
+        "HBAR": 22,
+        "AVAX": 299,
+        "LINK": 293,
+        "BNB": 182,
+        "ADA": 111,
+        "POL": 19,
+        "TON": 109,
+        "ATOM": 116,
+        "BCH": 271
+      },
+      "elapsed_sec": 8.78
+    },
+    {
+      "config_id": 6,
+      "run_id": 6,
+      "config": {
+        "H4_BREAKOUT_CLOSE_BUFFER_PCT": 0.0,
+        "H4_BREAKOUT_C2_LOOKBACK": 4,
+        "H4_BREAKOUT_MSS_HORIZON": 30,
+        "BREAKOUT_TP1_RR": 2.0,
+        "BREAKOUT_TP2_RR": 3.0,
+        "BREAKOUT_TP3_RR": 4.0
+      },
+      "tp_scheme_label": "2.0/3.0/4.0R",
+      "n_signals": 2353,
+      "by_token": {
+        "BTC": 171,
+        "ETH": 304,
+        "XRP": 298,
+        "HBAR": 25,
+        "AVAX": 340,
+        "LINK": 326,
+        "BNB": 196,
+        "ADA": 114,
+        "POL": 24,
+        "TON": 122,
+        "ATOM": 129,
+        "BCH": 304
+      },
+      "elapsed_sec": 9.11
+    },
+    {
+      "config_id": 7,
+      "run_id": 7,
+      "config": {
+        "H4_BREAKOUT_CLOSE_BUFFER_PCT": 0.0,
+        "H4_BREAKOUT_C2_LOOKBACK": 8,
+        "H4_BREAKOUT_MSS_HORIZON": 15,
+        "BREAKOUT_TP1_RR": 2.0,
+        "BREAKOUT_TP2_RR": 3.0,
+        "BREAKOUT_TP3_RR": 4.0
+      },
+      "tp_scheme_label": "2.0/3.0/4.0R",
+      "n_signals": 2258,
+      "by_token": {
+        "BTC": 160,
+        "ETH": 296,
+        "XRP": 289,
+        "HBAR": 25,
+        "AVAX": 317,
+        "LINK": 312,
+        "BNB": 193,
+        "ADA": 122,
+        "POL": 19,
+        "TON": 113,
+        "ATOM": 125,
+        "BCH": 287
+      },
+      "elapsed_sec": 9.34
+    },
+    {
+      "config_id": 8,
+      "run_id": 8,
+      "config": {
+        "H4_BREAKOUT_CLOSE_BUFFER_PCT": 0.0,
+        "H4_BREAKOUT_C2_LOOKBACK": 8,
+        "H4_BREAKOUT_MSS_HORIZON": 30,
+        "BREAKOUT_TP1_RR": 2.0,
+        "BREAKOUT_TP2_RR": 3.0,
+        "BREAKOUT_TP3_RR": 4.0
+      },
+      "tp_scheme_label": "2.0/3.0/4.0R",
+      "n_signals": 2511,
+      "by_token": {
+        "BTC": 182,
+        "ETH": 330,
+        "XRP": 313,
+        "HBAR": 28,
+        "AVAX": 360,
+        "LINK": 349,
+        "BNB": 210,
+        "ADA": 126,
+        "POL": 24,
+        "TON": 127,
+        "ATOM": 138,
+        "BCH": 324
+      },
+      "elapsed_sec": 10.05
+    },
+    {
+      "config_id": 9,
+      "run_id": 9,
+      "config": {
+        "H4_BREAKOUT_CLOSE_BUFFER_PCT": 0.001,
+        "H4_BREAKOUT_C2_LOOKBACK": 4,
+        "H4_BREAKOUT_MSS_HORIZON": 15,
+        "BREAKOUT_TP1_RR": 1.5,
+        "BREAKOUT_TP2_RR": 2.5,
+        "BREAKOUT_TP3_RR": 3.5
+      },
+      "tp_scheme_label": "1.5/2.5/3.5R",
+      "n_signals": 260,
+      "by_token": {
+        "BTC": 16,
+        "ETH": 29,
+        "XRP": 25,
+        "HBAR": 9,
+        "AVAX": 36,
+        "LINK": 39,
+        "BNB": 12,
+        "ADA": 20,
+        "POL": 10,
+        "TON": 18,
+        "ATOM": 19,
+        "BCH": 27
+      },
+      "elapsed_sec": 8.67
+    },
+    {
+      "config_id": 10,
+      "run_id": 10,
+      "config": {
+        "H4_BREAKOUT_CLOSE_BUFFER_PCT": 0.001,
+        "H4_BREAKOUT_C2_LOOKBACK": 4,
+        "H4_BREAKOUT_MSS_HORIZON": 30,
+        "BREAKOUT_TP1_RR": 1.5,
+        "BREAKOUT_TP2_RR": 2.5,
+        "BREAKOUT_TP3_RR": 3.5
+      },
+      "tp_scheme_label": "1.5/2.5/3.5R",
+      "n_signals": 285,
+      "by_token": {
+        "BTC": 17,
+        "ETH": 33,
+        "XRP": 28,
+        "HBAR": 10,
+        "AVAX": 38,
+        "LINK": 38,
+        "BNB": 12,
+        "ADA": 22,
+        "POL": 10,
+        "TON": 20,
+        "ATOM": 23,
+        "BCH": 34
+      },
+      "elapsed_sec": 8.81
+    },
+    {
+      "config_id": 11,
+      "run_id": 11,
+      "config": {
+        "H4_BREAKOUT_CLOSE_BUFFER_PCT": 0.001,
+        "H4_BREAKOUT_C2_LOOKBACK": 8,
+        "H4_BREAKOUT_MSS_HORIZON": 15,
+        "BREAKOUT_TP1_RR": 1.5,
+        "BREAKOUT_TP2_RR": 2.5,
+        "BREAKOUT_TP3_RR": 3.5
+      },
+      "tp_scheme_label": "1.5/2.5/3.5R",
+      "n_signals": 265,
+      "by_token": {
+        "BTC": 16,
+        "ETH": 31,
+        "XRP": 25,
+        "HBAR": 10,
+        "AVAX": 36,
+        "LINK": 39,
+        "BNB": 12,
+        "ADA": 20,
+        "POL": 10,
+        "TON": 18,
+        "ATOM": 20,
+        "BCH": 28
+      },
+      "elapsed_sec": 9.13
+    },
+    {
+      "config_id": 12,
+      "run_id": 12,
+      "config": {
+        "H4_BREAKOUT_CLOSE_BUFFER_PCT": 0.001,
+        "H4_BREAKOUT_C2_LOOKBACK": 8,
+        "H4_BREAKOUT_MSS_HORIZON": 30,
+        "BREAKOUT_TP1_RR": 1.5,
+        "BREAKOUT_TP2_RR": 2.5,
+        "BREAKOUT_TP3_RR": 3.5
+      },
+      "tp_scheme_label": "1.5/2.5/3.5R",
+      "n_signals": 293,
+      "by_token": {
+        "BTC": 18,
+        "ETH": 35,
+        "XRP": 28,
+        "HBAR": 11,
+        "AVAX": 38,
+        "LINK": 38,
+        "BNB": 13,
+        "ADA": 22,
+        "POL": 10,
+        "TON": 21,
+        "ATOM": 24,
+        "BCH": 35
+      },
+      "elapsed_sec": 8.85
+    },
+    {
+      "config_id": 13,
+      "run_id": 13,
+      "config": {
+        "H4_BREAKOUT_CLOSE_BUFFER_PCT": 0.001,
+        "H4_BREAKOUT_C2_LOOKBACK": 4,
+        "H4_BREAKOUT_MSS_HORIZON": 15,
+        "BREAKOUT_TP1_RR": 2.0,
+        "BREAKOUT_TP2_RR": 3.0,
+        "BREAKOUT_TP3_RR": 4.0
+      },
+      "tp_scheme_label": "2.0/3.0/4.0R",
+      "n_signals": 2016,
+      "by_token": {
+        "BTC": 139,
+        "ETH": 256,
+        "XRP": 262,
+        "HBAR": 22,
+        "AVAX": 286,
+        "LINK": 282,
+        "BNB": 168,
+        "ADA": 106,
+        "POL": 19,
+        "TON": 104,
+        "ATOM": 113,
+        "BCH": 259
+      },
+      "elapsed_sec": 8.91
+    },
+    {
+      "config_id": 14,
+      "run_id": 14,
+      "config": {
+        "H4_BREAKOUT_CLOSE_BUFFER_PCT": 0.001,
+        "H4_BREAKOUT_C2_LOOKBACK": 4,
+        "H4_BREAKOUT_MSS_HORIZON": 30,
+        "BREAKOUT_TP1_RR": 2.0,
+        "BREAKOUT_TP2_RR": 3.0,
+        "BREAKOUT_TP3_RR": 4.0
+      },
+      "tp_scheme_label": "2.0/3.0/4.0R",
+      "n_signals": 2249,
+      "by_token": {
+        "BTC": 160,
+        "ETH": 287,
+        "XRP": 285,
+        "HBAR": 25,
+        "AVAX": 327,
+        "LINK": 313,
+        "BNB": 181,
+        "ADA": 110,
+        "POL": 24,
+        "TON": 118,
+        "ATOM": 126,
+        "BCH": 293
+      },
+      "elapsed_sec": 8.65
+    },
+    {
+      "config_id": 15,
+      "run_id": 15,
+      "config": {
+        "H4_BREAKOUT_CLOSE_BUFFER_PCT": 0.001,
+        "H4_BREAKOUT_C2_LOOKBACK": 8,
+        "H4_BREAKOUT_MSS_HORIZON": 15,
+        "BREAKOUT_TP1_RR": 2.0,
+        "BREAKOUT_TP2_RR": 3.0,
+        "BREAKOUT_TP3_RR": 4.0
+      },
+      "tp_scheme_label": "2.0/3.0/4.0R",
+      "n_signals": 2135,
+      "by_token": {
+        "BTC": 147,
+        "ETH": 276,
+        "XRP": 275,
+        "HBAR": 25,
+        "AVAX": 301,
+        "LINK": 299,
+        "BNB": 177,
+        "ADA": 116,
+        "POL": 19,
+        "TON": 107,
+        "ATOM": 122,
+        "BCH": 271
+      },
+      "elapsed_sec": 10.55
+    },
+    {
+      "config_id": 16,
+      "run_id": 16,
+      "config": {
+        "H4_BREAKOUT_CLOSE_BUFFER_PCT": 0.001,
+        "H4_BREAKOUT_C2_LOOKBACK": 8,
+        "H4_BREAKOUT_MSS_HORIZON": 30,
+        "BREAKOUT_TP1_RR": 2.0,
+        "BREAKOUT_TP2_RR": 3.0,
+        "BREAKOUT_TP3_RR": 4.0
+      },
+      "tp_scheme_label": "2.0/3.0/4.0R",
+      "n_signals": 2389,
+      "by_token": {
+        "BTC": 170,
+        "ETH": 310,
+        "XRP": 297,
+        "HBAR": 28,
+        "AVAX": 344,
+        "LINK": 334,
+        "BNB": 194,
+        "ADA": 120,
+        "POL": 24,
+        "TON": 122,
+        "ATOM": 136,
+        "BCH": 310
+      },
+      "elapsed_sec": 9.88
+    }
+  ]
+}
