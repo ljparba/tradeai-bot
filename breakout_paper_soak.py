@@ -335,7 +335,7 @@ def resolve_open_signals(conn) -> int:
         for bar in raw:
             h_p = float(bar[2])
             l_p = float(bar[3])
-            last_bar_ts = datetime.utcfromtimestamp(int(bar[6]) / 1000)
+            last_bar_ts = datetime.fromtimestamp(int(bar[6]) / 1000, tz=timezone.utc).replace(tzinfo=None)  # F3-FIX: replaces deprecated datetime.utcfromtimestamp (output identical naive-UTC)
             if direction == "BUY":
                 if not sl_hit and not tp1_hit and l_p <= sl:
                     sl_hit = True; break
@@ -447,7 +447,15 @@ def scan_token(conn, token: str, consumed: set) -> bool:
     setup = detect_h4_breakout(c4h, c5m, token=token, consumed=consumed)
     if setup is None:
         return False
-    consumed.add(setup["key"])
+    # F4-FIX (2026-06-02): mark consumed AFTER persist commits, not before.
+    # Old order (consumed.add → ... → persist_signal) had a crash gap: if the
+    # process died after add but before persist_signal's conn.commit(), the
+    # in-memory mark was lost, the DB had no row, and load_consumed_set on
+    # restart would not block re-firing the same C1 zone. New order: emit + persist
+    # first; only if persist returns a sig_id do we mark consumed. Behavior change:
+    # zones that fail downstream gates (mss_bar OOB, stale, sl_tp None, econ None)
+    # are now retry-eligible next cycle — acceptable because the H4_BREAKOUT_C2_LOOKBACK
+    # window scrolls them out within a bounded number of bars.
 
     # Pick entry as the next 5M bar's open at signal time. In a live setting
     # we'd wait for the next 5M close, but since we run every 2 min on a
@@ -462,7 +470,7 @@ def scan_token(conn, token: str, consumed: set) -> bool:
 
     # Time of the entry bar (we use the entry bar's open time)
     entry_ts_ms = c5m["times"][mss_bar + 1]
-    signal_ts = datetime.utcfromtimestamp(entry_ts_ms / 1000)
+    signal_ts = datetime.fromtimestamp(entry_ts_ms / 1000, tz=timezone.utc).replace(tzinfo=None)  # F3-FIX: replaces deprecated datetime.utcfromtimestamp (output identical naive-UTC)
     # Guard against backtests of stale data — entry_ts must be < 60 min old
     age_sec = (datetime.now(timezone.utc).replace(tzinfo=None) - signal_ts).total_seconds()
     if age_sec > 3600:
@@ -487,6 +495,7 @@ def scan_token(conn, token: str, consumed: set) -> bool:
 
     sig_id = persist_signal(conn, token, setup, entry_price,
                               sl_price, tp1, tp2, tp3, econ, signal_ts)
+    consumed.add(setup["key"])  # F4-FIX: post-persist mark — crash-safe
     _log(f"  NEW SIGNAL #{sig_id} {token} {setup['direction']} entry={entry_price:.6f} "
          f"sl={sl_price:.6f} tp1={tp1:.6f} tp2={tp2:.6f} tp3={tp3:.6f} "
          f"({setup['confluence']['type']}, mss={setup.get('mss_quality')})")

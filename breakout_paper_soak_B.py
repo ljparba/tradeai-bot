@@ -292,7 +292,7 @@ def resolve_open_signals(conn) -> int:
         for bar in raw:
             h_p = float(bar[2])
             l_p = float(bar[3])
-            last_bar_ts = datetime.utcfromtimestamp(int(bar[6]) / 1000)
+            last_bar_ts = datetime.fromtimestamp(int(bar[6]) / 1000, tz=timezone.utc).replace(tzinfo=None)  # F3-FIX: replaces deprecated datetime.utcfromtimestamp (output identical naive-UTC)
             if direction == "BUY":
                 if not sl_hit and not tp1_hit and l_p <= sl: sl_hit = True; break
                 if not tp1_hit and h_p >= tp1: tp1_hit = True
@@ -395,14 +395,17 @@ def scan_token(conn, token: str, consumed: set) -> bool:
     setup = detect_h4_breakout(c1h, c5m, token=token, consumed=consumed)
     if setup is None:
         return False
-    consumed.add(setup["key"])
+    # F4-FIX (2026-06-02): mark consumed AFTER persist commits, not before.
+    # See breakout_paper_soak.py for full reasoning. Closes the crash gap where
+    # process death between in-memory add and DB commit could let the same C1
+    # zone re-fire on restart.
 
     mss_bar = setup["mss_bar_5m"]
     if mss_bar + 1 >= len(c5m["opens"]):
         return False
     entry_price = c5m["opens"][mss_bar + 1]
     entry_ts_ms = c5m["times"][mss_bar + 1]
-    signal_ts = datetime.utcfromtimestamp(entry_ts_ms / 1000)
+    signal_ts = datetime.fromtimestamp(entry_ts_ms / 1000, tz=timezone.utc).replace(tzinfo=None)  # F3-FIX: replaces deprecated datetime.utcfromtimestamp (output identical naive-UTC)
     age_sec = (datetime.now(timezone.utc).replace(tzinfo=None) - signal_ts).total_seconds()
     if age_sec > 3600:
         _log(f"  {token}: signal too stale ({age_sec:.0f}s old), skipping")
@@ -424,6 +427,7 @@ def scan_token(conn, token: str, consumed: set) -> bool:
         return False
     sig_id = persist_signal(conn, token, setup, entry_price,
                               sl_price, tp1, tp2, tp3, econ, signal_ts)
+    consumed.add(setup["key"])  # F4-FIX: post-persist mark — crash-safe
     _log(f"  NEW B-SIGNAL #{sig_id} {token} {setup['direction']} entry={entry_price:.6f} "
          f"sl={sl_price:.6f} tp1={tp1:.6f} tp2={tp2:.6f} tp3={tp3:.6f} "
          f"({setup['confluence']['type']}, mss={setup.get('mss_quality')})")
