@@ -93,3 +93,8 @@ Thumbs.db
 # CodeGraph local index (T1.2/T1.3 ENHANCEMENT, 2026-05-29). 100% local SQLite,
 # rebuilds on demand via 'codegraph index'. Never commit.
 .codegraph/
+
+# Breakout paper soak runtime artifacts (process state, never commit)
+data/breakout_soak.pid
+data/breakout_soak_heartbeat.json
+logs/
