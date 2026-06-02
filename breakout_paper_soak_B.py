@@ -303,14 +303,32 @@ def resolve_open_signals(conn) -> int:
                 if not tp1_hit and l_p <= tp1: tp1_hit = True
                 if tp1_hit and not tp2_hit and l_p <= tp2: tp2_hit = True
                 if tp2_hit and not tp3_hit and l_p <= tp3: tp3_hit = True
-        if sl_hit:        outcome, tp_reached = "LOSS", 0
-        elif tp3_hit:     outcome, tp_reached = "WIN", 3
-        elif tp2_hit:     outcome, tp_reached = "PARTIAL_TP2", 2
-        elif tp1_hit:     outcome, tp_reached = "PARTIAL_TP1", 1
+        # EXIT-MODEL FIX (2026-06-02 — see EXIT_MODEL_VERIFICATION.md):
+        # ONLY SL, TP3, or window-expiry are TERMINAL conditions. TP1 and TP2
+        # set flags but do NOT close the signal — the runner continues toward
+        # TP3 (or expiry), exactly like backtest's check_outcome which walks
+        # the entire 48h window before classifying. Closing on first TP1 hit
+        # collapses the strategy's edge (~95-98% drop in avg_R per signal —
+        # 88-96% of TP1-hits continue past TP1 in the backtest population).
+        # SL-after-TP1 is ignored by the `not tp1_hit` guard inside the bar
+        # walk loop (implicit BE-stop) — same as backtest.
+        if sl_hit:
+            outcome, tp_reached = "LOSS", 0
+        elif tp3_hit:
+            outcome, tp_reached = "WIN", 3
         elif now_utc >= expiry_dt:
-                          outcome, tp_reached = "EXPIRED", 0
+            # Window expired — classify by HIGHEST tier reached so far
+            if tp2_hit:
+                outcome, tp_reached = "PARTIAL_TP2", 2
+            elif tp1_hit:
+                outcome, tp_reached = "PARTIAL_TP1", 1
+            else:
+                outcome, tp_reached = "EXPIRED", 0
         else:
-            continue
+            # tp1_hit or tp2_hit but window still open — KEEP OPEN, re-check
+            # next cycle. Walking from start_ms each cycle re-builds the
+            # flags from scratch, so the tier-so-far is always known.
+            continue  # still open — non-terminal TP hit
         rt_cost_pct = TOKEN_RT_COST.get(token, ROUND_TRIP_COST_PCT) * 100
         if direction == "BUY":
             gross_tp1 = (tp1 - entry)/entry * 100

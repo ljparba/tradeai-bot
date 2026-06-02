@@ -349,19 +349,33 @@ def resolve_open_signals(conn) -> int:
                 if tp1_hit and not tp2_hit and l_p <= tp2: tp2_hit = True
                 if tp2_hit and not tp3_hit and l_p <= tp3: tp3_hit = True
 
-        # Determine outcome
+        # Determine outcome.
+        # EXIT-MODEL FIX (2026-06-02 — see EXIT_MODEL_VERIFICATION.md):
+        # ONLY SL, TP3, or window-expiry are TERMINAL conditions. TP1 and TP2
+        # set flags but do NOT close the signal — the runner continues toward
+        # TP3 (or expiry), exactly like backtest's check_outcome which walks
+        # the entire 48h window before classifying. Closing on first TP1 hit
+        # collapses the strategy's edge (~95-98% drop in avg_R per signal —
+        # 88-96% of TP1-hits continue past TP1 in the backtest population).
+        # SL-after-TP1 is ignored by the `not tp1_hit` guard inside the bar
+        # walk loop (implicit BE-stop) — same as backtest.
         if sl_hit:
             outcome = "LOSS"; tp_reached = 0
         elif tp3_hit:
             outcome = "WIN"; tp_reached = 3
-        elif tp2_hit:
-            outcome = "PARTIAL_TP2"; tp_reached = 2
-        elif tp1_hit:
-            outcome = "PARTIAL_TP1"; tp_reached = 1
         elif now_utc >= expiry_dt:
-            outcome = "EXPIRED"; tp_reached = 0
+            # Window expired — classify by HIGHEST tier reached so far
+            if tp2_hit:
+                outcome = "PARTIAL_TP2"; tp_reached = 2
+            elif tp1_hit:
+                outcome = "PARTIAL_TP1"; tp_reached = 1
+            else:
+                outcome = "EXPIRED"; tp_reached = 0
         else:
-            continue  # still open
+            # tp1_hit or tp2_hit but window still open — KEEP OPEN, re-check
+            # next cycle. Walking from start_ms each cycle re-builds the
+            # flags from scratch, so the tier-so-far is always known.
+            continue  # still open — non-terminal TP hit
 
         # Compute realized R via 50/50 split-exit
         rt_cost_pct = TOKEN_RT_COST.get(token, ROUND_TRIP_COST_PCT) * 100
