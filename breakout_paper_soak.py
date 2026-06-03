@@ -329,42 +329,60 @@ def resolve_open_signals(conn) -> int:
         if not raw:
             continue
 
-        # Walk bars, check_outcome-style
-        tp1_hit = tp2_hit = tp3_hit = sl_hit = False
+        # Walk bars — RUNNER-EXIT FIX (2026-06-03, see RUNNER_EXIT_GAP.md):
+        # The post-TP1 runner now has an active BE stop at ENTRY price. This
+        # matches what live (Bybit) auto-trade execution does when the operator
+        # moves the SL to entry after TP1 fills. Previously the post-TP1 SL was
+        # ignored ("ride to TP3 or expiry"), which corresponds to the "no stop"
+        # live scenario — catastrophic in real money. The new logic is the
+        # closest live-portable match.
+        tp1_hit = tp2_hit = tp3_hit = sl_hit = be_stopped = False
         last_bar_ts = entry_dt
         for bar in raw:
             h_p = float(bar[2])
             l_p = float(bar[3])
-            last_bar_ts = datetime.fromtimestamp(int(bar[6]) / 1000, tz=timezone.utc).replace(tzinfo=None)  # F3-FIX: replaces deprecated datetime.utcfromtimestamp (output identical naive-UTC)
+            last_bar_ts = datetime.fromtimestamp(int(bar[6]) / 1000, tz=timezone.utc).replace(tzinfo=None)  # F3-FIX
             if direction == "BUY":
-                if not sl_hit and not tp1_hit and l_p <= sl:
+                # Pre-TP1: original SL active
+                if not tp1_hit and not sl_hit and l_p <= sl:
                     sl_hit = True; break
-                if not tp1_hit and h_p >= tp1: tp1_hit = True
+                # TP1 hit on this bar — defer BE check to NEXT bar (intrabar TP1-fills-first assumption)
+                if not tp1_hit and h_p >= tp1:
+                    tp1_hit = True; continue
+                # Post-TP1 BE stop (active until TP2 reached — once TP2 hit, BE deactivates,
+                # runner rides toward TP3 or expiry)
+                if tp1_hit and not tp2_hit and not be_stopped and l_p <= entry:
+                    be_stopped = True; break
+                # TP2 / TP3 progression
                 if tp1_hit and not tp2_hit and h_p >= tp2: tp2_hit = True
-                if tp2_hit and not tp3_hit and h_p >= tp3: tp3_hit = True
-            else:
-                if not sl_hit and not tp1_hit and h_p >= sl:
+                if tp2_hit and not tp3_hit and h_p >= tp3: tp3_hit = True; break
+            else:  # SELL — mirror
+                if not tp1_hit and not sl_hit and h_p >= sl:
                     sl_hit = True; break
-                if not tp1_hit and l_p <= tp1: tp1_hit = True
+                if not tp1_hit and l_p <= tp1:
+                    tp1_hit = True; continue
+                if tp1_hit and not tp2_hit and not be_stopped and h_p >= entry:
+                    be_stopped = True; break
                 if tp1_hit and not tp2_hit and l_p <= tp2: tp2_hit = True
-                if tp2_hit and not tp3_hit and l_p <= tp3: tp3_hit = True
+                if tp2_hit and not tp3_hit and l_p <= tp3: tp3_hit = True; break
 
-        # Determine outcome.
-        # EXIT-MODEL FIX (2026-06-02 — see EXIT_MODEL_VERIFICATION.md):
-        # ONLY SL, TP3, or window-expiry are TERMINAL conditions. TP1 and TP2
-        # set flags but do NOT close the signal — the runner continues toward
-        # TP3 (or expiry), exactly like backtest's check_outcome which walks
-        # the entire 48h window before classifying. Closing on first TP1 hit
-        # collapses the strategy's edge (~95-98% drop in avg_R per signal —
-        # 88-96% of TP1-hits continue past TP1 in the backtest population).
-        # SL-after-TP1 is ignored by the `not tp1_hit` guard inside the bar
-        # walk loop (implicit BE-stop) — same as backtest.
+        # Determine outcome under NEW runner-exit model:
+        #   LOSS         : SL hit pre-TP1                      (terminal, runner never armed)
+        #   WIN          : TP3 hit                              (terminal, runner exits at TP3)
+        #   PARTIAL_TP1  : TP1 hit, then BE-stop OR window expired with runner above BE
+        #                  (in both sub-cases the runner exits at entry with friction —
+        #                   the R formula is identical, so they collapse into one label)
+        #   PARTIAL_TP2  : TP1 + TP2 hit, no TP3, window expired
+        #                  (runner deemed to have locked at TP2 — assumes a TP2 limit on
+        #                   broker, or operator monitors and exits at TP2 retroactively)
+        #   EXPIRED      : no TP1, no SL, window expired       (entire position rolled off)
         if sl_hit:
             outcome = "LOSS"; tp_reached = 0
         elif tp3_hit:
             outcome = "WIN"; tp_reached = 3
+        elif be_stopped:
+            outcome = "PARTIAL_TP1"; tp_reached = 1
         elif now_utc >= expiry_dt:
-            # Window expired — classify by HIGHEST tier reached so far
             if tp2_hit:
                 outcome = "PARTIAL_TP2"; tp_reached = 2
             elif tp1_hit:
@@ -372,10 +390,7 @@ def resolve_open_signals(conn) -> int:
             else:
                 outcome = "EXPIRED"; tp_reached = 0
         else:
-            # tp1_hit or tp2_hit but window still open — KEEP OPEN, re-check
-            # next cycle. Walking from start_ms each cycle re-builds the
-            # flags from scratch, so the tier-so-far is always known.
-            continue  # still open — non-terminal TP hit
+            continue  # still open — runner alive between TP1 and TP2 or TP2 and TP3
 
         # Compute realized R via 50/50 split-exit
         rt_cost_pct = TOKEN_RT_COST.get(token, ROUND_TRIP_COST_PCT) * 100
@@ -399,15 +414,17 @@ def resolve_open_signals(conn) -> int:
             realized_r = round(net_sl / risk, 4)
             profit_pct = net_sl
         elif outcome == "PARTIAL_TP1":
-            realized_r = round((0.5 * net_tp1) / risk, 4)
-            profit_pct = round(0.5 * net_tp1, 3)
+            # RUNNER-EXIT FIX (2026-06-03): runner exits at entry-with-friction
+            # (not clean BE). 50% locked at TP1 + 50% paying rt_cost on the BE leg.
+            realized_r = round((0.5 * net_tp1 + 0.5 * (-rt_cost_pct)) / risk, 4)
+            profit_pct = round(0.5 * net_tp1 + 0.5 * (-rt_cost_pct), 3)
         elif outcome == "PARTIAL_TP2":
             realized_r = round((0.5 * net_tp1 + 0.5 * net_tp2) / risk, 4)
             profit_pct = round(0.5 * net_tp1 + 0.5 * net_tp2, 3)
         elif outcome == "WIN":
             realized_r = round((0.5 * net_tp1 + 0.5 * net_tp3) / risk, 4)
             profit_pct = round(0.5 * net_tp1 + 0.5 * net_tp3, 3)
-        else:  # EXPIRED
+        else:  # EXPIRED (no TP1)
             realized_r = 0.0
             profit_pct = 0.0
 

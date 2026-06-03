@@ -287,37 +287,41 @@ def resolve_open_signals(conn) -> int:
             continue
         if not raw:
             continue
-        tp1_hit = tp2_hit = tp3_hit = sl_hit = False
+        # RUNNER-EXIT FIX (2026-06-03, see RUNNER_EXIT_GAP.md): BE-active runner
+        # after TP1. Matches live Bybit "move SL to entry once TP1 fills" rule.
+        # See breakout_paper_soak.py for full reasoning + same code shape.
+        tp1_hit = tp2_hit = tp3_hit = sl_hit = be_stopped = False
         last_bar_ts = entry_dt
         for bar in raw:
             h_p = float(bar[2])
             l_p = float(bar[3])
-            last_bar_ts = datetime.fromtimestamp(int(bar[6]) / 1000, tz=timezone.utc).replace(tzinfo=None)  # F3-FIX: replaces deprecated datetime.utcfromtimestamp (output identical naive-UTC)
+            last_bar_ts = datetime.fromtimestamp(int(bar[6]) / 1000, tz=timezone.utc).replace(tzinfo=None)  # F3-FIX
             if direction == "BUY":
-                if not sl_hit and not tp1_hit and l_p <= sl: sl_hit = True; break
-                if not tp1_hit and h_p >= tp1: tp1_hit = True
+                if not tp1_hit and not sl_hit and l_p <= sl:
+                    sl_hit = True; break
+                if not tp1_hit and h_p >= tp1:
+                    tp1_hit = True; continue
+                if tp1_hit and not tp2_hit and not be_stopped and l_p <= entry:
+                    be_stopped = True; break
                 if tp1_hit and not tp2_hit and h_p >= tp2: tp2_hit = True
-                if tp2_hit and not tp3_hit and h_p >= tp3: tp3_hit = True
+                if tp2_hit and not tp3_hit and h_p >= tp3: tp3_hit = True; break
             else:
-                if not sl_hit and not tp1_hit and h_p >= sl: sl_hit = True; break
-                if not tp1_hit and l_p <= tp1: tp1_hit = True
+                if not tp1_hit and not sl_hit and h_p >= sl:
+                    sl_hit = True; break
+                if not tp1_hit and l_p <= tp1:
+                    tp1_hit = True; continue
+                if tp1_hit and not tp2_hit and not be_stopped and h_p >= entry:
+                    be_stopped = True; break
                 if tp1_hit and not tp2_hit and l_p <= tp2: tp2_hit = True
-                if tp2_hit and not tp3_hit and l_p <= tp3: tp3_hit = True
-        # EXIT-MODEL FIX (2026-06-02 — see EXIT_MODEL_VERIFICATION.md):
-        # ONLY SL, TP3, or window-expiry are TERMINAL conditions. TP1 and TP2
-        # set flags but do NOT close the signal — the runner continues toward
-        # TP3 (or expiry), exactly like backtest's check_outcome which walks
-        # the entire 48h window before classifying. Closing on first TP1 hit
-        # collapses the strategy's edge (~95-98% drop in avg_R per signal —
-        # 88-96% of TP1-hits continue past TP1 in the backtest population).
-        # SL-after-TP1 is ignored by the `not tp1_hit` guard inside the bar
-        # walk loop (implicit BE-stop) — same as backtest.
+                if tp2_hit and not tp3_hit and l_p <= tp3: tp3_hit = True; break
+        # NEW outcome classification (see breakout_paper_soak.py for the table)
         if sl_hit:
             outcome, tp_reached = "LOSS", 0
         elif tp3_hit:
             outcome, tp_reached = "WIN", 3
+        elif be_stopped:
+            outcome, tp_reached = "PARTIAL_TP1", 1
         elif now_utc >= expiry_dt:
-            # Window expired — classify by HIGHEST tier reached so far
             if tp2_hit:
                 outcome, tp_reached = "PARTIAL_TP2", 2
             elif tp1_hit:
@@ -325,10 +329,7 @@ def resolve_open_signals(conn) -> int:
             else:
                 outcome, tp_reached = "EXPIRED", 0
         else:
-            # tp1_hit or tp2_hit but window still open — KEEP OPEN, re-check
-            # next cycle. Walking from start_ms each cycle re-builds the
-            # flags from scratch, so the tier-so-far is always known.
-            continue  # still open — non-terminal TP hit
+            continue  # still open
         rt_cost_pct = TOKEN_RT_COST.get(token, ROUND_TRIP_COST_PCT) * 100
         if direction == "BUY":
             gross_tp1 = (tp1 - entry)/entry * 100
@@ -348,8 +349,9 @@ def resolve_open_signals(conn) -> int:
         if outcome == "LOSS":
             realized_r = round(net_sl / risk, 4); profit_pct = net_sl
         elif outcome == "PARTIAL_TP1":
-            realized_r = round((0.5 * net_tp1) / risk, 4)
-            profit_pct = round(0.5 * net_tp1, 3)
+            # RUNNER-EXIT FIX (2026-06-03): runner exits at entry-with-friction
+            realized_r = round((0.5 * net_tp1 + 0.5 * (-rt_cost_pct)) / risk, 4)
+            profit_pct = round(0.5 * net_tp1 + 0.5 * (-rt_cost_pct), 3)
         elif outcome == "PARTIAL_TP2":
             realized_r = round((0.5 * net_tp1 + 0.5 * net_tp2) / risk, 4)
             profit_pct = round(0.5 * net_tp1 + 0.5 * net_tp2, 3)
