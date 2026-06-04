@@ -134,6 +134,7 @@ def check_outcome(direction: str, entry: float, sl: float,
       EXPIRED      — no TP1, no SL, window expired
     """
     tp1_hit = tp2_hit = tp3_hit = sl_hit = be_stopped = False
+    t1_trail_stopped = False   # POST-TP2 TRAIL FIX (2026-06-04): stop trailed to TP1 after TP2
     for bar in future_bars:
         h, l = bar["h"], bar["l"]
         if direction == "BUY":
@@ -147,7 +148,16 @@ def check_outcome(direction: str, entry: float, sl: float,
             if tp1_hit and not tp2_hit and not be_stopped and l <= entry:
                 be_stopped = True; break
             # TP2/TP3 progression
-            if tp1_hit and not tp2_hit and h >= tp2: tp2_hit = True
+            if tp1_hit and not tp2_hit and h >= tp2:
+                tp2_hit = True
+                if h >= tp3:                      # same-bar TP2->TP3 strong bar = WIN
+                    tp3_hit = True; break
+                continue                          # defer TP1-trail (TP2-fills-first; a same-bar
+                                                  # low below TP1 is the pre-breakout low, not a retrace)
+            # POST-TP2 TRAIL FIX: once TP2 hit, stop trails UP to TP1 (monotonic:
+            # SL -> entry -> TP1). A return to TP1 on a LATER bar terminates, locking TP1.
+            if tp2_hit and not tp3_hit and l <= tp1:
+                t1_trail_stopped = True; break
             if tp2_hit and not tp3_hit and h >= tp3:
                 tp3_hit = True; break
         else:  # SELL — mirror
@@ -157,13 +167,21 @@ def check_outcome(direction: str, entry: float, sl: float,
                 tp1_hit = True; continue
             if tp1_hit and not tp2_hit and not be_stopped and h >= entry:
                 be_stopped = True; break
-            if tp1_hit and not tp2_hit and l <= tp2: tp2_hit = True
+            if tp1_hit and not tp2_hit and l <= tp2:
+                tp2_hit = True
+                if l <= tp3:                      # same-bar TP2->TP3 strong bar = WIN
+                    tp3_hit = True; break
+                continue                          # defer TP1-trail (TP2-fills-first)
+            # POST-TP2 TRAIL FIX (SELL mirror): trailed stop at TP1 (price RISING back to TP1)
+            if tp2_hit and not tp3_hit and h >= tp1:
+                t1_trail_stopped = True; break
             if tp2_hit and not tp3_hit and l <= tp3:
                 tp3_hit = True; break
 
-    if sl_hit:       return "LOSS",        0
-    if tp3_hit:      return "WIN",         3
-    if be_stopped:   return "PARTIAL_TP1", 1
+    if sl_hit:           return "LOSS",           0
+    if tp3_hit:          return "WIN",            3
+    if t1_trail_stopped: return "PARTIAL_TP2_T1", 2   # TP2 reached, trailed out at TP1
+    if be_stopped:       return "PARTIAL_TP1",    1
     # Window walked to the end without terminal hit — classify by tier reached
     if tp2_hit:      return "PARTIAL_TP2", 2
     if tp1_hit:      return "PARTIAL_TP1", 1
@@ -181,6 +199,10 @@ def _calc_realized_r(outcome: str, net_tp1: float, net_sl: float,
     if outcome == "PARTIAL_TP1":
         # runner exits at entry with friction → contributes -rt_cost_pct on the runner leg
         return round((0.5 * net_tp1 + 0.5 * (-rt_cost_pct)) / risk, 4)
+    if outcome == "PARTIAL_TP2_T1":
+        # POST-TP2 TRAIL FIX (2026-06-04): TP2 reached, runner trailed out at TP1.
+        # Both halves exit at TP1 (friction already inside net_tp1) → R = net_tp1/risk.
+        return round((0.5 * net_tp1 + 0.5 * net_tp1) / risk, 4)
     if outcome == "PARTIAL_TP2":
         return round((0.5 * net_tp1 + 0.5 * net_tp2) / risk, 4)
     if outcome == "WIN":
@@ -305,7 +327,7 @@ def run_one_token(token: str, cfg: dict, detect, compute_sl_tp,
 def persist_run(conn, cfg_id: str, friction_mode: str, signals: list,
                  elapsed: float, label: str) -> int:
     n = len(signals)
-    n_wins = sum(1 for s in signals if s["outcome"] in ("WIN", "PARTIAL_TP2"))
+    n_wins = sum(1 for s in signals if s["outcome"] in ("WIN", "PARTIAL_TP2", "PARTIAL_TP2_T1"))
     wr = n_wins / n if n else 0.0
     sum_r = sum(s["realized_r"] for s in signals)
     avg_r = sum_r / n if n else 0.0

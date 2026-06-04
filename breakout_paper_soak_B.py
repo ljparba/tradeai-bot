@@ -291,6 +291,7 @@ def resolve_open_signals(conn) -> int:
         # after TP1. Matches live Bybit "move SL to entry once TP1 fills" rule.
         # See breakout_paper_soak.py for full reasoning + same code shape.
         tp1_hit = tp2_hit = tp3_hit = sl_hit = be_stopped = False
+        t1_trail_stopped = False   # POST-TP2 TRAIL FIX (2026-06-04): stop trailed to TP1 after TP2
         last_bar_ts = entry_dt
         for bar in raw:
             h_p = float(bar[2])
@@ -303,7 +304,14 @@ def resolve_open_signals(conn) -> int:
                     tp1_hit = True; continue
                 if tp1_hit and not tp2_hit and not be_stopped and l_p <= entry:
                     be_stopped = True; break
-                if tp1_hit and not tp2_hit and h_p >= tp2: tp2_hit = True
+                if tp1_hit and not tp2_hit and h_p >= tp2:
+                    tp2_hit = True
+                    if h_p >= tp3: tp3_hit = True; break   # same-bar TP2->TP3 strong bar = WIN
+                    continue                                # defer TP1-trail (TP2-fills-first; a same-bar
+                                                            # low below TP1 is the pre-breakout low, not a retrace)
+                # POST-TP2 TRAIL FIX: once TP2 hit, stop trails UP to TP1 (monotonic
+                # SL->entry->TP1). A return to TP1 on a LATER bar terminates, locking TP1.
+                if tp2_hit and not tp3_hit and l_p <= tp1: t1_trail_stopped = True; break
                 if tp2_hit and not tp3_hit and h_p >= tp3: tp3_hit = True; break
             else:
                 if not tp1_hit and not sl_hit and h_p >= sl:
@@ -312,13 +320,20 @@ def resolve_open_signals(conn) -> int:
                     tp1_hit = True; continue
                 if tp1_hit and not tp2_hit and not be_stopped and h_p >= entry:
                     be_stopped = True; break
-                if tp1_hit and not tp2_hit and l_p <= tp2: tp2_hit = True
+                if tp1_hit and not tp2_hit and l_p <= tp2:
+                    tp2_hit = True
+                    if l_p <= tp3: tp3_hit = True; break   # same-bar TP2->TP3 strong bar = WIN
+                    continue                                # defer TP1-trail (TP2-fills-first)
+                # POST-TP2 TRAIL FIX (SELL mirror): trailed stop at TP1 (price rising back to TP1)
+                if tp2_hit and not tp3_hit and h_p >= tp1: t1_trail_stopped = True; break
                 if tp2_hit and not tp3_hit and l_p <= tp3: tp3_hit = True; break
         # NEW outcome classification (see breakout_paper_soak.py for the table)
         if sl_hit:
             outcome, tp_reached = "LOSS", 0
         elif tp3_hit:
             outcome, tp_reached = "WIN", 3
+        elif t1_trail_stopped:
+            outcome, tp_reached = "PARTIAL_TP2_T1", 2   # TP2 reached, trailed out at TP1
         elif be_stopped:
             outcome, tp_reached = "PARTIAL_TP1", 1
         elif now_utc >= expiry_dt:
@@ -352,6 +367,10 @@ def resolve_open_signals(conn) -> int:
             # RUNNER-EXIT FIX (2026-06-03): runner exits at entry-with-friction
             realized_r = round((0.5 * net_tp1 + 0.5 * (-rt_cost_pct)) / risk, 4)
             profit_pct = round(0.5 * net_tp1 + 0.5 * (-rt_cost_pct), 3)
+        elif outcome == "PARTIAL_TP2_T1":
+            # POST-TP2 TRAIL FIX (2026-06-04): both halves exit at TP1 (friction in net_tp1).
+            realized_r = round((0.5 * net_tp1 + 0.5 * net_tp1) / risk, 4)
+            profit_pct = round(0.5 * net_tp1 + 0.5 * net_tp1, 3)
         elif outcome == "PARTIAL_TP2":
             realized_r = round((0.5 * net_tp1 + 0.5 * net_tp2) / risk, 4)
             profit_pct = round(0.5 * net_tp1 + 0.5 * net_tp2, 3)
