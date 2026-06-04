@@ -122,19 +122,27 @@ def load_cached(tok: str, tf: str) -> dict | None:
 
 def check_outcome(direction: str, entry: float, sl: float,
                    tp1: float, tp2: float, tp3: float,
-                   future_bars: list):
+                   future_bars: list, post_tp2_mode: str = "hold_entry"):
     """Walk forward bars under the RUNNER-EXIT FIX (2026-06-03) model:
        BE-active runner after TP1 (matches live Bybit move-SL-to-entry rule).
 
+    `post_tp2_mode` selects the post-TP2 stop placement:
+      "hold_entry" (DEFAULT, = LIVE soak model V_ENTRY, adopted 2026-06-04): after
+                   TP2 the stop STAYS at ENTRY; a return to ENTRY → PARTIAL_TP2_BE
+                   (runner exits at breakeven). Between TP2 and entry there is NO
+                   stop — so a dip to TP1 does NOT terminate; it can resume to TP3
+                   or expire as PARTIAL_TP2.
+      "trail_tp1"  (retired reference): after TP2 the stop trails UP to TP1; a
+                   return to TP1 → PARTIAL_TP2_T1 (locks TP1 on both halves). Kept
+                   only for the POSTTP2_STOP_COMPARISON reference.
+
     Returns (outcome, tp_reached). Outcomes:
-      LOSS         — SL hit before TP1
-      WIN          — TP3 hit
-      PARTIAL_TP1  — TP1 hit, runner exits at entry (BE-stop OR window-expiry above BE)
-      PARTIAL_TP2  — TP1+TP2 hit, no TP3 by window end (runner held at TP2 lock)
-      EXPIRED      — no TP1, no SL, window expired
+      LOSS / WIN / PARTIAL_TP1 / PARTIAL_TP2 / EXPIRED (as before) plus
+      PARTIAL_TP2_T1 (trail_tp1 mode) or PARTIAL_TP2_BE (hold_entry mode).
     """
     tp1_hit = tp2_hit = tp3_hit = sl_hit = be_stopped = False
-    t1_trail_stopped = False   # POST-TP2 TRAIL FIX (2026-06-04): stop trailed to TP1 after TP2
+    t1_trail_stopped = False      # post-TP2 trail-to-TP1 (trail_tp1 mode)
+    entry_stopped_post_tp2 = False  # post-TP2 hold-at-entry (hold_entry mode)
     for bar in future_bars:
         h, l = bar["h"], bar["l"]
         if direction == "BUY":
@@ -152,12 +160,14 @@ def check_outcome(direction: str, entry: float, sl: float,
                 tp2_hit = True
                 if h >= tp3:                      # same-bar TP2->TP3 strong bar = WIN
                     tp3_hit = True; break
-                continue                          # defer TP1-trail (TP2-fills-first; a same-bar
-                                                  # low below TP1 is the pre-breakout low, not a retrace)
-            # POST-TP2 TRAIL FIX: once TP2 hit, stop trails UP to TP1 (monotonic:
-            # SL -> entry -> TP1). A return to TP1 on a LATER bar terminates, locking TP1.
-            if tp2_hit and not tp3_hit and l <= tp1:
-                t1_trail_stopped = True; break
+                continue                          # defer post-TP2 stop (TP2-fills-first; a same-bar
+                                                  # low is the pre-breakout low, not a retrace)
+            # POST-TP2 STOP: trail_tp1 stops at TP1; hold_entry stops at ENTRY.
+            if tp2_hit and not tp3_hit:
+                if post_tp2_mode == "trail_tp1" and l <= tp1:
+                    t1_trail_stopped = True; break
+                if post_tp2_mode == "hold_entry" and l <= entry:
+                    entry_stopped_post_tp2 = True; break
             if tp2_hit and not tp3_hit and h >= tp3:
                 tp3_hit = True; break
         else:  # SELL — mirror
@@ -171,17 +181,21 @@ def check_outcome(direction: str, entry: float, sl: float,
                 tp2_hit = True
                 if l <= tp3:                      # same-bar TP2->TP3 strong bar = WIN
                     tp3_hit = True; break
-                continue                          # defer TP1-trail (TP2-fills-first)
-            # POST-TP2 TRAIL FIX (SELL mirror): trailed stop at TP1 (price RISING back to TP1)
-            if tp2_hit and not tp3_hit and h >= tp1:
-                t1_trail_stopped = True; break
+                continue                          # defer post-TP2 stop (TP2-fills-first)
+            # POST-TP2 STOP (SELL mirror): trail_tp1 at TP1 (price RISING), hold_entry at ENTRY
+            if tp2_hit and not tp3_hit:
+                if post_tp2_mode == "trail_tp1" and h >= tp1:
+                    t1_trail_stopped = True; break
+                if post_tp2_mode == "hold_entry" and h >= entry:
+                    entry_stopped_post_tp2 = True; break
             if tp2_hit and not tp3_hit and l <= tp3:
                 tp3_hit = True; break
 
-    if sl_hit:           return "LOSS",           0
-    if tp3_hit:          return "WIN",            3
-    if t1_trail_stopped: return "PARTIAL_TP2_T1", 2   # TP2 reached, trailed out at TP1
-    if be_stopped:       return "PARTIAL_TP1",    1
+    if sl_hit:                 return "LOSS",           0
+    if tp3_hit:                return "WIN",            3
+    if t1_trail_stopped:       return "PARTIAL_TP2_T1", 2   # trail_tp1: trailed out at TP1
+    if entry_stopped_post_tp2: return "PARTIAL_TP2_BE", 2   # hold_entry: ran back to entry (BE)
+    if be_stopped:             return "PARTIAL_TP1",    1
     # Window walked to the end without terminal hit — classify by tier reached
     if tp2_hit:      return "PARTIAL_TP2", 2
     if tp1_hit:      return "PARTIAL_TP1", 1
@@ -203,6 +217,11 @@ def _calc_realized_r(outcome: str, net_tp1: float, net_sl: float,
         # POST-TP2 TRAIL FIX (2026-06-04): TP2 reached, runner trailed out at TP1.
         # Both halves exit at TP1 (friction already inside net_tp1) → R = net_tp1/risk.
         return round((0.5 * net_tp1 + 0.5 * net_tp1) / risk, 4)
+    if outcome == "PARTIAL_TP2_BE":
+        # V_ENTRY (hold_entry): TP2 reached, runner ran back to ENTRY (breakeven).
+        # First half at TP1 + runner half at entry-with-friction → identical to
+        # PARTIAL_TP1: R = (0.5*net_tp1 + 0.5*(-rt_cost_pct)) / risk.
+        return round((0.5 * net_tp1 + 0.5 * (-rt_cost_pct)) / risk, 4)
     if outcome == "PARTIAL_TP2":
         return round((0.5 * net_tp1 + 0.5 * net_tp2) / risk, 4)
     if outcome == "WIN":
@@ -327,7 +346,7 @@ def run_one_token(token: str, cfg: dict, detect, compute_sl_tp,
 def persist_run(conn, cfg_id: str, friction_mode: str, signals: list,
                  elapsed: float, label: str) -> int:
     n = len(signals)
-    n_wins = sum(1 for s in signals if s["outcome"] in ("WIN", "PARTIAL_TP2", "PARTIAL_TP2_T1"))
+    n_wins = sum(1 for s in signals if s["outcome"] in ("WIN", "PARTIAL_TP2", "PARTIAL_TP2_T1", "PARTIAL_TP2_BE"))
     wr = n_wins / n if n else 0.0
     sum_r = sum(s["realized_r"] for s in signals)
     avg_r = sum_r / n if n else 0.0

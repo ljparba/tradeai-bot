@@ -100,7 +100,7 @@ SOAKS = [
         "soak_label":   "H4_BREAKOUT_PAPER_SOAK",
         "heartbeat":    _BREAKOUT_DIR / "data" / "breakout_soak_heartbeat.json",
         "pid_file":     _BREAKOUT_DIR / "data" / "breakout_soak.pid",
-        "ref_avg_R":    0.3376,  # friction backtest ref, POST-TP2 TRAIL model 720d (2026-06-04); was 0.4536 pre-trail
+        "ref_avg_R":    0.3623,  # friction ref, V_ENTRY hold-at-entry 720d (2026-06-04) — BELOW +0.40 gate
         "ref_source":   "POST-TP2 trail sweep (run_posttp2_backtests.py)",
     },
     {
@@ -109,7 +109,7 @@ SOAKS = [
         "soak_label":   "H4_BREAKOUT_PAPER_SOAK_B",
         "heartbeat":    _BREAKOUT_DIR / "data" / "breakout_soak_B_heartbeat.json",
         "pid_file":     _BREAKOUT_DIR / "data" / "breakout_soak_B.pid",
-        "ref_avg_R":    0.3644,  # friction backtest ref, POST-TP2 TRAIL model 720d (2026-06-04); was 0.4840 pre-trail
+        "ref_avg_R":    0.3765,  # friction ref, V_ENTRY hold-at-entry 720d (2026-06-04) — BELOW +0.40 gate
         "ref_source":   "POST-TP2 trail sweep (run_posttp2_backtests.py)",
     },
 ]
@@ -161,12 +161,13 @@ def _gate_status(threshold_check: bool, n_signals: int) -> str:
 # Computed read-only from backtest_signals run 56 (TF_A) / run 58 (TF_B); these
 # are immutable historical rows. DSR from PHASE_C_FULL_AUDIT_V2.md. NOT a gate —
 # this is the convergence target the forward soak is measured against.
-# POST-TP2 TRAIL model (2026-06-04). Pre-trail numbers were avg_R A=0.4536 / B=0.4840;
-# the trail-to-TP1 caps post-TP2 reversals, lowering avg_R ~0.12 while WR is ~unchanged
-# (reclassified WIN->PARTIAL_TP2_T1 trades stay positive-R). Recomputed via run_posttp2_backtests.py.
+# POST-TP2 HOLD-AT-ENTRY model (V_ENTRY, adopted 2026-06-04 — POSTTP2_STOP_COMPARISON.md).
+# 720d friction. NOTE: BOTH are BELOW the +0.40 avg_R gate floor — the backtest reference does
+# not clear the gate; the forward soak is expected to confirm marginal/fail. (Prior trail model
+# was A=0.3376 / B=0.3644; V_ENTRY lets post-TP2 runners that only dipped to TP1 ride to TP3.)
 BACKTEST_REFERENCE = {
-    "A": {"tf": "5M/4H", "n": 4744,  "avg_R": 0.3376, "wr_pct": 68.25, "pf": 2.125, "dsr": 1.0},
-    "B": {"tf": "5M/1H", "n": 12090, "avg_R": 0.3644, "wr_pct": 70.63, "pf": 2.334, "dsr": 1.0},
+    "A": {"tf": "5M/4H", "n": 4744,  "avg_R": 0.3623, "wr_pct": 67.7, "pf": 2.21, "dsr": 1.0},
+    "B": {"tf": "5M/1H", "n": 12090, "avg_R": 0.3765, "wr_pct": 70.0, "pf": 2.38, "dsr": 1.0},
 }
 
 
@@ -180,8 +181,8 @@ def _exit_reason_of(row: dict) -> str:
     res = row.get("result")
     if res == "WIN":
         return "WIN_TP3"
-    if res == "PARTIAL_TP2_T1":
-        return "PARTIAL_TP2_T1"   # POST-TP2 TRAIL FIX: TP2 reached, trailed out at TP1
+    if res == "PARTIAL_TP2_BE":
+        return "PARTIAL_TP2_BE"   # V_ENTRY: TP2 reached, runner ran back to entry (breakeven)
     if res == "PARTIAL_TP2":
         return "PARTIAL_TP2"
     if res == "PARTIAL_TP1":
@@ -466,7 +467,7 @@ def _compute_open_tier_status(token: str, direction: str,
     # (breakout_paper_soak_B.py:293-318 / breakout_paper_soak.py:339-378 under
     # the BE-after-TP1 / RUNNER-EXIT FIX 2026-06-03 model).
     tp1_hit = tp2_hit = tp3_hit = sl_hit = be_stopped = False
-    t1_trail_stopped = False   # POST-TP2 TRAIL FIX parity with the soak resolver
+    entry_stopped_post_tp2 = False   # POST-TP2 HOLD-AT-ENTRY (V_ENTRY) parity with the soak resolver
     for bar in raw:
         h_p = float(bar[2])
         l_p = float(bar[3])
@@ -485,12 +486,13 @@ def _compute_open_tier_status(token: str, direction: str,
                 if h_p >= tp3:                 # same-bar TP2->TP3 strong bar = WIN
                     tp3_hit = True
                     break
-                continue                       # defer TP1-trail (TP2-fills-first)
-            # POST-TP2 TRAIL FIX (2026-06-04): stop trails to TP1 once TP2 hit.
-            # Mirror the soak resolver EXACTLY so the open-position tier display
-            # never implies a runner that the soak has already trail-closed.
-            if tp2_hit and not tp3_hit and l_p <= tp1:
-                t1_trail_stopped = True
+                continue                       # defer post-TP2 stop (TP2-fills-first)
+            # POST-TP2 HOLD-AT-ENTRY (V_ENTRY 2026-06-04): stop STAYS at entry once TP2 hit.
+            # Mirror the soak resolver EXACTLY so the open-position tier display never
+            # implies a runner the soak has already closed (a dip to TP1 does NOT close;
+            # only a return to ENTRY does).
+            if tp2_hit and not tp3_hit and l_p <= entry:
+                entry_stopped_post_tp2 = True
                 break
             if tp2_hit and not tp3_hit and h_p >= tp3:
                 tp3_hit = True
@@ -510,9 +512,9 @@ def _compute_open_tier_status(token: str, direction: str,
                 if l_p <= tp3:                 # same-bar TP2->TP3 strong bar = WIN
                     tp3_hit = True
                     break
-                continue                       # defer TP1-trail (TP2-fills-first)
-            if tp2_hit and not tp3_hit and h_p >= tp1:
-                t1_trail_stopped = True
+                continue                       # defer post-TP2 stop (TP2-fills-first)
+            if tp2_hit and not tp3_hit and h_p >= entry:
+                entry_stopped_post_tp2 = True
                 break
             if tp2_hit and not tp3_hit and l_p <= tp3:
                 tp3_hit = True
@@ -680,7 +682,7 @@ def collect_one_soak(spec: dict) -> dict:
         # and any rare R-zero / R-negative PARTIAL_TP1 (extreme friction edge
         # cases) are NOT wins. See PHASE_C_FULL_AUDIT_V2.md §7.3 for derivation.
         n_pos     = sum(1 for r in closed if (r["realized_r"] or 0) > 0)
-        n_wins_p2 = sum(1 for r in closed if r["result"] in ("WIN", "PARTIAL_TP2", "PARTIAL_TP2_T1"))  # kept for n_wins display
+        n_wins_p2 = sum(1 for r in closed if r["result"] in ("WIN", "PARTIAL_TP2", "PARTIAL_TP2_BE"))  # kept for n_wins display
         n_p1      = sum(1 for r in closed if r["result"] == "PARTIAL_TP1")
         wr_raw    = n_pos / n if n else 0.0
         avg_r     = sum(realized_rs) / n if n else 0.0
@@ -1291,7 +1293,7 @@ function renderSoak(s) {
          const OUTCOME_CELL_CLS = {
            "WIN":            "outcome-win",
            "PARTIAL_TP2":    "outcome-partial2",
-           "PARTIAL_TP2_T1": "outcome-partial2",
+           "PARTIAL_TP2_BE": "outcome-partial1",
            "PARTIAL_TP1":    "outcome-partial1",
            "LOSS":           "outcome-loss",
            "EXPIRED":        "outcome-expired",
@@ -1299,7 +1301,7 @@ function renderSoak(s) {
          const OUTCOME_ROW_CLS = {
            "WIN":            "row-win",
            "PARTIAL_TP2":    "row-partial2",
-           "PARTIAL_TP2_T1": "row-partial2",
+           "PARTIAL_TP2_BE": "row-partial1",
            "PARTIAL_TP1":    "row-partial1",
            "LOSS":           "row-loss",
            "EXPIRED":        "row-expired",
@@ -1307,7 +1309,7 @@ function renderSoak(s) {
          const outcomeCellCls = OUTCOME_CELL_CLS[c.result] || "";
          const outcomeRowCls  = OUTCOME_ROW_CLS[c.result] || "";
          // Legacy generic "win"/"loss" class for compat with existing td.outcome rule
-         const legacyCls = (c.result==="WIN"||c.result==="PARTIAL_TP2"||c.result==="PARTIAL_TP2_T1") ? "win"
+         const legacyCls = (c.result==="WIN"||c.result==="PARTIAL_TP2"||c.result==="PARTIAL_TP2_BE") ? "win"
                    : (c.result==="LOSS") ? "loss" : "";
          const flagsHtml = renderFlags(c.sanity_flags);
          const rowCls = [outcomeRowCls, legacyCls,
@@ -1417,7 +1419,7 @@ function renderSoak(s) {
 // DASHBOARD + REPORTS — display-only. The locked gate VERDICT always comes
 // from the server (gate_eval / verdict_overall); these views only DISPLAY it.
 // ═══════════════════════════════════════════════════════════════════════
-const OUTCOME_COLORS = { WIN:"#1a5b1a", PARTIAL_TP2:"#4ade80", PARTIAL_TP2_T1:"#22c55e", PARTIAL_TP1:"#86efac", LOSS:"#7f1d1d", EXPIRED:"#374151" };
+const OUTCOME_COLORS = { WIN:"#1a5b1a", PARTIAL_TP2:"#4ade80", PARTIAL_TP2_BE:"#86efac", PARTIAL_TP1:"#86efac", LOSS:"#7f1d1d", EXPIRED:"#374151" };
 const DIR_COLORS = { BUY:"#1f6feb", SELL:"#d29922" };
 const SESSION_COLORS = { ASIAN:"#8957e5", LONDON:"#1f6feb", LONDON_NY_OVERLAP:"#2ea043", NY:"#db6d28", LATE_US:"#6e7681", UNKNOWN:"#484f58" };
 let LAST_STATE = null;
@@ -1541,7 +1543,7 @@ function dashSoakBlock(s){
     `<div class="b-caption">${caption}</div><div class="b-crit">${critChips}</div></div>`;
   // Donuts
   const oc=dash.outcome_counts||{};
-  const outSeg=["WIN","PARTIAL_TP2","PARTIAL_TP2_T1","PARTIAL_TP1","LOSS","EXPIRED"].map(o=>({label:o,value:oc[o]||0,color:OUTCOME_COLORS[o]}));
+  const outSeg=["WIN","PARTIAL_TP2","PARTIAL_TP2_BE","PARTIAL_TP1","LOSS","EXPIRED"].map(o=>({label:o,value:oc[o]||0,color:OUTCOME_COLORS[o]}));
   const dir=dash.direction||{};
   const dirSeg=[{label:"BUY",value:(dir.BUY&&dir.BUY.n)||0,color:DIR_COLORS.BUY},{label:"SELL",value:(dir.SELL&&dir.SELL.n)||0,color:DIR_COLORS.SELL}];
   const sessSeg=(s.per_session||[]).map(p=>({label:p.session,value:p.n,color:SESSION_COLORS[p.session]||"#484f58"}));
@@ -1623,9 +1625,9 @@ function reportsBlock(s){
     `<div class="c-note">Is forward avg_R trending toward the backtest reference, or staying negative-toward-zero? Needs many days — currently burst-dominated.</div></div>`;
   // Exit-reason distribution
   const er=dash.exit_reasons||{};
-  const erOrder=["WIN_TP3","PARTIAL_TP2","PARTIAL_TP2_T1","PARTIAL_TP1_BE","FULL_SL","LOSS_AFTER_TP1","EXPIRED","OTHER"];
+  const erOrder=["WIN_TP3","PARTIAL_TP2","PARTIAL_TP2_BE","PARTIAL_TP1_BE","FULL_SL","LOSS_AFTER_TP1","EXPIRED","OTHER"];
   const erItems=erOrder.filter(k=>er[k]).map(k=>({label:k,value:er[k],
-    color:k==="WIN_TP3"?"#1a5b1a":k==="PARTIAL_TP2"?"#4ade80":k==="PARTIAL_TP2_T1"?"#22c55e":k==="PARTIAL_TP1_BE"?"#86efac":k==="FULL_SL"?"#7f1d1d":"#374151"}));
+    color:k==="WIN_TP3"?"#1a5b1a":k==="PARTIAL_TP2"?"#4ade80":k==="PARTIAL_TP2_BE"?"#86efac":k==="PARTIAL_TP1_BE"?"#86efac":k==="FULL_SL"?"#7f1d1d":"#374151"}));
   const exitDist = `<div class="chart-box" style="flex:1 1 420px"><div class="c-title">Exit-reason distribution</div>`+
     svgBars(erItems.map(i=>({label:i.label,value:i.value,color:i.color})),{w:420,h:180})+`</div>`;
   // Near-miss (lazy)
