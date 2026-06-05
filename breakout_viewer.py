@@ -818,6 +818,87 @@ def collect_one_soak(spec: dict) -> dict:
     return out
 
 
+# Map the soak_label stored in exec_quality_log back to the display key (A/B).
+_SOAK_LABEL_TO_KEY = {s["soak_label"]: s["key"] for s in SOAKS}
+
+
+def collect_exec_quality(limit: int = 50) -> dict:
+    """READ-ONLY display aggregates for the Execution Quality Monitor panel.
+
+    SELECTs from `exec_quality_log` ONLY. Never writes, never gates. The
+    `would_skip` flag is DISPLAY-ONLY here, exactly as it is logging-only in the
+    soak — this function surfaces it for monitoring and CANNOT enable gating.
+    Renders cleanly when the table is absent or has 0 rows (empty state).
+    """
+    out = {
+        "mode": "Observation only / No gating",
+        "trade_affected": "NO",          # static — the flag never affects trading
+        "table_present": False,
+        "total": 0, "fetch_ok": 0, "fetch_failed": 0,
+        "would_skip_count": 0,
+        "would_skip_rate": None,          # None → UI shows "—" (guards divide-by-zero)
+        "latest": None,
+        "recent": [],
+    }
+    try:
+        conn = _open_ro_conn()
+    except Exception as e:
+        out["error"] = str(e)
+        return out
+    try:
+        t = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='exec_quality_log'"
+        ).fetchone()
+        if not t:
+            return out  # table not yet created — empty state, no error
+        out["table_present"] = True
+        agg = conn.execute(
+            "SELECT COUNT(*) AS n, "
+            "       SUM(CASE WHEN fetch_status='ok'           THEN 1 ELSE 0 END) AS ok, "
+            "       SUM(CASE WHEN fetch_status='fetch_failed' THEN 1 ELSE 0 END) AS failed, "
+            "       SUM(CASE WHEN would_skip=1                THEN 1 ELSE 0 END) AS ws "
+            "FROM exec_quality_log"
+        ).fetchone()
+        total = agg["n"] or 0
+        out["total"] = total
+        out["fetch_ok"] = agg["ok"] or 0
+        out["fetch_failed"] = agg["failed"] or 0
+        out["would_skip_count"] = agg["ws"] or 0
+        out["would_skip_rate"] = (round(100.0 * out["would_skip_count"] / total, 1)
+                                  if total > 0 else None)
+        rows = conn.execute(
+            "SELECT ts_utc, soak_label, token, direction, spread_pct, est_slippage_pct, "
+            "       exec_side_depth_01pct_usd, position_usd, would_skip, tripped_rules, "
+            "       fetch_status "
+            "FROM exec_quality_log ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        recent = []
+        for r in rows:
+            ok = (r["fetch_status"] == "ok")
+            depth_ratio = None
+            if ok and r["position_usd"] and r["exec_side_depth_01pct_usd"] is not None:
+                depth_ratio = round(r["exec_side_depth_01pct_usd"] / r["position_usd"], 1)
+            recent.append({
+                "ts_utc": r["ts_utc"],
+                "soak": _SOAK_LABEL_TO_KEY.get(r["soak_label"], r["soak_label"]),
+                "token": r["token"],
+                "direction": r["direction"],
+                "spread_pct": r["spread_pct"] if ok else None,
+                "est_slippage_pct": r["est_slippage_pct"] if ok else None,
+                "depth_ratio": depth_ratio,
+                "would_skip": (int(r["would_skip"]) if r["would_skip"] is not None else None),
+                "tripped_rules": (r["tripped_rules"] or "") if ok else "",
+                "fetch_status": r["fetch_status"],
+            })
+        out["recent"] = recent
+        if recent:
+            out["latest"] = recent[0]
+    finally:
+        conn.close()
+    return out
+
+
 def collect_state() -> dict:
     """Top-level — collect both soaks."""
     state = {
@@ -834,6 +915,12 @@ def collect_state() -> dict:
                 "error": str(e),
                 "verdict_overall": "ERROR",
             }
+    # Execution Quality Monitor — read-only, display-only (Type-A observation data).
+    try:
+        state["exec_quality"] = collect_exec_quality()
+    except Exception as e:
+        state["exec_quality"] = {"error": str(e), "mode": "Observation only / No gating",
+                                 "total": 0, "recent": [], "would_skip_rate": None}
     return state
 
 
@@ -1118,12 +1205,14 @@ HTML_PAGE = """<!DOCTYPE html>
   <button class="tab-btn" data-tab="soakB">Soak B (Primary)</button>
   <button class="tab-btn" data-tab="soakA">Soak A (bg)</button>
   <button class="tab-btn" data-tab="reports">Reports</button>
+  <button class="tab-btn" data-tab="execq">Exec Quality</button>
 </div>
 
 <div class="tab-panel active" id="panel-dashboard"><div id="dash-body">Loading…</div></div>
 <div class="tab-panel" id="panel-soakB"><div class="soak-col" id="col-B"><h3>Loading…</h3></div></div>
 <div class="tab-panel" id="panel-soakA"><div class="soak-col" id="col-A"><h3>Loading…</h3></div></div>
 <div class="tab-panel" id="panel-reports"><div id="reports-body">Loading…</div></div>
+<div class="tab-panel" id="panel-execq"><div id="execq-body">Loading…</div></div>
 
 <div id="footer">Last refresh: <span id="fetch-ts">…</span></div>
 
@@ -1668,6 +1757,90 @@ function renderReports(){
   document.getElementById("reports-body").innerHTML = reportsBlock(soaks.B) + `<hr style="border-color:#30363d;margin:22px 0">` + reportsBlock(soaks.A);
 }
 
+// ── Execution Quality Monitor (DISPLAY-ONLY; would_skip never gates) ──────
+function execPct(x){ return (x===null||x===undefined) ? "—" : (x>=0?"":"") + x.toFixed(3) + "%"; }
+function execRatio(x){ return (x===null||x===undefined) ? "—" : x.toFixed(1) + "×"; }
+function renderExecQuality(){
+  const e = (LAST_STATE && LAST_STATE.exec_quality) || null;
+  const warn = `<div class="tracking" style="border-style:solid;margin-bottom:14px">`
+    + `<div class="label">⚠ Observation only</div>`
+    + `<div class="value" style="font-size:13px;font-weight:500">This is observation-only. `
+    + `would_skip is logged for future analysis and does not affect entries/exits.</div></div>`;
+  if(!e){ return `<h2 style="border:none">Execution Quality Monitor</h2>${warn}<div class="small">Loading…</div>`; }
+  if(e.error){ return `<h2 style="border:none">Execution Quality Monitor</h2>${warn}`
+    + `<div class="card"><div class="label">Status</div><div class="value verdict-fail">ERROR</div>`
+    + `<div class="threshold mono">${e.error}</div></div>`; }
+
+  const wsRate = (e.would_skip_rate===null||e.would_skip_rate===undefined) ? "—" : e.would_skip_rate.toFixed(1)+"%";
+  const lt = e.latest;
+  // Summary cards
+  const summary = `<div class="row">`
+    + `<div class="card"><div class="label">Mode</div><div class="value" style="font-size:13px;color:#3fb950">${e.mode}</div></div>`
+    + `<div class="card"><div class="label">Total snapshots</div><div class="value">${e.total}</div></div>`
+    + `<div class="card"><div class="label">Fetch ok</div><div class="value">${e.fetch_ok}</div></div>`
+    + `<div class="card"><div class="label">Fetch failed</div><div class="value">${e.fetch_failed}</div></div>`
+    + `<div class="card"><div class="label">would_skip count</div><div class="value">${e.would_skip_count}</div></div>`
+    + `<div class="card"><div class="label">would_skip rate</div><div class="value">${wsRate}</div></div>`
+    + `<div class="card"><div class="label">Trade affected</div><div class="value verdict-pass">${e.trade_affected}</div>`
+    + `<div class="threshold">flag never consulted</div></div>`
+    + `</div>`;
+
+  // Latest snapshot detail
+  let latestBlock;
+  if(!lt){
+    latestBlock = `<div class="tracking"><div class="label">Latest snapshot</div>`
+      + `<div class="value" style="font-size:13px;font-weight:500">No snapshots yet — first row appears on the next breakout signal.</div></div>`;
+  } else {
+    const wsPill = lt.would_skip===1
+      ? `<span class="status-pill fail">YES</span>` : `<span class="status-pill ok">NO</span>`;
+    const fPill = lt.fetch_status==="ok"
+      ? `<span class="status-pill ok">ok</span>` : `<span class="status-pill fail">${lt.fetch_status}</span>`;
+    latestBlock = `<div class="row">`
+      + `<div class="card"><div class="label">Latest @ (UTC)</div><div class="value mono" style="font-size:13px">${lt.ts_utc||"—"}</div>`
+      + `<div class="threshold">soak ${lt.soak||"—"}</div></div>`
+      + `<div class="card"><div class="label">Token / Dir</div><div class="value">${lt.token||"—"} ${lt.direction||""}</div></div>`
+      + `<div class="card"><div class="label">Spread</div><div class="value mono">${execPct(lt.spread_pct)}</div></div>`
+      + `<div class="card"><div class="label">Exp. slippage</div><div class="value mono">${execPct(lt.est_slippage_pct)}</div></div>`
+      + `<div class="card"><div class="label">Depth ratio</div><div class="value mono">${execRatio(lt.depth_ratio)}</div>`
+      + `<div class="threshold">near-touch / size</div></div>`
+      + `<div class="card"><div class="label">would_skip</div><div class="value">${wsPill}</div></div>`
+      + `<div class="card"><div class="label">Reasons</div><div class="value mono" style="font-size:13px">${lt.tripped_rules||"—"}</div></div>`
+      + `<div class="card"><div class="label">Fetch</div><div class="value">${fPill}</div></div>`
+      + `</div>`;
+  }
+
+  // Recent snapshots table
+  let tableBlock;
+  if(!e.recent || e.recent.length===0){
+    tableBlock = `<div class="small" style="padding:10px 2px">No snapshots yet — first row appears on the next breakout signal.</div>`;
+  } else {
+    const rows = e.recent.map(r=>{
+      const failed = (r.fetch_status!=="ok");
+      const sp = failed ? "—" : execPct(r.spread_pct);
+      const sl = failed ? "—" : execPct(r.est_slippage_pct);
+      const dr = failed ? "—" : execRatio(r.depth_ratio);
+      const ws = (r.would_skip===1) ? `<span class="status-pill fail">YES</span>`
+               : (r.would_skip===0) ? `<span class="status-pill ok">NO</span>` : "—";
+      const reason = (r.tripped_rules && r.tripped_rules.length) ? r.tripped_rules : "—";
+      const fs = (r.fetch_status==="ok") ? `<span class="status-pill ok">ok</span>`
+                                         : `<span class="status-pill fail">${r.fetch_status}</span>`;
+      return `<tr><td class="mono">${r.ts_utc||"—"}</td><td>${r.soak||"—"}</td><td>${r.token||"—"}</td>`
+        + `<td>${r.direction||"—"}</td><td class="mono">${sp}</td><td class="mono">${sl}</td>`
+        + `<td class="mono">${dr}</td><td>${ws}</td><td class="mono">${reason}</td><td>${fs}</td></tr>`;
+    }).join("");
+    tableBlock = `<div class="closed-scroll"><table><thead><tr>`
+      + `<th>Timestamp (UTC)</th><th>Soak</th><th>Token</th><th>Dir</th><th>Spread</th>`
+      + `<th>Exp. slip</th><th>Depth×</th><th>would_skip</th><th>Reason</th><th>Fetch</th>`
+      + `</tr></thead><tbody>${rows}</tbody></table></div>`;
+  }
+
+  return `<h2 style="border:none">Execution Quality Monitor</h2>`
+    + `<div class="small mono" style="margin-bottom:10px">Type-A order-book observation · read-only · would_skip is logged, never gates</div>`
+    + warn + summary
+    + `<h3 style="color:#fff;font-size:13px;margin:16px 0 4px">Latest snapshot</h3>` + latestBlock
+    + `<h3 style="color:#fff;font-size:13px;margin:18px 0 4px">Recent snapshots (newest first)</h3>` + tableBlock;
+}
+
 // ── Tab navigation ──────────────────────────────────────────────────────
 let ACTIVE_TAB="dashboard";
 function showTab(tab){
@@ -1683,6 +1856,7 @@ function renderActive(){
   else if(ACTIVE_TAB==="reports") renderReports();
   else if(ACTIVE_TAB==="soakB") document.getElementById("col-B").innerHTML=renderSoak(soaks.B);
   else if(ACTIVE_TAB==="soakA") document.getElementById("col-A").innerHTML=renderSoak(soaks.A);
+  else if(ACTIVE_TAB==="execq") document.getElementById("execq-body").innerHTML=renderExecQuality();
 }
 document.querySelectorAll('.tab-btn').forEach(b=>b.onclick=()=>showTab(b.dataset.tab));
 
