@@ -70,6 +70,7 @@ from breakout_engine import (  # noqa: E402
 )
 from crt_engine import compute_crt_trade_economics  # noqa: E402
 from ict_engine import TOKEN_RT_COST, ROUND_TRIP_COST_PCT  # noqa: E402
+import exec_quality  # noqa: E402  — Type-A execution-quality OBSERVATION logging (non-intrusive)
 
 # ── Constants ──────────────────────────────────────────────────────────────
 TOKENS = ["BTC", "ETH", "XRP", "HBAR", "AVAX", "LINK", "BNB",
@@ -453,6 +454,15 @@ def scan_token(conn, token: str, consumed: set) -> bool:
     _log(f"  NEW B-SIGNAL #{sig_id} {token} {setup['direction']} entry={entry_price:.6f} "
          f"sl={sl_price:.6f} tp1={tp1:.6f} tp2={tp2:.6f} tp3={tp3:.6f} "
          f"({setup['confluence']['type']}, mss={setup.get('mss_quality')})")
+    # Type-A execution-quality OBSERVATION (non-intrusive). Runs AFTER the trade is
+    # persisted + consumed-marked, so it cannot affect whether the trade is taken.
+    # observe_exec_quality never raises; the outer guard is belt-and-suspenders.
+    try:
+        exec_quality.observe_exec_quality(
+            conn, signal_id=sig_id, soak_label=SOAK_LABEL, token=token,
+            symbol=symbol, direction=setup["direction"], log_fn=_log)
+    except Exception as e:  # pragma: no cover — must never affect the trade
+        _log(f"  {token}: exec_quality observe error (non-fatal): {e!r}")
     return True
 
 
@@ -542,6 +552,11 @@ def main():
     signal_module.signal(signal_module.SIGINT,  _sigterm_handler)
 
     conn = open_db()
+    try:
+        exec_quality.ensure_exec_quality_table(conn)
+        _log("  exec_quality_log table ready (Type-A observation logging).")
+    except Exception as e:  # non-fatal — soak runs regardless
+        _log(f"  exec_quality table init failed (non-fatal, logging disabled): {e!r}")
     consumed = load_consumed_set(conn)
     _log(f"  Restart-safe: loaded {len(consumed)} previously-consumed B C1 zones.")
 
@@ -566,6 +581,12 @@ def main():
             except Exception as e:
                 _log(f"  resolution error: {e!r}")
                 traceback.print_exc()
+            # Backfill outcome/realized_r onto exec_quality_log (additive join on
+            # results; decoupled from resolution — cannot affect outcomes).
+            try:
+                exec_quality.backfill_outcomes(conn, SOAK_LABEL)
+            except Exception as e:
+                _log(f"  exec_quality backfill error (non-fatal): {e!r}")
             n_open = conn.execute(
                 "SELECT COUNT(*) FROM signals WHERE source = ? AND status = 'OPEN'",
                 (SOAK_LABEL,),
