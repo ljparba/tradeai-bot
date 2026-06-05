@@ -18,12 +18,14 @@ same five criteria to both):
     no per-token blowup
     n closed ≥ 30 before any verdict (PENDING until then)
 
-Per-soak FRICTION-ON BACKTEST REFERENCE (informational, NOT a gate; updated
-2026-06-03 to the NEW BE-after-TP1 model — PHASE_C_FULL_AUDIT_V2.md):
-    A: +0.4536 avg_R (TF_A 720d FRICTION NEW)
-    B: +0.4840 avg_R (TF_B 720d FRICTION NEW)
-    (the old +0.616 / +0.549 numbers were under the prior "ignore-SL-after-TP1"
-     model and are not portable to live execution.)
+Per-soak BACKTEST REFERENCE (informational, NOT a gate; authoritative 720d
+V_ENTRY hold-at-entry run, run_posttp2_backtests.py 2026-06-05):
+    A: clean +0.4830 / friction +0.3623 avg_R (TF_A 720d)
+    B: clean +0.4818 / friction +0.3765 avg_R (TF_B 720d)
+    Both friction numbers are BELOW the +0.40 gate (validated-negative). The soak
+    writes CLEAN realized_r; the verdict's avg_R criterion is evaluated on the
+    FRICTION-ADJUSTED value (clean × friction/clean haircut) so the live verdict
+    matches the honest friction-basis conclusion (GATE-BASIS FIX, audit #8).
 
 For B specifically, also displays tracking-only metrics (sum_R, R/day) clearly
 marked as NOT part of the verdict, so the operator can judge B's
@@ -93,24 +95,42 @@ SANITY_MAX_SL_PCT       = 0.030   # structural SL ceiling (3% of entry)
 SANITY_MIN_TP1_RR       = 1.3     # ICT_MIN_RR_GATE — TP1 must be ≥1.3× SL distance
 
 # Per-soak descriptors. Order = display order (left → right).
+# GATE-BASIS FIX (2026-06-05, BREAKOUT_FULL_AUDIT finding #8, option b):
+# The soak writes CLEAN realized_r (baseline rt_cost only, no execution Monte-Carlo).
+# The honest validated-negative conclusion is on the FRICTION basis. To make the live
+# verdict match that honest conclusion, the avg_R gate is evaluated on a FRICTION-ADJUSTED
+# value: avg_R_friction_adj = clean_avg_R * friction_haircut.
+#
+# friction_haircut = measured FRICTION/CLEAN avg_R ratio from the authoritative 720d
+# clean-vs-friction backtest (run_posttp2_backtests.py, V_ENTRY hold-at-entry, 2026-06-05):
+#     A (5M/4H): friction +0.3623 / clean +0.4830 = 0.7501
+#     B (5M/1H): friction +0.3765 / clean +0.4818 = 0.7815
+# Per-soak (not a single magic number) because the two TFs degrade differently under
+# friction. ONLY avg_R is haircut: PF / WR / maxDD already pass on BOTH bases, so they
+# need no adjustment for the verdict to be honest. This is VIEWER-SIDE ONLY — the soak
+# still writes clean realized_r unchanged.
 SOAKS = [
     {
-        "key":          "A",
-        "label":        "Soak A — 5M / 4H",
-        "soak_label":   "H4_BREAKOUT_PAPER_SOAK",
-        "heartbeat":    _BREAKOUT_DIR / "data" / "breakout_soak_heartbeat.json",
-        "pid_file":     _BREAKOUT_DIR / "data" / "breakout_soak.pid",
-        "ref_avg_R":    0.3623,  # friction ref, V_ENTRY hold-at-entry 720d (2026-06-04) — BELOW +0.40 gate
-        "ref_source":   "POST-TP2 trail sweep (run_posttp2_backtests.py)",
+        "key":             "A",
+        "label":           "Soak A — 5M / 4H",
+        "soak_label":      "H4_BREAKOUT_PAPER_SOAK",
+        "heartbeat":       _BREAKOUT_DIR / "data" / "breakout_soak_heartbeat.json",
+        "pid_file":        _BREAKOUT_DIR / "data" / "breakout_soak.pid",
+        "ref_avg_R":       0.3623,  # friction ref, V_ENTRY hold-at-entry 720d — BELOW +0.40 gate
+        "ref_avg_R_clean": 0.4830,  # clean ref (== soak realized_r basis), 720d
+        "friction_haircut": round(0.3623 / 0.4830, 4),  # = 0.7501 (friction/clean, 720d)
+        "ref_source":      "run_posttp2_backtests.py (720d clean vs friction)",
     },
     {
-        "key":          "B",
-        "label":        "Soak B — 5M / 1H",
-        "soak_label":   "H4_BREAKOUT_PAPER_SOAK_B",
-        "heartbeat":    _BREAKOUT_DIR / "data" / "breakout_soak_B_heartbeat.json",
-        "pid_file":     _BREAKOUT_DIR / "data" / "breakout_soak_B.pid",
-        "ref_avg_R":    0.3765,  # friction ref, V_ENTRY hold-at-entry 720d (2026-06-04) — BELOW +0.40 gate
-        "ref_source":   "POST-TP2 trail sweep (run_posttp2_backtests.py)",
+        "key":             "B",
+        "label":           "Soak B — 5M / 1H",
+        "soak_label":      "H4_BREAKOUT_PAPER_SOAK_B",
+        "heartbeat":       _BREAKOUT_DIR / "data" / "breakout_soak_B_heartbeat.json",
+        "pid_file":        _BREAKOUT_DIR / "data" / "breakout_soak_B.pid",
+        "ref_avg_R":       0.3765,  # friction ref, V_ENTRY hold-at-entry 720d — BELOW +0.40 gate
+        "ref_avg_R_clean": 0.4818,  # clean ref (== soak realized_r basis), 720d
+        "friction_haircut": round(0.3765 / 0.4818, 4),  # = 0.7815 (friction/clean, 720d)
+        "ref_source":      "run_posttp2_backtests.py (720d clean vs friction)",
     },
 ]
 
@@ -726,7 +746,14 @@ def collect_one_soak(spec: dict) -> dict:
         }
 
         # Gate eval
-        avg_r_pass  = avg_r >= GATE_AVG_R_MIN
+        # GATE-BASIS FIX (audit #8, option b): the verdict's avg_R criterion is
+        # evaluated on the FRICTION-ADJUSTED value (honest basis), not the raw clean
+        # avg_R the soak writes. avg_r (clean) is preserved for display/reference.
+        friction_haircut = spec.get("friction_haircut", 1.0)
+        avg_r_friction   = round(avg_r * friction_haircut, 4)
+        avg_r_pass  = avg_r_friction >= GATE_AVG_R_MIN      # honest (friction) basis
+        out["metrics"]["avg_R_friction_adj"] = avg_r_friction   # gated value (display)
+        out["metrics"]["friction_haircut"]   = friction_haircut
         pf_pass     = (pf >= GATE_PF_MIN) if pf != float("inf") else True
         wr_pass     = wr_raw >= GATE_WR_MIN
         max_dd_pass = mdd <= GATE_MAX_DD_R
@@ -787,7 +814,12 @@ def collect_one_soak(spec: dict) -> dict:
         out["per_session"] = per_session_rows
 
         out["gate_eval"] = {
-            "avg_R":         {"value": round(avg_r, 4),  "threshold": GATE_AVG_R_MIN,
+            # avg_R is GATED on the friction-adjusted value (honest basis). The raw
+            # clean avg_R is carried as value_clean for reference/display only.
+            "avg_R":         {"value": avg_r_friction, "value_clean": round(avg_r, 4),
+                              "threshold": GATE_AVG_R_MIN,
+                              "basis": "friction-adjusted",
+                              "haircut": friction_haircut,
                               "status": _gate_status(avg_r_pass, n)},
             "profit_factor": {"value": round(pf, 4) if pf != float("inf") else None,
                               "threshold": GATE_PF_MIN,
@@ -1198,7 +1230,7 @@ HTML_PAGE = """<!DOCTYPE html>
 </head>
 <body>
 <h1>BREAKOUT PAPER SOAKS — Read-only viewer</h1>
-<div class="small mono">port 8890 · DB read-only · refresh 30s · gate stays avg_R≥0.40 · WR≥0.58 · PF≥2.0 · maxDD≤20R · n≥30 (per-soak, never blended)</div>
+<div class="small mono">port 8890 · DB read-only · refresh 30s · gate avg_R≥0.40 (friction-adjusted, honest) · WR≥0.58 · PF≥2.0 · maxDD≤20R · n≥30 (per-soak, never blended)</div>
 
 <div class="tabs" id="tabs">
   <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
@@ -1273,7 +1305,9 @@ function renderSoak(s) {
                        : s.verdict_overall === "FAIL" ? "verdict-fail"
                        : "verdict-pending";
 
-  // Gate-row table
+  // Gate-row table.
+  // avg_R is GATED on the friction-adjusted value (honest basis); the clean avg_R the
+  // soak writes is shown alongside for reference so the verdict basis is unmistakable.
   const rows = [
     ["avg_R per closed", ge.avg_R, "≥ +0.40"],
     ["Profit factor", ge.profit_factor, "≥ 2.0"],
@@ -1284,7 +1318,13 @@ function renderSoak(s) {
   let gateRowsHtml = rows.map(r => {
     const v = r[1] || {};
     let valStr = "—";
-    if (r[0] === "WR (positive-R)") {
+    if (r[0] === "avg_R per closed") {
+      // friction-adjusted = the GATED value; clean shown in parentheses for reference
+      const adj = (v.value !== null && v.value !== undefined) ? fmt(v.value, 3, true) : "—";
+      const cln = (v.value_clean !== null && v.value_clean !== undefined) ? fmt(v.value_clean, 3, true) : "—";
+      const hc = (v.haircut !== null && v.haircut !== undefined) ? v.haircut : "—";
+      valStr = `${adj} <span class="small">friction-adj · clean ${cln} ×${hc}</span>`;
+    } else if (r[0] === "WR (positive-R)") {
       valStr = v.value !== null && v.value !== undefined ? (v.value * 100).toFixed(1) + "%" : "—";
     } else if (r[0] === "Per-token blowup") {
       valStr = v.value === false ? "none" : v.value === true ? "FLAGGED" : "—";
@@ -1293,6 +1333,9 @@ function renderSoak(s) {
     }
     return `<tr><td>${r[0]}</td><td>${valStr}</td><td class="small">${r[2]}</td><td>${pill(v.status||"PENDING")}</td></tr>`;
   }).join("");
+  const gateBasisNote = `<div class="small" style="margin:4px 0 8px;color:#d29922">`
+    + `Gate evaluated on friction-adjusted basis (honest). Clean avg_R shown for reference.`
+    + `</div>`;
 
   // Open table — DETAILED: entry / SL / TP1-3 prices, distances, R:R, sanity flags
   // PLUS TradingView mapping helpers (pair symbol, opened UTC, expires UTC)
@@ -1460,6 +1503,7 @@ function renderSoak(s) {
     </div>
 
     <h2>Locked thresholds vs observed</h2>
+    ${gateBasisNote}
     <div class="wr-note">WR definition: <b>positive-R-close rate</b> — counts any close with realized_R&nbsp;&gt;&nbsp;0 (WIN, PARTIAL_TP2, AND PARTIAL_TP1_BE since the BE-stop runner pays only friction and stays positive). LOSS, EXPIRED, and rare R&nbsp;≤&nbsp;0 PARTIAL_TP1 (extreme-friction edge cases) are NOT wins. Threshold derived 2026-06-03 from the original 11pp buffer below the new BE-after-TP1 model backtest WR (avg 69.4%); see <code>PHASE_C_FULL_AUDIT_V2.md §7.3</code>.</div>
     <table>
       <thead><tr><th>Criterion</th><th>Observed</th><th>Threshold</th><th>Status</th></tr></thead>
