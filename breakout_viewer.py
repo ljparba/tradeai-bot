@@ -58,11 +58,12 @@ import socketserver
 import sqlite3
 import sys
 import time as _time
-import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
+# V1 (2026-06-05): NO live price fetch. urllib.request/error removed — the viewer
+# reads ONLY breakout.db (mode=ro) + process checks (os.kill/ /proc). No outbound
+# price API call exists in this file.
 
 _BREAKOUT_DIR = Path(__file__).resolve().parent
 DB_PATH = _BREAKOUT_DIR / "data" / "breakout.db"
@@ -442,104 +443,53 @@ def _days_elapsed_since(ts_str):
         return 0.001
 
 
-# ── Open-position tier-status computation (DISPLAY-ONLY) ─────────────────
-# Mirrors the soak's resolve_open_signals BE-after-TP1 walk EXACTLY, so the
-# tier coloring shown for open positions matches what the soak would classify
-# at the same moment. This is computed READ-ONLY in the viewer (the soak
-# doesn't persist tp_hit flags for OPEN signals — only at terminal close).
-#
-# DOES NOT enter gate math or verdict logic. DOES NOT write anything.
-# Graceful degradation: if the Binance fetch fails, returns (None, None, None)
-# and the cells render un-tinted (no false "tier hit" indication).
-_BINANCE_KLINE_URL = "https://api.binance.com/api/v3/klines"
-_VIEWER_USER_AGENT = "TradeAI-BreakoutViewer/1.0"
-_TIER_FETCH_TIMEOUT = 8  # seconds — keep page-responsive on transient Binance hiccups
-
-
-def _compute_open_tier_status(token: str, direction: str,
-                                entry: float, sl: float,
-                                tp1: float, tp2: float, tp3: float,
-                                entry_ts_ms: int, now_ms: int) -> tuple:
-    """Walk 5m bars from entry_ts+5min to now under the BE-after-TP1 model.
-
-    Returns (tp1_hit, tp2_hit, tp3_hit) as ints (1 or 0) for direct
-    .tpN_hit === 1 comparison in the JS render. Returns (None, None, None)
-    on any fetch failure or empty result (graceful — no tint applied).
-    """
-    start_ms = entry_ts_ms + 5 * 60 * 1000
-    if now_ms <= start_ms:
-        return (0, 0, 0)  # too new — no forward bars yet, treat as no-tier-hit
-    symbol = f"{token}USDT"
-    url = (f"{_BINANCE_KLINE_URL}?symbol={symbol}&interval=5m&limit=1000&"
-           f"startTime={start_ms}&endTime={now_ms}")
+# ── Process-liveness checks (READ-ONLY; os.kill(pid,0) + /proc, NO signals) ──
+# V1 isolation: the viewer learns whether a process is running ONLY via a
+# zero-signal liveness probe and /proc reads. It NEVER opens signals.db and
+# NEVER fetches live prices. (The previous _compute_open_tier_status Binance
+# fetch was REMOVED for V1 — open positions show no live tier/price.)
+def _proc_alive(pid):
+    """True if PID is alive (os.kill(pid, 0) sends NO signal — pure liveness)."""
+    if not pid:
+        return False
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": _VIEWER_USER_AGENT})
-        with urllib.request.urlopen(req, timeout=_TIER_FETCH_TIMEOUT) as resp:
-            if resp.status != 200:
-                return (None, None, None)
-            raw = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
-        return (None, None, None)
-    if not raw or not isinstance(raw, list):
-        return (None, None, None)
+        os.kill(int(pid), 0)
+        return True
+    except (ProcessLookupError, ValueError):
+        return False
+    except PermissionError:
+        return True  # exists but owned by another user — still 'alive'
 
-    # MIRROR the soak's resolve_open_signals walk EXACTLY
-    # (breakout_paper_soak_B.py:293-318 / breakout_paper_soak.py:339-378 under
-    # the BE-after-TP1 / RUNNER-EXIT FIX 2026-06-03 model).
-    tp1_hit = tp2_hit = tp3_hit = sl_hit = be_stopped = False
-    entry_stopped_post_tp2 = False   # POST-TP2 HOLD-AT-ENTRY (V_ENTRY) parity with the soak resolver
-    for bar in raw:
-        h_p = float(bar[2])
-        l_p = float(bar[3])
-        if direction == "BUY":
-            if not tp1_hit and not sl_hit and l_p <= sl:
-                sl_hit = True
-                break
-            if not tp1_hit and h_p >= tp1:
-                tp1_hit = True
-                continue
-            if tp1_hit and not tp2_hit and not be_stopped and l_p <= entry:
-                be_stopped = True
-                break
-            if tp1_hit and not tp2_hit and h_p >= tp2:
-                tp2_hit = True
-                if h_p >= tp3:                 # same-bar TP2->TP3 strong bar = WIN
-                    tp3_hit = True
-                    break
-                continue                       # defer post-TP2 stop (TP2-fills-first)
-            # POST-TP2 HOLD-AT-ENTRY (V_ENTRY 2026-06-04): stop STAYS at entry once TP2 hit.
-            # Mirror the soak resolver EXACTLY so the open-position tier display never
-            # implies a runner the soak has already closed (a dip to TP1 does NOT close;
-            # only a return to ENTRY does).
-            if tp2_hit and not tp3_hit and l_p <= entry:
-                entry_stopped_post_tp2 = True
-                break
-            if tp2_hit and not tp3_hit and h_p >= tp3:
-                tp3_hit = True
-                break
-        else:  # SELL — mirror
-            if not tp1_hit and not sl_hit and h_p >= sl:
-                sl_hit = True
-                break
-            if not tp1_hit and l_p <= tp1:
-                tp1_hit = True
-                continue
-            if tp1_hit and not tp2_hit and not be_stopped and h_p >= entry:
-                be_stopped = True
-                break
-            if tp1_hit and not tp2_hit and l_p <= tp2:
-                tp2_hit = True
-                if l_p <= tp3:                 # same-bar TP2->TP3 strong bar = WIN
-                    tp3_hit = True
-                    break
-                continue                       # defer post-TP2 stop (TP2-fills-first)
-            if tp2_hit and not tp3_hit and h_p >= entry:
-                entry_stopped_post_tp2 = True
-                break
-            if tp2_hit and not tp3_hit and l_p <= tp3:
-                tp3_hit = True
-                break
-    return (1 if tp1_hit else 0, 1 if tp2_hit else 0, 1 if tp3_hit else 0)
+
+def _proc_cmdline(pid):
+    """Read /proc/<pid>/cmdline (read-only). Returns '' if unavailable."""
+    try:
+        with open(f"/proc/{int(pid)}/cmdline", "rb") as f:
+            return f.read().replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+    except (OSError, ValueError):
+        return ""
+
+
+def _proc_age_seconds(pid):
+    """Best-effort process age from /proc/<pid> dir mtime (read-only). None if NA."""
+    try:
+        return round(max(0.0, _time.time() - os.stat(f"/proc/{int(pid)}").st_mtime), 0)
+    except (OSError, ValueError):
+        return None
+
+
+def _process_status(pid, cmd_substr=""):
+    """Read-only process descriptor: running/stopped + cmdline-match + age."""
+    alive = _proc_alive(pid)
+    cmd = _proc_cmdline(pid) if alive else ""
+    matches = (cmd_substr in cmd) if (alive and cmd_substr) else None
+    return {
+        "pid": int(pid) if pid else None,
+        "running": alive,
+        "cmd_match": matches,           # True/False/None(unknown) vs expected cmd
+        "age_seconds": _proc_age_seconds(pid) if alive else None,
+        "status": "running" if alive else "stopped",
+    }
 
 
 # OBSERVATIONAL session tagging (display-only). Maps a signal's OPENED UTC
@@ -671,25 +621,11 @@ def collect_one_soak(spec: dict) -> dict:
                 d["age_minutes"] = None
             # Add geometry detail + sanity flags (DISPLAY-ONLY)
             d = _enrich_geometry(d)
-            # Compute current tier-hit status under BE-after-TP1 model (DISPLAY-ONLY).
-            # Mirrors the soak's resolve_open_signals walk EXACTLY. Reads nothing
-            # from the DB beyond the SELECT above; fetches fresh 5m bars from
-            # Binance per open position. Failures → (None, None, None) → cells
-            # render un-tinted (graceful degradation).
-            try:
-                entry_dt = datetime.strptime(d["opened_ts"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-                entry_ts_ms = int(entry_dt.timestamp() * 1000)
-                now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-                tier_t1, tier_t2, tier_t3 = _compute_open_tier_status(
-                    d["token"], d["direction"],
-                    d["entry_price"], d["sl"], d["tp1"], d["tp2"], d["tp3"],
-                    entry_ts_ms, now_ms,
-                )
-                d["tp1_hit"] = tier_t1
-                d["tp2_hit"] = tier_t2
-                d["tp3_hit"] = tier_t3
-            except (ValueError, TypeError, KeyError):
-                d["tp1_hit"] = d["tp2_hit"] = d["tp3_hit"] = None
+            # V1: NO live price fetch. Open-position tier-hit state requires walking
+            # fresh 5m bars (a network call), which is forbidden in V1. Leave tier
+            # flags null — the open-trades table shows entry geometry only, no live
+            # P&L / current-price / tier coloring (stated in the UI).
+            d["tp1_hit"] = d["tp2_hit"] = d["tp3_hit"] = None
             open_sigs.append(d)
         out["open"] = open_sigs
 
@@ -931,11 +867,72 @@ def collect_exec_quality(limit: int = 50) -> dict:
     return out
 
 
+# Production fade descriptor — V1 surfaces process LIVENESS ONLY (no signals.db read).
+# PID 512666 is the known fade process; if it's dead the viewer detects 'stopped'.
+FADE_PROC = {
+    "key":        "FADE",
+    "label":      "Production Fade",
+    "mode":       "LIVE",
+    "known_pid":  512666,
+    "cmd_substr": "crypto_alert.py",
+}
+
+
+def collect_processes() -> dict:
+    """READ-ONLY process liveness for fade + both soaks (os.kill/proc, no DB writes,
+    no signals.db). Soak PIDs come from their own pid files in breakout-work/data."""
+    procs = {}
+    # Fade: known PID + cmdline match (process check only).
+    procs["FADE"] = dict(_process_status(FADE_PROC["known_pid"], FADE_PROC["cmd_substr"]),
+                         label=FADE_PROC["label"], mode=FADE_PROC["mode"])
+    # Soaks: read pid from each soak's pid file (breakout.db side only).
+    for spec in SOAKS:
+        pid = None
+        try:
+            pf = spec["pid_file"]
+            if pf.exists():
+                pid = int(pf.read_text().strip())
+        except (ValueError, OSError):
+            pid = None
+        procs[spec["key"]] = dict(_process_status(pid, "breakout_paper_soak"),
+                                  label=spec["label"], mode="PAPER")
+    return procs
+
+
+def _overall_status(state: dict) -> dict:
+    """Derive HEALTHY / WARNING / ERROR from process liveness + DB read + soak errors.
+    Read-only; no thresholds touched. ERROR > WARNING > HEALTHY."""
+    reasons = []
+    level = "HEALTHY"
+    # DB read failure on either soak → ERROR
+    for k, s in state.get("soaks", {}).items():
+        if s.get("error"):
+            level = "ERROR"; reasons.append(f"Soak {k}: {s['error']}")
+    # Breakout soak processes down → ERROR (their data would go stale)
+    procs = state.get("processes", {})
+    for k in ("A", "B"):
+        if not procs.get(k, {}).get("running"):
+            level = "ERROR"; reasons.append(f"Breakout soak {k} process stopped")
+    # Fade process down → WARNING (monitored separately; not this dashboard's data)
+    if not procs.get("FADE", {}).get("running") and level != "ERROR":
+        level = "WARNING"; reasons.append("Production fade process not detected")
+    # Stale soak heartbeats → WARNING
+    for k in ("A", "B"):
+        hb = state.get("soaks", {}).get(k, {}).get("soak_health", {})
+        if hb.get("status") == "STALE" and level == "HEALTHY":
+            level = "WARNING"; reasons.append(f"Soak {k} heartbeat stale")
+    if not reasons:
+        reasons.append("All monitored processes running; DB read OK.")
+    return {"level": level, "reasons": reasons}
+
+
 def collect_state() -> dict:
-    """Top-level — collect both soaks."""
+    """Top-level — soaks + exec-quality + process liveness + overall status.
+    READ-ONLY: breakout.db (mode=ro) + process checks. signals.db is NEVER opened."""
     state = {
         "ts_unix": _time.time(),
         "ts_utc":  datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        "db_read_only": True,           # _open_ro_conn() uses ?mode=ro (writes raise)
         "soaks":   {},
     }
     for spec in SOAKS:
@@ -953,973 +950,501 @@ def collect_state() -> dict:
     except Exception as e:
         state["exec_quality"] = {"error": str(e), "mode": "Observation only / No gating",
                                  "total": 0, "recent": [], "would_skip_rate": None}
+    # Process liveness (fade + soaks) — process checks only.
+    try:
+        state["processes"] = collect_processes()
+    except Exception as e:
+        state["processes"] = {"error": str(e)}
+    state["overall"] = _overall_status(state)
     return state
 
 
-# ── Near-miss analysis (LAZY, cached, button-triggered) ──────────────────────
-# For every FULL_SL (LOSS with no TP1), reconstruct how far price travelled toward
-# TP1 before reversing to SL (MFE fraction). This needs the price path, which the
-# DB does NOT store (results.mfe_pct is empty) — so we fetch 5m bars from Binance.
-# Because that is a network operation, it is NEVER run on the 30s auto-refresh; the
-# Reports tab calls /api/nearmiss only when the operator clicks "Load near-miss".
-# Results are cached by signal_id (closed signals are immutable) so a second click
-# is instant. Graceful: a failed fetch marks that signal "unknown", never crashes.
-# DISPLAY-ONLY — distinguishes choppy-stopout (near-miss) from wrong-direction.
-_NEARMISS_CACHE = {}  # sid -> {"frac": float|None, "day": str, "token": str}
-
-
-def _nearmiss_frac(token, direction, entry, tp1, opened_ts, closed_at):
-    """MFE fraction toward TP1 over [opened, closed]; None if unavailable."""
-    try:
-        o_dt = datetime.strptime(opened_ts[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-        c_dt = datetime.strptime(closed_at[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-    except (ValueError, TypeError):
-        return None
-    start_ms = int(o_dt.timestamp() * 1000)
-    end_ms = int(c_dt.timestamp() * 1000)
-    symbol = f"{token}USDT"
-    url = (f"{_BINANCE_KLINE_URL}?symbol={symbol}&interval=5m&limit=1000&"
-           f"startTime={start_ms}&endTime={end_ms}")
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": _VIEWER_USER_AGENT})
-        with urllib.request.urlopen(req, timeout=_TIER_FETCH_TIMEOUT) as resp:
-            if resp.status != 200:
-                return None
-            raw = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
-        return None
-    if not raw or not isinstance(raw, list) or entry == tp1:
-        return None
-    if direction == "BUY":
-        mfe = max(float(b[2]) for b in raw)          # highest high
-        frac = (mfe - entry) / (tp1 - entry)
-    else:
-        mfe = min(float(b[3]) for b in raw)          # lowest low
-        frac = (entry - mfe) / (entry - tp1)
-    return max(0.0, frac)
-
-
-def compute_nearmiss(soak_key: str) -> dict:
-    spec = next((s for s in SOAKS if s["key"] == soak_key), None)
-    if spec is None:
-        return {"error": f"unknown soak {soak_key}"}
-    try:
-        conn = _open_ro_conn()
-    except FileNotFoundError:
-        return {"error": "breakout.db missing"}
-    try:
-        rows = list(conn.execute(
-            "SELECT s.id AS sid, s.token, s.signal AS direction, s.timestamp AS opened_ts, "
-            "       s.entry_price, s.tp1, r.closed_at "
-            "FROM signals s JOIN results r ON r.signal_id = s.id "
-            "WHERE s.source = ? AND s.status = 'CLOSED' AND r.result = 'LOSS' "
-            "      AND (r.tp1_hit = 0 OR r.tp1_hit IS NULL) "
-            "ORDER BY s.timestamp", (spec["soak_label"],)))
-    finally:
-        conn.close()
-
-    buckets = {"near_miss": 0, "mid": 0, "wrong_dir": 0, "unknown": 0}
-    by_day = {}
-    details = []
-    for r in rows:
-        sid = r["sid"]
-        if sid not in _NEARMISS_CACHE:
-            frac = _nearmiss_frac(r["token"], r["direction"], r["entry_price"],
-                                  r["tp1"], r["opened_ts"], r["closed_at"])
-            _NEARMISS_CACHE[sid] = {"frac": frac, "day": str(r["opened_ts"])[:10],
-                                    "token": r["token"]}
-        c = _NEARMISS_CACHE[sid]
-        frac = c["frac"]
-        if frac is None:
-            bucket = "unknown"
-        elif frac >= 0.5:
-            bucket = "near_miss"
-        elif frac < 0.25:
-            bucket = "wrong_dir"
-        else:
-            bucket = "mid"
-        buckets[bucket] += 1
-        day = c["day"]
-        d = by_day.setdefault(day, {"day": day, "full_sl": 0, "near_miss": 0})
-        d["full_sl"] += 1
-        if bucket == "near_miss":
-            d["near_miss"] += 1
-        details.append({"sid": sid, "token": r["token"], "dir": r["direction"],
-                        "frac": round(frac, 3) if frac is not None else None,
-                        "bucket": bucket})
-    return {
-        "soak": soak_key,
-        "total_full_sl": len(rows),
-        "buckets": buckets,
-        "by_day": sorted(by_day.values(), key=lambda x: x["day"]),
-        "details": details,
-        "note": ("Near-miss = FULL_SL that reached >=50% of the way to TP1 before "
-                 "reversing to SL (choppy stop-out). wrong_dir = <25% (signal wrong "
-                 "from the start). Reconstructed from Binance 5m bars; DISPLAY-ONLY."),
-    }
 
 
 HTML_PAGE = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>Breakout Soaks Viewer — A vs B</title>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>TradeAI Bot Control Dashboard</title>
 <style>
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-         background: #0d1117; color: #e6edf3; margin: 0; padding: 16px; }
-  h1 { font-size: 18px; margin: 0 0 4px 0; color: #fff; }
-  h2 { font-size: 12px; margin: 16px 0 6px 0; color: #7d8590; text-transform: uppercase;
-       letter-spacing: 0.5px; border-bottom: 1px solid #30363d; padding-bottom: 3px; }
-  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
-  @media (max-width: 1100px) { .grid2 { grid-template-columns: 1fr; } }
-  .soak-col { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 14px 18px; }
-  .soak-col h3 { margin: 0 0 6px 0; font-size: 15px; color: #fff; }
-  .soak-col .sublabel { font-size: 11px; color: #7d8590; margin-bottom: 12px; }
-  .row { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
-  .card { background: #161b22; border: 1px solid #30363d; border-radius: 6px;
-          padding: 10px 12px; flex: 1 1 130px; min-width: 130px; }
-  .card .label { color: #7d8590; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
-  .card .value { color: #fff; font-size: 18px; font-weight: 600; margin-top: 3px; }
-  .card .threshold { color: #6e7681; font-size: 11px; margin-top: 3px; }
-  .status-pill { display: inline-block; padding: 1px 7px; border-radius: 4px;
-                 font-size: 10px; font-weight: 600; text-transform: uppercase; }
-  .status-pill.ok      { background: #1f3d22; color: #3fb950; }
-  .status-pill.fail    { background: #4d1717; color: #f85149; }
-  .status-pill.pending { background: #4a3a10; color: #d29922; }
-  .verdict-pass    { color: #3fb950; font-weight: 700; }
-  .verdict-fail    { color: #f85149; font-weight: 700; }
-  .verdict-pending { color: #d29922; font-weight: 700; }
-  table { width: 100%; border-collapse: collapse; margin-top: 4px; font-size: 11px; }
-  th, td { padding: 4px 6px; text-align: left; border-bottom: 1px solid #21262d; }
-  th { color: #7d8590; font-weight: 500; font-size: 10px; text-transform: uppercase; }
-  tr.win  td.outcome { color: #3fb950; }
-  tr.loss td.outcome { color: #f85149; }
-  tr.blowup { background: #2d1213; }
-  /* DISPLAY-ONLY outcome color-coding for Recent Closed cells. Does NOT
-     affect verdict/gate math — purely cosmetic visual cue. Text labels are
-     always present (accessibility); color is additive. */
-  td.outcome.outcome-win        { color: #ffffff; background: #1a5b1a; font-weight: 700; padding: 4px 8px; border-radius: 3px; }
-  td.outcome.outcome-partial2   { color: #1a3b1a; background: #4ade80; font-weight: 600; padding: 4px 8px; border-radius: 3px; }
-  td.outcome.outcome-partial1   { color: #1a3b1a; background: #86efac; font-weight: 500; padding: 4px 8px; border-radius: 3px; }
-  td.outcome.outcome-loss       { color: #ffffff; background: #7f1d1d; font-weight: 600; padding: 4px 8px; border-radius: 3px; }
-  td.outcome.outcome-expired    { color: #d1d5db; background: #374151; font-weight: 500; padding: 4px 8px; border-radius: 3px; }
-  /* Subtle row tint (faint background) for tier separation */
-  tr.row-win        { background: rgba(63, 185, 80, 0.08); }
-  tr.row-partial2   { background: rgba(74, 222, 128, 0.06); }
-  tr.row-partial1   { background: rgba(134, 239, 172, 0.04); }
-  tr.row-loss       { background: rgba(248, 81, 73, 0.08); }
-  tr.row-expired    { background: rgba(156, 163, 175, 0.05); }
-  /* R-value tint (secondary cue) */
-  td.r-positive  { color: #3fb950; font-weight: 600; }
-  td.r-negative  { color: #f85149; font-weight: 600; }
-  td.r-zero      { color: #9ca3af; font-weight: 500; }
-  /* Sanity-warn rows are darker amber and override outcome row tint */
-  tr.sanity-warn.row-win, tr.sanity-warn.row-partial2, tr.sanity-warn.row-partial1,
-  tr.sanity-warn.row-loss, tr.sanity-warn.row-expired { background: #2d1f08; }
-  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
-  .small { color: #7d8590; font-size: 10px; }
-  .tracking { background: #1f1a0e; border: 1px dashed #4a3a10; border-radius: 6px; padding: 8px 12px; margin-top: 8px; }
-  .tracking .label { color: #d29922; font-size: 10px; text-transform: uppercase; }
-  .tracking .value { color: #fff; font-size: 14px; font-weight: 600; }
-  /* Sanity-check styling — DISPLAY-ONLY (does NOT affect verdict) */
-  tr.sanity-warn { background: #2d1f08; }
-  tr.sanity-warn.win  td.outcome { color: #3fb950; }
-  tr.sanity-warn.loss td.outcome { color: #f85149; }
-  .sanity-pill {
-    display: inline-block; padding: 1px 5px; border-radius: 3px;
-    font-size: 9px; font-weight: 600;
-    background: #4a3a10; color: #d29922;
-    margin-right: 2px; margin-bottom: 1px;
-  }
-  .sanity-pill.crit { background: #4d1717; color: #f85149; }
-  .sanity-pill.warn { background: #4a3a10; color: #d29922; }
-  /* DISPLAY-ONLY tier-progression tints for the EXISTING TP1/TP2/TP3 price
-     cells in Recent Closed. A tier-reached cell is tinted; a non-reached cell
-     keeps the normal table-cell background. Greens match the existing outcome
-     cell shades (light → medium → strong = TP1 → TP2 → TP3) so visually a WIN
-     row's three price cells echo the deep green of the WIN outcome badge.
-     Cosmetic only — does NOT enter gate math or verdict logic. Text color is
-     darkened on hit cells for contrast against the light green backgrounds. */
-  td.mono.tp1-hit { background: #86efac; color: #14301a; font-weight: 600; }   /* light green = partial1 shade */
-  td.mono.tp2-hit { background: #4ade80; color: #102a14; font-weight: 600; }   /* medium green = partial2 shade */
-  td.mono.tp3-hit { background: #1a5b1a; color: #ffffff; font-weight: 700; }   /* deep green = win shade */
-  /* DISPLAY-ONLY scroll container for the Recent Closed table. Bounded
-     height prevents the page from growing unbounded as n accumulates past
-     the n>=30 gate. Sticky header keeps column labels visible while
-     scrolling. Cosmetic only — does NOT affect gate math or verdict. */
-  .closed-scroll  { max-height: 520px; overflow-y: auto; overflow-x: auto;
-                    border: 1px solid #2a2a2a; border-radius: 4px; }
-  .closed-scroll table         { margin: 0; }
-  .closed-scroll thead th      { position: sticky; top: 0; background: #1a1a1a;
-                                  z-index: 2; box-shadow: 0 1px 0 #2a2a2a; }
-  .sanity-info { background: #1f1a0e; border: 1px dashed #4a3a10; border-radius: 6px;
-                 padding: 4px 10px; margin: 6px 0; font-size: 10px; color: #d29922; }
-  /* DISPLAY-ONLY TradingView mapping helper for the Open Positions table.
-     Lets the operator copy the BINANCE:TOKENUSDT symbol verbatim and shows
-     UTC timestamp expectations. Does NOT enter gate math or verdict logic. */
-  .tv-hint    { background: #0c1a2e; border: 1px dashed #1f4d8a; border-radius: 6px;
-                padding: 4px 10px; margin: 6px 0; font-size: 10px; color: #58a6ff; }
-  .tv-symbol  { color: #58a6ff; user-select: all; }   /* one click selects the whole symbol for copy */
-  /* DISPLAY-ONLY explanatory note above the gate table — documents the WR redefinition.
-     Does NOT enter gate math (the math is in the Python side). */
-  .wr-note    { background: #1f2030; border: 1px dashed #3a3a55; border-radius: 6px;
-                padding: 6px 10px; margin: 6px 0; font-size: 10px; color: #b1b1cf; }
-  .wr-note code { background: #2a2a3a; padding: 1px 4px; border-radius: 3px; color: #d1d1f0; }
-  #footer { margin-top: 20px; color: #6e7681; font-size: 10px; text-align: center; }
-  details summary { cursor: pointer; color: #58a6ff; font-size: 11px; padding: 3px 0; }
-  .hb-ok    { color: #3fb950; }
-  .hb-stale { color: #d29922; }
-  .hb-dead  { color: #f85149; }
+  :root { --bg:#0a0d12; --panel:#11161d; --card:#161b22; --bd:#2a313c; --bd2:#1f2630;
+          --tx:#e6edf3; --mut:#8b949e; --grn:#3fb950; --grnbg:#11301a; --yel:#d29922;
+          --yelbg:#332810; --red:#f85149; --redbg:#3a1515; --gry:#6e7681; --blu:#58a6ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--tx); font:15px/1.5 -apple-system,
+         BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; padding:0 0 60px; }
+  .wrap { max-width:1280px; margin:0 auto; padding:0 16px; }
+  h1 { font-size:20px; margin:16px 0 2px; }
+  h2 { font-size:16px; margin:26px 0 8px; padding-bottom:5px; border-bottom:1px solid var(--bd2); }
+  .sub { color:var(--mut); font-size:12px; }
+  .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .muted { color:var(--mut); }
+  a { color:var(--blu); }
 
-  /* ── Tabs ───────────────────────────────────────────────────────────── */
-  .tabs { display: flex; gap: 4px; border-bottom: 1px solid #30363d; margin: 12px 0 16px 0; flex-wrap: wrap; }
-  .tab-btn { background: #161b22; color: #7d8590; border: 1px solid #30363d; border-bottom: none;
-             border-radius: 6px 6px 0 0; padding: 7px 16px; font-size: 12px; font-weight: 600;
-             cursor: pointer; letter-spacing: 0.3px; }
-  .tab-btn:hover { color: #e6edf3; }
-  .tab-btn.active { background: #0d1117; color: #fff; border-color: #30363d; position: relative; top: 1px; }
-  .tab-btn .dot { font-size: 9px; vertical-align: middle; margin-left: 5px; }
-  .tab-panel { display: none; }
-  .tab-panel.active { display: block; }
-  /* ── Dashboard controls ─────────────────────────────────────────────── */
-  .controls { display: flex; gap: 18px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
-  .seg { display: inline-flex; border: 1px solid #30363d; border-radius: 6px; overflow: hidden; }
-  .seg button { background: #161b22; color: #7d8590; border: none; padding: 5px 12px; font-size: 11px;
-                font-weight: 600; cursor: pointer; }
-  .seg button.active { background: #1f6feb; color: #fff; }
-  .seg-label { font-size: 10px; color: #6e7681; text-transform: uppercase; letter-spacing: 0.5px; margin-right: 6px; }
-  /* ── KPI cards (R-based) ────────────────────────────────────────────── */
-  .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-bottom: 14px; }
-  .kpi { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 11px 13px; }
-  .kpi .k-label { color: #7d8590; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
-  .kpi .k-value { color: #fff; font-size: 22px; font-weight: 700; margin-top: 4px; }
-  .kpi .k-sub { font-size: 10px; color: #6e7681; margin-top: 3px; }
-  .kpi.pass { border-color: #2ea043; } .kpi.fail { border-color: #da3633; } .kpi.pending { border-color: #9e6a03; }
-  .kpi .k-value.pos { color: #3fb950; } .kpi .k-value.neg { color: #f85149; }
-  /* ── Gate verdict banner ────────────────────────────────────────────── */
-  .banner { border-radius: 10px; padding: 14px 18px; margin-bottom: 16px; border: 2px solid; }
-  .banner.pass    { background: #0f2417; border-color: #2ea043; }
-  .banner.fail    { background: #2a1213; border-color: #da3633; }
-  .banner.pending { background: #241c08; border-color: #9e6a03; }
-  .banner .b-verdict { font-size: 24px; font-weight: 800; letter-spacing: 1px; }
-  .banner .b-verdict.pass { color: #3fb950; } .banner .b-verdict.fail { color: #f85149; } .banner .b-verdict.pending { color: #d29922; }
-  .banner .b-caption { font-size: 12px; color: #c9d1d9; margin-top: 6px; line-height: 1.45; }
-  .banner .b-crit { display: inline-flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
-  .banner .b-chip { font-size: 10px; padding: 3px 8px; border-radius: 4px; background: #0d1117; border: 1px solid #30363d; }
-  .banner .b-chip.pass { border-color: #2ea043; color: #3fb950; }
-  .banner .b-chip.fail { border-color: #da3633; color: #f85149; }
-  .banner .b-chip.pending { border-color: #9e6a03; color: #d29922; }
-  /* ── Charts ─────────────────────────────────────────────────────────── */
-  .chart-row { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
-  .chart-box { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 12px; flex: 1 1 280px; }
-  .chart-box .c-title { font-size: 11px; color: #7d8590; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
-  .chart-box .c-note { font-size: 9px; color: #6e7681; margin-top: 6px; }
-  .legend { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; font-size: 10px; color: #c9d1d9; }
-  .legend .lg { display: inline-flex; align-items: center; gap: 4px; }
-  .legend .sw { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
-  .honest { background: #241c08; border: 1px dashed #9e6a03; border-radius: 6px; padding: 8px 12px;
-            margin-bottom: 14px; font-size: 11px; color: #e3b341; line-height: 1.5; }
-  .ref-card { background: #0c1a2e; border: 1px solid #1f4d8a; border-radius: 8px; padding: 12px 16px; }
-  .ref-card .rc-title { color: #58a6ff; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
-  .burst-big td { background: rgba(210,153,34,0.12); }
-  .btn { background: #1f6feb; color: #fff; border: none; border-radius: 6px; padding: 7px 14px;
-         font-size: 11px; font-weight: 600; cursor: pointer; }
-  .btn:disabled { background: #30363d; color: #7d8590; cursor: default; }
+  /* status bar */
+  .statusbar { position:sticky; top:0; z-index:10; background:var(--panel);
+               border-bottom:1px solid var(--bd); padding:10px 16px; }
+  .statusbar .inner { max-width:1280px; margin:0 auto; display:flex; flex-wrap:wrap;
+                      align-items:center; gap:12px; }
+  .bigpill { font-size:15px; font-weight:700; padding:5px 14px; border-radius:6px; }
+  .procline { display:flex; gap:14px; flex-wrap:wrap; font-size:13px; }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:5px;
+         vertical-align:middle; }
+  .dot.green{background:var(--grn);} .dot.red{background:var(--red);}
+  .dot.yellow{background:var(--yel);} .dot.gray{background:var(--gry);}
+
+  .lvl-HEALTHY,.lvl-PASS,.lvl-running,.ok { background:var(--grnbg); color:var(--grn); }
+  .lvl-WARNING,.lvl-PENDING,.warn { background:var(--yelbg); color:var(--yel); }
+  .lvl-ERROR,.lvl-FAIL,.lvl-stopped,.err { background:var(--redbg); color:var(--red); }
+  .lvl-INFO,.info { background:#1c2128; color:var(--mut); }
+
+  .grid { display:grid; gap:14px; }
+  .g4 { grid-template-columns:repeat(4,1fr); }
+  .g2 { grid-template-columns:repeat(2,1fr); }
+  @media (max-width:980px){ .g4{grid-template-columns:repeat(2,1fr);} .g2{grid-template-columns:1fr;} }
+  @media (max-width:560px){ .g4{grid-template-columns:1fr;} }
+
+  .card { background:var(--card); border:1px solid var(--bd); border-radius:8px; padding:12px 14px; }
+  .card h3 { margin:0 0 8px; font-size:14px; display:flex; justify-content:space-between; align-items:center; }
+  .kv { display:flex; justify-content:space-between; font-size:13px; padding:2px 0; }
+  .kv .k { color:var(--mut); } .kv .v { font-weight:600; }
+  .pill { display:inline-block; padding:1px 8px; border-radius:5px; font-size:12px; font-weight:700; }
+
+  .panel { background:var(--panel); border:1px solid var(--bd); border-radius:8px; padding:14px 16px; }
+  .decision { border-left:4px solid var(--yel); }
+  .decision.HEALTHY { border-left-color:var(--grn); }
+  .decision.ERROR { border-left-color:var(--red); }
+  .decision .action { font-size:15px; font-weight:700; margin-top:8px; }
+
+  table { width:100%; border-collapse:collapse; font-size:13px; margin-top:4px; }
+  th,td { padding:7px 9px; text-align:left; border-bottom:1px solid var(--bd2); }
+  th { color:var(--mut); font-size:11px; text-transform:uppercase; letter-spacing:.4px; font-weight:600; }
+  td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  tr:hover td { background:#0e141b; }
+  .scroll { max-height:420px; overflow:auto; border:1px solid var(--bd2); border-radius:6px; }
+  .scroll table { margin:0; } .scroll thead th { position:sticky; top:0; background:var(--panel); }
+
+  .warnbox { background:var(--yelbg); border:1px solid #4a3a10; border-radius:6px;
+             padding:8px 12px; color:var(--yel); font-size:13px; margin:8px 0; }
+  .chartwrap { background:var(--card); border:1px solid var(--bd); border-radius:8px; padding:12px; }
+  .toggle button { background:var(--card); color:var(--tx); border:1px solid var(--bd);
+                   border-radius:5px; padding:4px 12px; cursor:pointer; font-size:13px; }
+  .toggle button.active { background:#1f6feb33; border-color:var(--blu); color:var(--blu); }
+  canvas { width:100%; height:240px; display:block; }
+  details { background:var(--card); border:1px solid var(--bd); border-radius:8px; padding:10px 14px; margin-top:10px; }
+  summary { cursor:pointer; font-weight:600; font-size:14px; }
+  .foot { color:var(--mut); font-size:12px; margin-top:24px; text-align:center; }
+  .na { color:var(--gry); }
 </style>
 </head>
 <body>
-<h1>BREAKOUT PAPER SOAKS — Read-only viewer</h1>
-<div class="small mono">port 8890 · DB read-only · refresh 30s · gate avg_R≥0.40 (friction-adjusted, honest) · WR≥0.58 · PF≥2.0 · maxDD≤20R · n≥30 (per-soak, never blended)</div>
 
-<div class="tabs" id="tabs">
-  <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
-  <button class="tab-btn" data-tab="soakB">Soak B (Primary)</button>
-  <button class="tab-btn" data-tab="soakA">Soak A (bg)</button>
-  <button class="tab-btn" data-tab="reports">Reports</button>
-  <button class="tab-btn" data-tab="execq">Exec Quality</button>
+<!-- 1. TOP SYSTEM STATUS BAR -->
+<div class="statusbar"><div class="inner" id="statusbar">Loading…</div></div>
+
+<div class="wrap">
+  <h1>TradeAI Bot Control Dashboard <span class="sub">— V1 · read-only · breakout.db + process checks only</span></h1>
+
+  <!-- 2. STRATEGY CARDS -->
+  <h2>Strategies</h2>
+  <div class="grid g4" id="cards">Loading…</div>
+
+  <!-- 3. MAIN DECISION PANEL -->
+  <h2>What's happening — recommended action</h2>
+  <div id="decision">Loading…</div>
+
+  <!-- 4. GATE CHECKLIST -->
+  <h2>Gate checklist <span class="sub">— breakout soaks · avg_R on friction-adjusted (honest) basis</span></h2>
+  <div id="gate">Loading…</div>
+
+  <!-- 5. PERFORMANCE SUMMARY -->
+  <h2>Performance summary</h2>
+  <div id="perf">Loading…</div>
+
+  <!-- 6. EQUITY CHART -->
+  <h2>Equity curve <span class="sub">— cumulative R (breakout soaks only)</span></h2>
+  <div class="chartwrap">
+    <div class="toggle" id="eqtoggle" style="margin-bottom:8px;display:flex;gap:6px">
+      <button data-eq="B" class="active">Breakout B</button>
+      <button data-eq="A">Breakout A</button>
+      <button data-eq="ALL">All</button>
+    </div>
+    <canvas id="equity" width="1200" height="240"></canvas>
+    <div class="sub" id="eqnote" style="margin-top:6px"></div>
+  </div>
+
+  <!-- 7. RECENT ACTIVITY -->
+  <h2>Recent activity</h2>
+  <div id="recent">Loading…</div>
+
+  <!-- 8. OPEN TRADES -->
+  <h2>Open trades <span class="sub">— entry geometry only · live P&amp;L not shown in V1</span></h2>
+  <div id="open">Loading…</div>
+
+  <!-- 9. EXEC QUALITY -->
+  <h2>Execution quality observer</h2>
+  <div id="exec">Loading…</div>
+
+  <!-- 10. SAMPLE QUALITY / BURST -->
+  <h2>Sample quality / correlated bursts</h2>
+  <div id="burst">Loading…</div>
+
+  <!-- 11. ERRORS / HEALTH -->
+  <h2>Errors / health</h2>
+  <div id="health">Loading…</div>
+
+  <!-- 12. ADVANCED DIAGNOSTICS (collapsed) -->
+  <h2>Advanced diagnostics</h2>
+  <div id="advanced">Loading…</div>
+
+  <div class="foot" id="foot"></div>
 </div>
 
-<div class="tab-panel active" id="panel-dashboard"><div id="dash-body">Loading…</div></div>
-<div class="tab-panel" id="panel-soakB"><div class="soak-col" id="col-B"><h3>Loading…</h3></div></div>
-<div class="tab-panel" id="panel-soakA"><div class="soak-col" id="col-A"><h3>Loading…</h3></div></div>
-<div class="tab-panel" id="panel-reports"><div id="reports-body">Loading…</div></div>
-<div class="tab-panel" id="panel-execq"><div id="execq-body">Loading…</div></div>
-
-<div id="footer">Last refresh: <span id="fetch-ts">…</span></div>
-
 <script>
-function fmt(x, dp=4, sign=false) {
-  if (x === null || x === undefined) return "—";
-  if (typeof x === "number") {
-    let s = x.toFixed(dp);
-    if (sign && x > 0) s = "+" + s;
-    return s;
+let LAST=null, EQ_VIEW="B";
+
+function fmt(x,dp){ if(x===null||x===undefined||(typeof x==="number"&&isNaN(x))) return '<span class="na">—</span>';
+  return (typeof x==="number")? x.toFixed(dp===undefined?2:dp) : String(x); }
+function sgn(x,dp){ if(x===null||x===undefined) return '<span class="na">—</span>';
+  return (x>=0?"+":"")+x.toFixed(dp===undefined?3:dp); }
+function pct(x){ return (x===null||x===undefined)?'<span class="na">—</span>':(x*100).toFixed(1)+"%"; }
+function pctR(x){ return (x===null||x===undefined)?'<span class="na">—</span>':x.toFixed(1)+"%"; }
+function pill(cls,txt){ return `<span class="pill lvl-${cls}">${txt}</span>`; }
+function dot(c){ return `<span class="dot ${c}"></span>`; }
+function ago(s){ if(s===null||s===undefined) return "—"; s=Math.round(s);
+  if(s<90) return s+"s"; if(s<5400) return Math.round(s/60)+"m"; if(s<172800) return Math.round(s/3600)+"h"; return Math.round(s/86400)+"d"; }
+
+// 1. STATUS BAR
+function renderStatusBar(s){
+  const o=s.overall||{level:"INFO",reasons:[]}; const p=s.processes||{};
+  const procDot=(x)=> x&&x.running? dot("green") : dot("red");
+  const line=(k,lbl)=>{const x=p[k]||{}; return `<span>${procDot(x)}${lbl} <span class="muted">(${x.pid??"—"} · ${x.status||"—"})</span></span>`;};
+  const lvlcls = o.level==="HEALTHY"?"green":o.level==="WARNING"?"yellow":"red";
+  document.getElementById("statusbar").innerHTML =
+    `<span class="bigpill lvl-${o.level}">${dot(lvlcls)}SYSTEM ${o.level}</span>`
+    + `<div class="procline">${line("FADE","Fade")} ${line("A","Breakout A")} ${line("B","Breakout B")}</div>`
+    + `<span style="margin-left:auto" class="sub mono">${s.db_read_only?"DB mode=ro ✓":"DB ?"} · `
+    + `${s.ts_utc} UTC · refresh 30s</span>`;
+}
+
+// 2. STRATEGY CARDS
+function strategyCard(title,mode,modeCls,body,statusPill){
+  return `<div class="card"><h3><span>${title}</span>${statusPill||""}</h3>`
+    + `<div class="kv"><span class="k">mode</span><span class="v">${pill(modeCls,mode)}</span></div>${body}</div>`;
+}
+function renderCards(s){
+  const p=s.processes||{}, soaks=s.soaks||{}, eq=s.exec_quality||{};
+  let html="";
+  // Fade — process status only, all perf "—" by design
+  const f=p.FADE||{};
+  html += strategyCard("Production Fade","LIVE","INFO",
+    `<div class="kv"><span class="k">PID</span><span class="v mono">${f.pid??"—"}</span></div>`
+    +`<div class="kv"><span class="k">process</span><span class="v">${f.running?"running":"stopped"}</span></div>`
+    +`<div class="kv"><span class="k">age</span><span class="v">${ago(f.age_seconds)}</span></div>`
+    +`<div class="kv"><span class="k">N / avg_R / R</span><span class="v na">— not available in V1</span></div>`
+    +`<div class="sub" style="margin-top:6px">Monitored separately (no signals.db read in V1).</div>`,
+    f.running?pill("running","RUNNING"):pill("stopped","STOPPED"));
+  // Soaks A + B
+  for(const k of ["A","B"]){
+    const so=soaks[k]||{}, m=so.metrics||{}, hb=so.soak_health||{}, pr=p[k]||{};
+    const vc=so.verdict_overall||"PENDING";
+    html += strategyCard("Breakout Soak "+k,"PAPER","INFO",
+      `<div class="kv"><span class="k">PID</span><span class="v mono">${pr.pid??hb.pid??"—"} ${pr.running?"":'<span class="err">stopped</span>'}</span></div>`
+      +`<div class="kv"><span class="k">open / closed</span><span class="v">${m.n_open??0} / ${m.n_closed??0}</span></div>`
+      +`<div class="kv"><span class="k">total R</span><span class="v">${sgn(m.sum_R)}</span></div>`
+      +`<div class="kv"><span class="k">last cycle</span><span class="v">${ago(hb.heartbeat_age_s)} ago</span></div>`
+      +`<div class="kv"><span class="k">last signal</span><span class="v mono" style="font-size:11px">${hb.last_signal_ts??"—"}</span></div>`
+      +`<div class="sub" style="margin-top:6px">${plainSoak(so)}</div>`,
+      pill(vc==="PASS"?"PASS":vc==="FAIL"?"FAIL":"PENDING",vc));
   }
-  return String(x);
+  // Exec quality observer
+  html += strategyCard("Execution Quality","OBSERVATION","INFO",
+    `<div class="kv"><span class="k">snapshots</span><span class="v">${eq.total??0}</span></div>`
+    +`<div class="kv"><span class="k">fetch ok / failed</span><span class="v">${eq.fetch_ok??0} / ${eq.fetch_failed??0}</span></div>`
+    +`<div class="kv"><span class="k">would_skip</span><span class="v">${eq.would_skip_count??0} (${eq.would_skip_rate==null?"—":eq.would_skip_rate+"%"})</span></div>`
+    +`<div class="kv"><span class="k">trade affected</span><span class="v ok" style="padding:0 6px;border-radius:4px">NO</span></div>`,
+    pill("INFO","OBSERVE"));
+  document.getElementById("cards").innerHTML=html;
 }
-function pill(status) {
-  const cls = status === "PASS" || status === "OK" ? "ok"
-            : status === "FAIL" || status === "STALE" || status === "DEAD" ? "fail"
-            : "pending";
-  return `<span class="status-pill ${cls}">${status||"—"}</span>`;
-}
-
-// Sanity-check flags — DISPLAY-ONLY annotations, NOT verdict-affecting.
-// 'crit' = potential geometry bug; 'warn' = soft sanity threshold breach.
-const FLAG_SEVERITY = {
-  // Direction/level inconsistencies — never should happen; geometry bug if so
-  "buy_sl_above_entry":  "crit",
-  "buy_tp1_below_entry": "crit",
-  "buy_tp2_below_entry": "crit",
-  "buy_tp3_below_entry": "crit",
-  "sell_sl_below_entry": "crit",
-  "sell_tp1_above_entry":"crit",
-  "sell_tp2_above_entry":"crit",
-  "sell_tp3_above_entry":"crit",
-  // Soft thresholds
-  "sl_too_wide":         "warn",
-  "tp1_rr_below_floor":  "warn",
-  // Tier-vs-outcome inconsistency — display-only, NEVER affects verdict.
-  // Under the F-exit-fix's BE-stop guard, a runner that hit TP2/TP3 cannot
-  // become a LOSS; if this flag fires, the stored flags disagree with the label.
-  "tier_outcome_inconsistent": "crit",
-  // TP1 hit but labelled LOSS — same class of inconsistency, milder (TP1 is
-  // the breakeven boundary). Display-only.
-  "tp1_hit_but_loss":          "crit",
-};
-function renderFlags(flags) {
-  if (!flags || flags.length === 0) return "";
-  return flags.map(f => `<span class="sanity-pill ${FLAG_SEVERITY[f]||'warn'}">${f}</span>`).join("");
+function plainSoak(so){
+  const m=so.metrics||{}, vc=so.verdict_overall;
+  if(so.error) return "DB error: "+so.error;
+  if((m.n_closed||0)===0) return "Running in paper mode. No closed trades yet.";
+  if(vc==="PENDING") return `Paper mode. ${m.n_closed}/30 closed — gate PENDING until n≥30.`;
+  if(vc==="FAIL") return "Gate FAIL on friction-adjusted basis — consistent with validated-negative.";
+  if(vc==="PASS") return "Gate PASS on friction-adjusted basis (review before any action).";
+  return "Paper mode.";
 }
 
-function renderSoak(s) {
-  if (!s) return "<h3>(no data)</h3>";
-  if (s.error) return `<h3>${s.label}</h3><div class="small">ERROR: ${s.error}</div>`;
-  const m = s.metrics || {};
-  const ge = s.gate_eval || {};
-  const hb = s.soak_health || {};
-  const tr = s.tracking || {};
-
-  const verdictClass = s.verdict_overall === "PASS" ? "verdict-pass"
-                       : s.verdict_overall === "FAIL" ? "verdict-fail"
-                       : "verdict-pending";
-
-  // Gate-row table.
-  // avg_R is GATED on the friction-adjusted value (honest basis); the clean avg_R the
-  // soak writes is shown alongside for reference so the verdict basis is unmistakable.
-  const rows = [
-    ["avg_R per closed", ge.avg_R, "≥ +0.40"],
-    ["Profit factor", ge.profit_factor, "≥ 2.0"],
-    ["WR (positive-R)", ge.win_rate, "≥ 58%"],
-    ["Max DD (R)", ge.max_drawdown, "≤ 20"],
-    ["Per-token blowup", ge.blowup, "no token ≤35%WR & <0R over ≥5"],
-  ];
-  let gateRowsHtml = rows.map(r => {
-    const v = r[1] || {};
-    let valStr = "—";
-    if (r[0] === "avg_R per closed") {
-      // friction-adjusted = the GATED value; clean shown in parentheses for reference
-      const adj = (v.value !== null && v.value !== undefined) ? fmt(v.value, 3, true) : "—";
-      const cln = (v.value_clean !== null && v.value_clean !== undefined) ? fmt(v.value_clean, 3, true) : "—";
-      const hc = (v.haircut !== null && v.haircut !== undefined) ? v.haircut : "—";
-      valStr = `${adj} <span class="small">friction-adj · clean ${cln} ×${hc}</span>`;
-    } else if (r[0] === "WR (positive-R)") {
-      valStr = v.value !== null && v.value !== undefined ? (v.value * 100).toFixed(1) + "%" : "—";
-    } else if (r[0] === "Per-token blowup") {
-      valStr = v.value === false ? "none" : v.value === true ? "FLAGGED" : "—";
-    } else {
-      valStr = v.value !== null && v.value !== undefined ? fmt(v.value, 3, r[0].startsWith("avg_R")) : "—";
-    }
-    return `<tr><td>${r[0]}</td><td>${valStr}</td><td class="small">${r[2]}</td><td>${pill(v.status||"PENDING")}</td></tr>`;
-  }).join("");
-  const gateBasisNote = `<div class="small" style="margin:4px 0 8px;color:#d29922">`
-    + `Gate evaluated on friction-adjusted basis (honest). Clean avg_R shown for reference.`
-    + `</div>`;
-
-  // Open table — DETAILED: entry / SL / TP1-3 prices, distances, R:R, sanity flags
-  // PLUS TradingView mapping helpers (pair symbol, opened UTC, expires UTC)
-  // so the operator can locate the exact 5M entry candle on TV with UTC clock.
-  const openHtml = (s.open || []).length
-    ? `<table><thead><tr>
-         <th>id</th><th>tok</th><th>TV symbol</th><th>dir</th>
-         <th>opened (UTC)</th><th>expires (UTC)</th><th>age</th>
-         <th>entry</th><th>SL</th><th>TP1</th><th>TP2</th><th>TP3</th>
-         <th>SL %</th><th>TP1 %</th><th>TP2 %</th><th>TP3 %</th>
-         <th>R:R TP1</th><th>R:R TP2</th><th>R:R TP3</th>
-         <th>entry_type</th><th>flags</th>
-       </tr></thead><tbody>` +
-       s.open.map(o => {
-         const flagsHtml = renderFlags(o.sanity_flags);
-         const rowCls = (o.sanity_flags && o.sanity_flags.length) ? "sanity-warn" : "";
-         const tvSymbol = `BINANCE:${o.token}USDT`;
-         // Tier-progression tints — DISPLAY-ONLY. Computed server-side per render
-         // by walking 5m bars under the BE-after-TP1 model (see _compute_open_
-         // tier_status). null = fetch failed / no tier data → no tint.
-         const tp1Cls = (o.tp1_hit === 1) ? "tp1-hit" : "";
-         const tp2Cls = (o.tp2_hit === 1) ? "tp2-hit" : "";
-         const tp3Cls = (o.tp3_hit === 1) ? "tp3-hit" : "";
-         return `<tr class="${rowCls}"><td>#${o.id}</td><td>${o.token}</td>` +
-                `<td class="mono small tv-symbol">${tvSymbol}</td>` +
-                `<td>${o.direction}</td>` +
-                `<td class="mono small">${o.opened_ts ?? "—"}</td>` +
-                `<td class="mono small">${o.expires_at ?? "—"}</td>` +
-                `<td>${o.age_minutes ?? "—"}m</td>` +
-                `<td class="mono">${fmt(o.entry_price,6)}</td>` +
-                `<td class="mono">${fmt(o.sl,6)}</td>` +
-                `<td class="mono ${tp1Cls}">${fmt(o.tp1,6)}</td>` +
-                `<td class="mono ${tp2Cls}">${fmt(o.tp2,6)}</td>` +
-                `<td class="mono ${tp3Cls}">${fmt(o.tp3,6)}</td>` +
-                `<td class="mono">${fmt(o.sl_dist_pct,3)}%</td>` +
-                `<td class="mono">${fmt(o.tp1_dist_pct,3)}%</td>` +
-                `<td class="mono">${fmt(o.tp2_dist_pct,3)}%</td>` +
-                `<td class="mono">${fmt(o.tp3_dist_pct,3)}%</td>` +
-                `<td class="mono">${fmt(o.rr_tp1,2)}</td>` +
-                `<td class="mono">${fmt(o.rr_tp2,2)}</td>` +
-                `<td class="mono">${fmt(o.rr_tp3,2)}</td>` +
-                `<td class="small">${o.entry_type ?? "—"}</td>` +
-                `<td>${flagsHtml}</td></tr>`;
-       }).join("") +
-       `</tbody></table>`
-    : '<div class="small">(no open positions)</div>';
-
-  // Per-token table
-  const ptHtml = (s.per_token || []).length
-    ? `<table><thead><tr><th>token</th><th>n</th><th>WR</th><th>avg R</th><th>sum R</th><th>flag</th></tr></thead><tbody>` +
-       s.per_token.map(t => `<tr class="${t.blowup?'blowup':''}"><td>${t.token}</td><td>${t.n}</td>` +
-                            `<td>${(t.wr*100).toFixed(1)}%</td><td>${fmt(t.avg_R,3,true)}</td>` +
-                            `<td>${fmt(t.sum_R,2,true)}</td><td>${t.blowup?'⚠':''}</td></tr>`).join("") +
-       `</tbody></table>`
-    : '<div class="small">(empty)</div>';
-
-  // Per-session table — OBSERVATIONAL / tracking-only. NOT a gate criterion.
-  // Session derived live from each closed signal's opened UTC timestamp.
-  const psHtml = (s.per_session || []).length
-    ? `<table><thead><tr><th>session (UTC)</th><th>n</th><th>WR</th><th>avg R</th><th>sum R</th><th>PF</th></tr></thead><tbody>` +
-       s.per_session.map(t => `<tr><td>${t.session}</td><td>${t.n}</td>` +
-                            `<td>${(t.wr*100).toFixed(1)}%</td><td>${fmt(t.avg_R,3,true)}</td>` +
-                            `<td>${fmt(t.sum_R,2,true)}</td><td>${t.pf==null?'∞':t.pf.toFixed(2)}</td></tr>`).join("") +
-       `</tbody></table>`
-    : '<div class="small">(empty)</div>';
-
-  // Closed table — DETAILED: entry / SL / TP1-3 + distances + sanity flags.
-  // Show ALL closed rows newest-first, wrapped in a fixed-height scroll
-  // container so the page doesn't grow unbounded as n accumulates. DB query
-  // already returns all CLOSED rows for this source; we just reverse here.
-  // At soak signal frequency (~tens per week) the all-rows fetch + render
-  // stays sub-100ms — pagination would only matter past a few hundred rows.
-  const recentClosed = (s.closed || []).slice().reverse();
-  const closedHtml = recentClosed.length
-    ? `<table><thead><tr>
-         <th>id</th><th>tok</th><th>dir</th>
-         <th>outcome</th><th>R</th>
-         <th>entry</th><th>SL</th><th>TP1</th><th>TP2</th><th>TP3</th>
-         <th>SL %</th><th>TP1 %</th><th>TP2 %</th><th>TP3 %</th>
-         <th>R:R TP1</th>
-         <th>opened</th><th>closed</th>
-         <th>flags</th>
-       </tr></thead><tbody>` +
-       recentClosed.map(c => {
-         // DISPLAY-ONLY outcome color-coding. Color is ADDITIVE — the text label
-         // (WIN / PARTIAL_TP2 / ...) is always present. Does NOT affect verdict.
-         const OUTCOME_CELL_CLS = {
-           "WIN":            "outcome-win",
-           "PARTIAL_TP2":    "outcome-partial2",
-           "PARTIAL_TP2_BE": "outcome-partial1",
-           "PARTIAL_TP1":    "outcome-partial1",
-           "LOSS":           "outcome-loss",
-           "EXPIRED":        "outcome-expired",
-         };
-         const OUTCOME_ROW_CLS = {
-           "WIN":            "row-win",
-           "PARTIAL_TP2":    "row-partial2",
-           "PARTIAL_TP2_BE": "row-partial1",
-           "PARTIAL_TP1":    "row-partial1",
-           "LOSS":           "row-loss",
-           "EXPIRED":        "row-expired",
-         };
-         const outcomeCellCls = OUTCOME_CELL_CLS[c.result] || "";
-         const outcomeRowCls  = OUTCOME_ROW_CLS[c.result] || "";
-         // Legacy generic "win"/"loss" class for compat with existing td.outcome rule
-         const legacyCls = (c.result==="WIN"||c.result==="PARTIAL_TP2"||c.result==="PARTIAL_TP2_BE") ? "win"
-                   : (c.result==="LOSS") ? "loss" : "";
-         const flagsHtml = renderFlags(c.sanity_flags);
-         const rowCls = [outcomeRowCls, legacyCls,
-                          (c.sanity_flags && c.sanity_flags.length) ? "sanity-warn" : ""
-                         ].filter(Boolean).join(" ");
-         // R-value tint (secondary cue, NEVER replaces the numeric)
-         const r = c.realized_r;
-         const rCls = (r > 0) ? "r-positive" : (r < 0) ? "r-negative" : "r-zero";
-         // Tier-progression background tints — DISPLAY-ONLY. Read tp{1,2,3}_hit
-         // from the results table verbatim. The TP{1,2,3} PRICE cells are tinted
-         // green if that tier was reached; neutral if not. Same green shades as
-         // the outcome label cells (light → medium → strong). Price numbers stay
-         // visible; only the cell background changes. Does NOT enter gate math
-         // or verdict logic.
-         const tp1Cls = (c.tp1_hit === 1) ? "tp1-hit" : "";
-         const tp2Cls = (c.tp2_hit === 1) ? "tp2-hit" : "";
-         const tp3Cls = (c.tp3_hit === 1) ? "tp3-hit" : "";
-         return `<tr class="${rowCls}"><td>#${c.sid}</td><td>${c.token}</td><td>${c.direction}</td>` +
-                `<td class="outcome ${outcomeCellCls}">${c.result}</td>` +
-                `<td class="${rCls}">${fmt(r,3,true)}</td>` +
-                `<td class="mono">${fmt(c.entry_price,6)}</td>` +
-                `<td class="mono">${fmt(c.sl,6)}</td>` +
-                `<td class="mono ${tp1Cls}">${fmt(c.tp1,6)}</td>` +
-                `<td class="mono ${tp2Cls}">${fmt(c.tp2,6)}</td>` +
-                `<td class="mono ${tp3Cls}">${fmt(c.tp3,6)}</td>` +
-                `<td class="mono">${fmt(c.sl_dist_pct,3)}%</td>` +
-                `<td class="mono">${fmt(c.tp1_dist_pct,3)}%</td>` +
-                `<td class="mono">${fmt(c.tp2_dist_pct,3)}%</td>` +
-                `<td class="mono">${fmt(c.tp3_dist_pct,3)}%</td>` +
-                `<td class="mono">${fmt(c.rr_tp1,2)}</td>` +
-                `<td class="mono small">${c.opened_ts ?? "—"}</td>` +
-                `<td class="mono small">${c.closed_at ?? "—"}</td>` +
-                `<td>${flagsHtml}</td></tr>`;
-       }).join("") +
-       `</tbody></table>`
-    : '<div class="small">(no closed signals yet)</div>';
-
-  // Drift (sample max ~20 pts)
-  const drift = s.drift || [];
-  const stride = Math.max(1, Math.floor(drift.length / 12));
-  const driftPts = drift.filter((d, i) => i === drift.length-1 || i % stride === 0);
-  const driftHtml = driftPts.length
-    ? `<table><tr><th>n</th><th>cum R</th><th>cum avg R</th></tr>` +
-      driftPts.map(p => `<tr><td>${p.n}</td><td>${fmt(p.cum_R,2,true)}</td><td>${fmt(p.cum_avg_R,3,true)}</td></tr>`).join("") + `</table>`
-    : '<div class="small">(none)</div>';
-
-  // Heartbeat
-  const hbCls = hb.status === "OK" ? "hb-ok" : hb.status === "STALE" ? "hb-stale" : "hb-dead";
-
-  return `
-    <h3>${s.label} <span class="status-pill ${s.verdict_overall==='PASS'?'ok':s.verdict_overall==='FAIL'?'fail':'pending'}">${s.verdict_overall}</span></h3>
-    <div class="sublabel">source: <code>${s.soak_label}</code> · ref friction avg_R = +${(s.ref_avg_R||0).toFixed(3)} <span class="small">(${s.ref_source})</span></div>
-
-    <div class="row">
-      <div class="card"><div class="label">Closed</div><div class="value">${m.n_closed ?? 0}</div><div class="threshold">target ≥ 30</div></div>
-      <div class="card"><div class="label">Open</div><div class="value">${m.n_open ?? 0}</div><div class="threshold">in market</div></div>
-      <div class="card"><div class="label">Progress</div><div class="value">${(m.progress_pct ?? 0).toFixed(0)}%</div><div class="threshold">${m.n_closed ?? 0} / 30</div></div>
-      <div class="card"><div class="label">Verdict</div><div class="value ${verdictClass}">${s.verdict_overall}</div><div class="threshold">PENDING until n≥30</div></div>
-    </div>
-
-    <h2>Locked thresholds vs observed</h2>
-    ${gateBasisNote}
-    <div class="wr-note">WR definition: <b>positive-R-close rate</b> — counts any close with realized_R&nbsp;&gt;&nbsp;0 (WIN, PARTIAL_TP2, AND PARTIAL_TP1_BE since the BE-stop runner pays only friction and stays positive). LOSS, EXPIRED, and rare R&nbsp;≤&nbsp;0 PARTIAL_TP1 (extreme-friction edge cases) are NOT wins. Threshold derived 2026-06-03 from the original 11pp buffer below the new BE-after-TP1 model backtest WR (avg 69.4%); see <code>PHASE_C_FULL_AUDIT_V2.md §7.3</code>.</div>
-    <table>
-      <thead><tr><th>Criterion</th><th>Observed</th><th>Threshold</th><th>Status</th></tr></thead>
-      <tbody>${gateRowsHtml}</tbody>
-    </table>
-
-    <div class="tracking">
-      <div class="label">Tracking-only (NOT in verdict)</div>
-      <div class="row" style="margin-top:6px;margin-bottom:0">
-        <div class="card" style="background:transparent;border:1px solid #4a3a10"><div class="label">sum_R</div><div class="value">${fmt(tr.sum_R,2,true)}</div></div>
-        <div class="card" style="background:transparent;border:1px solid #4a3a10"><div class="label">R / day</div><div class="value">${fmt(tr.R_per_day,3,true)}</div></div>
-        <div class="card" style="background:transparent;border:1px solid #4a3a10"><div class="label">Days elapsed</div><div class="value">${fmt(tr.days_elapsed,1)}</div></div>
-        <div class="card" style="background:transparent;border:1px solid #4a3a10"><div class="label">Friction-on ref</div><div class="value">+${(tr.ref_avg_R_friction||0).toFixed(3)}</div></div>
-      </div>
-    </div>
-
-    <h2>Soak health</h2>
-    <div class="row">
-      <div class="card"><div class="label">PID</div><div class="value">${hb.pid ?? "—"}</div></div>
-      <div class="card"><div class="label">Cycle</div><div class="value">${hb.cycle ?? "—"}</div></div>
-      <div class="card"><div class="label">Heartbeat age</div><div class="value ${hbCls}">${hb.heartbeat_age_s !== undefined ? hb.heartbeat_age_s + "s" : "—"}</div></div>
-      <div class="card"><div class="label">Last signal</div><div class="value mono" style="font-size:11px">${hb.last_signal_ts ?? "(none)"}</div></div>
-    </div>
-
-    <h2>n-vs-expectancy drift</h2>
-    ${driftHtml}
-
-    <h2>Per-token</h2>
-    ${ptHtml}
-
-    <h2>Per-session <span class="small">— OBSERVATIONAL tracking only, NOT a gate criterion</span></h2>
-    <div class="sanity-info">Session is tagged from each signal's <b>opened UTC</b> time (ASIAN 00–08, LONDON 08–13, LONDON_NY_OVERLAP 13–16, NY 16–21, LATE_US 21–24). This table is <b>display-only</b> — it does <b>NOT</b> enter the gate verdict (gate stays avg_R≥0.40, WR≥0.58, PF≥2.0, maxDD≤20R, n≥30). One-day samples are dominated by correlated bursts; session patterns need <b>many days</b> of accumulation before they mean anything. Do not exclude any session based on early data.</div>
-    ${psHtml}
-
-    <h2>Open positions <span class="small">— entry / SL / TP geometry + TradingView mapping</span></h2>
-    <div class="tv-hint">TradingView mapping: paste the <b>TV symbol</b> column into TV's symbol search, set the chart timeframe to <b>5M</b> (signal entry TF), and set the chart's <b>timezone to UTC</b>. The <b>opened (UTC)</b> column is the entry candle's open time; scroll to it and draw SL / TP1 / TP2 / TP3 horizontal lines at the listed prices. The <b>expires (UTC)</b> column is the 48-hour deadline.</div>
-    <div class="sanity-info">Sanity flags (right column) are <b>display-only</b> — they do <b>NOT</b> affect the locked verdict. Thresholds: SL ≤ 3.0%, TP1 R:R ≥ 1.3, direction/level consistency.</div>
-    ${openHtml}
-
-    <h2>Recent closed (${(s.closed || []).length} total) <span class="small">— with geometry, newest first</span></h2>
-    <div class="closed-scroll">${closedHtml}</div>
-  `;
+// 3. DECISION PANEL
+function renderDecision(s){
+  const o=s.overall||{}, soaks=s.soaks||{}, eq=s.exec_quality||{};
+  let msgs=[], action="OBSERVE ONLY — no live arming.", cls=o.level||"HEALTHY";
+  // process health
+  if(o.level==="ERROR"){ action="INVESTIGATE — a monitored process is down or DB read failed."; }
+  else if(o.level==="WARNING"){ action="CHECK — a process or heartbeat needs attention; data may be stale."; }
+  // gate framing
+  const verds=["A","B"].map(k=>(soaks[k]||{}).verdict_overall);
+  const nB=((soaks.B||{}).metrics||{}).n_closed||0, nA=((soaks.A||{}).metrics||{}).n_closed||0;
+  if(verds.every(v=>v==="PENDING")){
+    msgs.push(`Breakout soaks running in paper mode. Gate PENDING (A n=${nA}, B n=${nB}; need n≥30 closed each).`);
+    msgs.push("On the friction-adjusted (honest) basis the backtest avg_R is below +0.40 — consistent with the validated-negative finding. Action: observe only; no live arming.");
+  } else if(verds.includes("FAIL")){
+    msgs.push("At least one breakout soak reads FAIL on the friction-adjusted basis — consistent with the validated-negative conclusion. No live arming.");
+  } else if(verds.includes("PASS")){
+    msgs.push("A breakout soak reads PASS on the friction-adjusted basis. Review the gate table + sample quality before considering anything; this dashboard does not arm anything.");
+  }
+  // exec quality
+  const tot=eq.total||0;
+  if(tot===0) msgs.push("Exec-quality logging active but no snapshots yet (first row appears on the next breakout signal).");
+  else if(tot<30) msgs.push(`Exec-quality logging active; ${tot} snapshot(s) so far — too few for analysis yet (need n≥30–60).`);
+  else msgs.push(`Exec-quality has ${tot} snapshots (would_skip ${eq.would_skip_rate??"—"}%). Ready for a separate would_skip-vs-outcome analysis.`);
+  document.getElementById("decision").innerHTML =
+    `<div class="panel decision ${cls}">`
+    + msgs.map(m=>`<div>• ${m}</div>`).join("")
+    + `<div class="action">Recommended: ${action}</div></div>`;
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// DASHBOARD + REPORTS — display-only. The locked gate VERDICT always comes
-// from the server (gate_eval / verdict_overall); these views only DISPLAY it.
-// ═══════════════════════════════════════════════════════════════════════
-const OUTCOME_COLORS = { WIN:"#1a5b1a", PARTIAL_TP2:"#4ade80", PARTIAL_TP2_BE:"#86efac", PARTIAL_TP1:"#86efac", LOSS:"#7f1d1d", EXPIRED:"#374151" };
-const DIR_COLORS = { BUY:"#1f6feb", SELL:"#d29922" };
-const SESSION_COLORS = { ASIAN:"#8957e5", LONDON:"#1f6feb", LONDON_NY_OVERLAP:"#2ea043", NY:"#db6d28", LATE_US:"#6e7681", UNKNOWN:"#484f58" };
-let LAST_STATE = null;
-let DASH_SOAK = "B";   // Soak B = PRIMARY default
-let DASH_RANGE = "ALL";
-
-function clsOf(v){ return v==="PASS"?"pass":v==="FAIL"?"fail":"pending"; }
-function tsToMs(t){ if(!t) return null; const p=String(t).replace(" ","T")+"Z"; const d=Date.parse(p); return isNaN(d)?null:d; }
-
-function filterByRange(arr, range){
-  if(range==="ALL") return arr;
-  const days = range==="30D"?30:90;
-  const cut = Date.now() - days*86400000;
-  return arr.filter(c => { const ms=tsToMs(c.closed_at); return ms===null||ms>=cut; });
+// 4. GATE CHECKLIST
+function gcell(ge){ if(!ge) return '<span class="na">—</span>';
+  const st=ge.status||"PENDING";
+  return pill(st==="PASS"?"PASS":st==="FAIL"?"FAIL":"PENDING",st); }
+function renderGate(s){
+  const A=s.soaks.A||{}, B=s.soaks.B||{};
+  const gA=A.gate_eval||{}, gB=B.gate_eval||{}, mA=A.metrics||{}, mB=B.metrics||{};
+  const nrow=(lbl,req,va,vb,sa,sb)=>`<tr><td>${lbl}</td><td>${req}</td>`
+    +`<td class="num">${va}</td><td>${gcell(sa)}</td>`
+    +`<td class="num">${vb}</td><td>${gcell(sb)}</td></tr>`;
+  const avgCell=(g)=> g.avg_R? `${sgn(g.avg_R.value)} <span class="sub">(clean ${sgn(g.avg_R.value_clean)} ×${g.avg_R.haircut})</span>` : "—";
+  const nstat=(m)=>({status:(m.n_closed||0)>=30?"PASS":"PENDING"});
+  let html=`<div class="warnbox">avg_R gate is evaluated on the FRICTION-ADJUSTED value (clean × friction/clean haircut), so the live verdict matches the honest validated-negative conclusion. Clean avg_R shown for reference.</div>`;
+  html+=`<table><thead><tr><th>Metric</th><th>Required</th><th class="num">Soak A</th><th>A</th><th class="num">Soak B</th><th>B</th></tr></thead><tbody>`;
+  html+=nrow("Closed signals","n ≥ 30",mA.n_closed??0,mB.n_closed??0,nstat(mA),nstat(mB));
+  html+=nrow("avg_R (friction-adj)","≥ +0.40",avgCell(gA),avgCell(gB),gA.avg_R,gB.avg_R);
+  html+=nrow("Win rate","≥ 58%",pctR((gA.win_rate||{}).value*100),pctR((gB.win_rate||{}).value*100),gA.win_rate,gB.win_rate);
+  html+=nrow("Profit factor","≥ 2.0",fmt((gA.profit_factor||{}).value),fmt((gB.profit_factor||{}).value),gA.profit_factor,gB.profit_factor);
+  html+=nrow("Max drawdown","≤ 20 R",fmt((gA.max_drawdown||{}).value),fmt((gB.max_drawdown||{}).value),gA.max_drawdown,gB.max_drawdown);
+  html+=nrow("DSR","live ≥ 0.95",'<span class="na">— not live-computed</span>','<span class="na">— not live-computed</span>',null,null);
+  html+=nrow("Burst warning","no large burst",burstFlag(A),burstFlag(B),burstStat(A),burstStat(B));
+  html+=`</tbody></table>`;
+  html+=`<div class="grid g2" style="margin-top:10px">`
+    +`<div class="card"><h3>Soak A verdict ${pill(A.verdict_overall==="PASS"?"PASS":A.verdict_overall==="FAIL"?"FAIL":"PENDING",A.verdict_overall||"PENDING")}</h3><div class="sub">${plainSoak(A)}</div></div>`
+    +`<div class="card"><h3>Soak B verdict ${pill(B.verdict_overall==="PASS"?"PASS":B.verdict_overall==="FAIL"?"FAIL":"PENDING",B.verdict_overall||"PENDING")}</h3><div class="sub">${plainSoak(B)}</div></div></div>`;
+  document.getElementById("gate").innerHTML=html;
 }
-function computeKPIs(arr){
-  const n=arr.length; let wins=0,sum=0,gp=0,gl=0,best=null,worst=null,cum=0,peak=0,mdd=0;
-  for(const c of arr){ const r=c.realized_r||0; sum+=r; if(r>0){wins++;gp+=r;} if(r<0)gl+=Math.abs(r);
-    if(best===null||r>best)best=r; if(worst===null||r<worst)worst=r;
-    cum+=r; if(cum>peak)peak=cum; if(peak-cum>mdd)mdd=peak-cum; }
-  const pf = gl>0 ? gp/gl : (gp>0?null:0);   // null => no losses yet => "n/a"
-  return { n, wins, wr:n?wins/n:0, sum_R:sum, pf, noLoss:gl<=0&&gp>0, avg_R:n?sum/n:0, best, worst, maxDD:mdd };
+function burstFlag(so){ const d=so.dashboard||{}; const b=(d.bursts||[]).length; return b?`${b} burst(s)`:"none"; }
+function burstStat(so){ const d=so.dashboard||{}; const big=(d.bursts||[]).some(x=>x.big); return {status: big?"PENDING":"PASS"}; }
+
+// 5. PERFORMANCE SUMMARY
+function renderPerf(s){
+  const rows=[];
+  const f=s.processes.FADE||{};
+  rows.push(`<tr><td>Production Fade</td><td>${pill("INFO","LIVE")}</td>`
+    +`<td class="num na">—</td><td class="num na">—</td><td class="num na">—</td><td class="num na">—</td>`
+    +`<td class="num na">—</td><td class="num na">—</td><td class="num na">—</td>`
+    +`<td>${f.running?pill("running","running"):pill("stopped","stopped")}</td></tr>`);
+  for(const k of ["A","B"]){
+    const so=s.soaks[k]||{}, m=so.metrics||{}, g=so.gate_eval||{};
+    const avg = g.avg_R? `${sgn(g.avg_R.value)} <span class="sub">clean ${sgn(g.avg_R.value_clean)}</span>` : sgn(m.avg_R);
+    rows.push(`<tr><td>Breakout ${k}</td><td>${pill("INFO","PAPER")}</td>`
+      +`<td class="num">${m.n_closed??0}</td><td class="num">${avg}</td>`
+      +`<td class="num">${sgn(m.sum_R)}</td><td class="num">${pct(m.win_rate)}</td>`
+      +`<td class="num">${fmt(m.profit_factor)}</td><td class="num">${fmt(m.max_drawdown_R)}</td>`
+      +`<td class="num">${m.n_open??0}</td>`
+      +`<td>${pill(so.verdict_overall==="PASS"?"PASS":so.verdict_overall==="FAIL"?"FAIL":"PENDING",so.verdict_overall||"PENDING")}</td></tr>`);
+  }
+  document.getElementById("perf").innerHTML=
+    `<div class="scroll"><table><thead><tr><th>Strategy</th><th>Mode</th><th class="num">N</th>`
+    +`<th class="num">avg_R</th><th class="num">sum_R</th><th class="num">WR</th><th class="num">PF</th>`
+    +`<th class="num">maxDD</th><th class="num">Open</th><th>Status</th></tr></thead><tbody>${rows.join("")}</tbody></table></div>`
+    +`<div class="sub" style="margin-top:6px">Breakout avg_R shows friction-adjusted (gated) with clean below. Fade metrics are not available in V1 (no signals.db read).</div>`;
 }
 
-// ── inline-SVG charts (no external deps) ────────────────────────────────
-function svgDonut(segs, size){
-  size=size||120; const r=size/2-10, cx=size/2, cy=size/2, C=2*Math.PI*r;
-  const total=segs.reduce((a,s)=>a+s.value,0);
-  if(total<=0) return `<div class="small">(no data)</div>`;
-  let off=0, circles="";
-  for(const s of segs){ if(s.value<=0) continue; const len=C*s.value/total;
-    circles += `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${s.color}" stroke-width="14" `+
-               `stroke-dasharray="${len.toFixed(2)} ${(C-len).toFixed(2)}" stroke-dashoffset="${(-off).toFixed(2)}" `+
-               `transform="rotate(-90 ${cx} ${cy})"></circle>`; off+=len; }
-  return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${circles}`+
-         `<text x="${cx}" y="${cy+4}" text-anchor="middle" fill="#e6edf3" font-size="14" font-weight="700">${total}</text></svg>`;
-}
-function legend(segs){ return `<div class="legend">`+segs.filter(s=>s.value>0).map(s=>
-  `<span class="lg"><span class="sw" style="background:${s.color}"></span>${s.label} ${s.value}</span>`).join("")+`</div>`; }
-
-function svgLine(series, opts){
-  // series: [{pts:[{x,y}], color, dots:bool, dotColorFn?}] ; opts:{w,h,refs:[{y,color,label}],ymin,ymax}
-  const w=opts.w||520, h=opts.h||180, pl=42, pr=12, pt=12, pb=22;
-  let ys=[], xs=[];
-  series.forEach(s=>s.pts.forEach(p=>{ys.push(p.y);xs.push(p.x);}));
-  (opts.refs||[]).forEach(r=>ys.push(r.y));
-  if(!ys.length) return `<div class="small">(no data)</div>`;
-  let ymin=opts.ymin!==undefined?opts.ymin:Math.min(...ys), ymax=opts.ymax!==undefined?opts.ymax:Math.max(...ys);
-  if(ymin===ymax){ymin-=1;ymax+=1;} const xmin=Math.min(...xs), xmax=Math.max(...xs)||1;
-  const X=x=>pl+(xmax===xmin?0:(x-xmin)/(xmax-xmin))*(w-pl-pr);
-  const Y=y=>pt+(1-(y-ymin)/(ymax-ymin))*(h-pt-pb);
-  let svg=`<svg width="100%" viewBox="0 0 ${w} ${h}" preserveAspectRatio="xMidYMid meet">`;
+// 6. EQUITY CHART
+function eqSeries(so){ return ((so.dashboard||{}).equity_series||[]).map(p=>p.cum_R); }
+function renderEquity(s){
+  const cv=document.getElementById("equity"), ctx=cv.getContext("2d");
+  const W=cv.width=cv.clientWidth*2, H=cv.height=480; ctx.scale(1,1);
+  ctx.clearRect(0,0,W,H);
+  const sets=[];
+  if(EQ_VIEW==="A"||EQ_VIEW==="ALL") sets.push({d:eqSeries(s.soaks.A),c:"#58a6ff",n:"A"});
+  if(EQ_VIEW==="B"||EQ_VIEW==="ALL") sets.push({d:eqSeries(s.soaks.B),c:"#3fb950",n:"B"});
+  let allv=[].concat(...sets.map(x=>x.d));
+  const note=document.getElementById("eqnote");
+  if(!allv.length){ ctx.fillStyle="#6e7681"; ctx.font="24px sans-serif";
+    ctx.fillText("No closed trades yet — equity curve appears as trades close.",30,H/2);
+    note.textContent=""; return; }
+  const maxN=Math.max(...sets.map(x=>x.d.length),1);
+  let lo=Math.min(0,...allv), hi=Math.max(0,...allv); if(hi===lo)hi=lo+1;
+  const pad=44, x=(i)=>pad+(W-2*pad)*(maxN<=1?0.5:i/(maxN-1)), y=(v)=>H-pad-(H-2*pad)*(v-lo)/(hi-lo);
   // zero line
-  if(ymin<0&&ymax>0){ svg+=`<line x1="${pl}" y1="${Y(0)}" x2="${w-pr}" y2="${Y(0)}" stroke="#30363d" stroke-dasharray="2 2"></line>`; }
-  // ref lines
-  (opts.refs||[]).forEach(r=>{ svg+=`<line x1="${pl}" y1="${Y(r.y)}" x2="${w-pr}" y2="${Y(r.y)}" stroke="${r.color}" stroke-dasharray="4 3"></line>`+
-    `<text x="${w-pr}" y="${Y(r.y)-3}" text-anchor="end" fill="${r.color}" font-size="9">${r.label}</text>`; });
-  // y axis labels
-  svg+=`<text x="4" y="${Y(ymax)+4}" fill="#6e7681" font-size="9">${ymax.toFixed(2)}</text>`+
-       `<text x="4" y="${Y(ymin)+4}" fill="#6e7681" font-size="9">${ymin.toFixed(2)}</text>`;
-  series.forEach(s=>{ if(!s.pts.length) return;
-    const d=s.pts.map((p,i)=>`${i?'L':'M'}${X(p.x).toFixed(1)} ${Y(p.y).toFixed(1)}`).join(" ");
-    svg+=`<path d="${d}" fill="none" stroke="${s.color}" stroke-width="1.8"></path>`;
-    if(s.dots){ s.pts.forEach(p=>{ const c=s.dotColorFn?s.dotColorFn(p):s.color; if(!c) return;
-      svg+=`<circle cx="${X(p.x).toFixed(1)}" cy="${Y(p.y).toFixed(1)}" r="${p.big?3.5:2}" fill="${c}"></circle>`; }); }
-  });
-  return svg+`</svg>`;
-}
-function svgBars(items, opts){
-  // items:[{label,value,color?}] ; pos green / neg red default
-  const w=opts.w||520, h=opts.h||160, pl=36, pr=10, pt=10, pb=40;
-  if(!items.length) return `<div class="small">(no data)</div>`;
-  const vals=items.map(i=>i.value); let vmax=Math.max(0,...vals), vmin=Math.min(0,...vals);
-  if(vmax===vmin){vmax+=1;vmin-=1;} const Y=v=>pt+(1-(v-vmin)/(vmax-vmin))*(h-pt-pb);
-  const bw=(w-pl-pr)/items.length*0.66, gap=(w-pl-pr)/items.length;
-  let svg=`<svg width="100%" viewBox="0 0 ${w} ${h}" preserveAspectRatio="xMidYMid meet">`;
-  svg+=`<line x1="${pl}" y1="${Y(0)}" x2="${w-pr}" y2="${Y(0)}" stroke="#30363d"></line>`;
-  items.forEach((it,i)=>{ const x=pl+i*gap+gap*0.17; const y0=Y(0),y1=Y(it.value);
-    const col=it.color||(it.value>=0?"#3fb950":"#f85149");
-    svg+=`<rect x="${x.toFixed(1)}" y="${Math.min(y0,y1).toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.abs(y1-y0).toFixed(1)}" fill="${col}"></rect>`+
-         `<text x="${(x+bw/2).toFixed(1)}" y="${(it.value>=0?y1-3:y1+10).toFixed(1)}" text-anchor="middle" fill="#c9d1d9" font-size="9">${fmt(it.value,2,true)}</text>`+
-         `<text x="${(x+bw/2).toFixed(1)}" y="${h-pb+12}" text-anchor="middle" fill="#7d8590" font-size="8" transform="rotate(20 ${(x+bw/2).toFixed(1)} ${h-pb+12})">${it.label}</text>`; });
-  return svg+`</svg>`;
+  ctx.strokeStyle="#30363d"; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(pad,y(0)); ctx.lineTo(W-pad,y(0)); ctx.stroke();
+  ctx.fillStyle="#8b949e"; ctx.font="20px sans-serif"; ctx.fillText("0R",6,y(0)+6);
+  ctx.fillText(hi.toFixed(1)+"R",6,y(hi)+14); ctx.fillText(lo.toFixed(1)+"R",6,y(lo)-2);
+  for(const set of sets){
+    if(!set.d.length) continue;
+    ctx.strokeStyle=set.c; ctx.lineWidth=3; ctx.beginPath();
+    set.d.forEach((v,i)=>{ const px=x(i),py=y(v); i?ctx.lineTo(px,py):ctx.moveTo(px,py); });
+    ctx.stroke();
+  }
+  note.innerHTML = sets.map(x=>`<span style="color:${x.c}">●</span> Soak ${x.n} (${x.d.length} closes, end ${x.d.length?sgn(x.d[x.d.length-1]):"—"}R)`).join("  ·  ");
 }
 
-function dashSoakBlock(s){
-  if(!s||s.error) return `<div class="small">Soak ${s?s.label:''}: ${s&&s.error?s.error:'no data'}</div>`;
-  const dash=s.dashboard||{}, ge=s.gate_eval||{}, bref=s.backtest_ref||{};
-  const allClosed=s.closed||[];
-  const arr=filterByRange(allClosed, DASH_RANGE);
-  const k=computeKPIs(arr);
-  const v=s.verdict_overall||"PENDING", vc=clsOf(v);
-  const ref=(bref.avg_R||s.ref_avg_R||0).toFixed(4);
-  const indep=dash.independent_event_count!=null?dash.independent_event_count:"?";
-  const days=(s.tracking&&s.tracking.days_elapsed!=null)?s.tracking.days_elapsed:"?";
-  // KPI cards — values reflect the selected range; gate pills are the SERVER-side
-  // locked-verdict statuses (full sample), shown only when range = ALL.
-  const showPills = (DASH_RANGE==="ALL");
-  const pfStr = k.pf===null?`n/a`:fmt(k.pf,2);
-  const cardsHtml = `<div class="kpi-grid">`+
-    cardN("Closed n", k.n, k.n>=30?"gate n≥30 met":"need ≥30", k.n>=30?"pass":"pending")+
-    cardN("WR (pos-R)", (k.wr*100).toFixed(1)+"%", "gate ≥58%", showPills?clsOf(ge.win_rate&&ge.win_rate.status):"")+
-    cardN("Sum R", fmt(k.sum_R,2,true), "tracking (not a gate)", "", k.sum_R>=0?"pos":"neg")+
-    cardN("PF", pfStr, k.pf===null?"no losses yet":"gate ≥2.0", showPills&&k.pf!==null?clsOf(ge.profit_factor&&ge.profit_factor.status):"")+
-    cardN("Avg R", fmt(k.avg_R,3,true), `gate ≥+0.40 · ref +${ref}`, showPills?clsOf(ge.avg_R&&ge.avg_R.status):"", k.avg_R>=0?"pos":"neg")+
-    cardN("Best / Worst R", fmt(k.best,2,true)+" / "+fmt(k.worst,2,true), "extremes (not a gate)", "")+
-    cardN("Max DD (R)", fmt(k.maxDD,2), "gate ≤20R", showPills?clsOf(ge.max_drawdown&&ge.max_drawdown.status):"")+
-  `</div>`;
-  // Gate banner (authoritative server verdict)
-  const critChips = ["avg_R","win_rate","profit_factor","max_drawdown","blowup"].map(key=>{
-    const g=ge[key]||{}; const nm={avg_R:"avg_R",win_rate:"WR",profit_factor:"PF",max_drawdown:"maxDD",blowup:"blowup"}[key];
-    let val = key==="win_rate"?((g.value!=null)?(g.value*100).toFixed(1)+"%":"—")
-            : key==="blowup"?(g.value?"FLAGGED":"none")
-            : (g.value!=null?fmt(g.value,2):"—");
-    const thr={avg_R:"≥+0.40",win_rate:"≥58%",profit_factor:"≥2.0",max_drawdown:"≤20",blowup:"none"}[key];
-    return `<span class="b-chip ${clsOf(g.status)}">${nm} ${val} (${thr}) ${g.status||''}</span>`;
-  }).join("");
-  const caption = `n=${k.n} over ~${days}d, correlated-burst-heavy (${indep} independent same-bar events for ${k.n} signals) — `+
-                  `watching for convergence toward backtest +${ref}; currently <b>${v}</b>.`;
-  const banner = `<div class="banner ${vc}"><span class="b-verdict ${vc}">GATE: ${v}</span>`+
-    `<div class="b-caption">${caption}</div><div class="b-crit">${critChips}</div></div>`;
-  // Donuts
-  const oc=dash.outcome_counts||{};
-  const outSeg=["WIN","PARTIAL_TP2","PARTIAL_TP2_BE","PARTIAL_TP1","LOSS","EXPIRED"].map(o=>({label:o,value:oc[o]||0,color:OUTCOME_COLORS[o]}));
-  const dir=dash.direction||{};
-  const dirSeg=[{label:"BUY",value:(dir.BUY&&dir.BUY.n)||0,color:DIR_COLORS.BUY},{label:"SELL",value:(dir.SELL&&dir.SELL.n)||0,color:DIR_COLORS.SELL}];
-  const sessSeg=(s.per_session||[]).map(p=>({label:p.session,value:p.n,color:SESSION_COLORS[p.session]||"#484f58"}));
-  const donuts = `<div class="chart-row">`+
-    `<div class="chart-box"><div class="c-title">Outcomes</div>${svgDonut(outSeg)}${legend(outSeg)}</div>`+
-    `<div class="chart-box"><div class="c-title">Direction</div>${svgDonut(dirSeg)}${legend(dirSeg)}`+
-       `<div class="c-note">BUY sumR ${fmt(dir.BUY&&dir.BUY.sum_R,2,true)} · SELL sumR ${fmt(dir.SELL&&dir.SELL.sum_R,2,true)}</div></div>`+
-    `<div class="chart-box"><div class="c-title">Session <span class="small">(observational only — not a gate criterion)</span></div>${svgDonut(sessSeg)}${legend(sessSeg)}</div>`+
-  `</div>`;
-  // Equity curve (close-ordered) with burst points annotated
-  const eq=(dash.equity_series||[]);
-  const eqPts=eq.map(p=>({x:p.i,y:p.cum_R,big:false}));
-  const eqDots=eq.map(p=>({x:p.i,y:p.cum_R,big:!!p.burst}));
-  const peakV=Math.max(0,...eqPts.map(p=>p.y));
-  const equity = `<div class="chart-box" style="flex:1 1 100%"><div class="c-title">Equity curve — cumulative R (close-ordered) · amber = same-bar burst point</div>`+
-    svgLine([
-      {pts:eqPts,color:"#58a6ff"},
-      {pts:eqDots,color:"#58a6ff",dots:true,dotColorFn:p=>p.big?"#d29922":null}
-    ],{w:760,h:200})+
-    `<div class="legend"><span class="lg"><span class="sw" style="background:#58a6ff"></span>cum R</span>`+
-    `<span class="lg"><span class="sw" style="background:#d29922"></span>burst point (same-bar multi-token = ONE bet)</span>`+
-    `<span class="lg">peak +${peakV.toFixed(2)}R · maxDD ${fmt(k.maxDD,2)}R</span></div>`+
-    `<div class="c-note">Adjacent same-burst points are one entry decision resolving over time — not N independent moves.</div></div>`;
-  // Correlated-burst panel
-  const bursts=dash.bursts||[];
-  const burstRows = bursts.length ? bursts.map(b=>
-    `<tr class="${b.big?'burst-big':''}"><td class="mono small">${b.ts}</td><td>${b.dir}</td><td>${b.n}</td>`+
-    `<td class="${b.sum_R>=0?'r-positive':'r-negative'}">${fmt(b.sum_R,2,true)}</td>`+
-    `<td class="small">${(b.tokens||[]).join(", ")}</td><td>${b.big?'★':''}</td></tr>`).join("")
-    : `<tr><td colspan="6" class="small">(no multi-token same-bar bursts yet)</td></tr>`;
-  const burstPanel = `<div class="honest"><b>Correlated-burst panel (first-class honest read).</b> `+
-    `${k.n} signals collapse to <b>${indep} independent same-bar events</b> (${dash.burst_signal_count||0} of the signals fired in `+
-    `${bursts.length} multi-token bursts). Same opened_ts across tokens = ONE directional bet — aggregate sum_R/equity above carry the weight of `+
-    `~${indep} bets, not ${k.n}. ★ = the largest +/- bursts.</div>`+
-    `<div class="chart-row"><div class="chart-box" style="flex:1 1 340px"><div class="c-title">Bursts (same-bar, ≥2 tokens)</div>`+
-    `<table><thead><tr><th>opened (UTC)</th><th>dir</th><th>n</th><th>combined R</th><th>tokens</th><th></th></tr></thead><tbody>${burstRows}</tbody></table></div>`+
-    `<div class="chart-box" style="flex:1 1 340px"><div class="c-title">Day-by-day R <span class="small">(by opened-day — surfaces day-level skew)</span></div>`+
-    svgBars((dash.by_day||[]).map(d=>({label:d.day.slice(5)+" (n"+d.n+")",value:d.sum_R})),{w:380,h:170})+`</div></div>`;
+// 7. RECENT ACTIVITY
+function renderRecent(s){
+  let evs=[];
+  for(const k of ["A","B"]){
+    const so=s.soaks[k]||{};
+    (so.closed||[]).forEach(c=>evs.push({ts:c.closed_at||c.opened_ts,strat:"Breakout "+k,token:c.token,dir:c.direction,
+      event:"close",outcome:c.result,r:c.realized_r,note:""}));
+    (so.open||[]).forEach(o=>evs.push({ts:o.opened_ts,strat:"Breakout "+k,token:o.token,dir:o.direction,
+      event:"open",outcome:"OPEN",r:null,note:"open"}));
+  }
+  (s.exec_quality.recent||[]).forEach(x=>evs.push({ts:x.ts_utc,strat:"ExecQual "+(x.soak||""),token:x.token,dir:x.direction,
+    event:"exec_snapshot",outcome:x.fetch_status,r:null,note:(x.would_skip===1?("would_skip: "+x.tripped_rules):"")}));
+  evs=evs.filter(e=>e.ts).sort((a,b)=>(a.ts<b.ts?1:-1)).slice(0,30);
+  if(!evs.length){ document.getElementById("recent").innerHTML='<div class="panel muted">No activity yet.</div>'; return; }
+  const rows=evs.map(e=>`<tr><td class="mono" style="font-size:11px">${e.ts}</td><td>${e.strat}</td><td>${e.token}</td>`
+    +`<td>${e.dir||"—"}</td><td>${e.event}</td><td>${outc(e.outcome)}</td>`
+    +`<td class="num">${e.r==null?'<span class="na">—</span>':sgn(e.r)}</td><td class="sub">${e.note}</td></tr>`).join("");
+  document.getElementById("recent").innerHTML=
+    `<div class="scroll"><table><thead><tr><th>Timestamp (UTC)</th><th>Strategy</th><th>Token</th><th>Dir</th>`
+    +`<th>Event</th><th>Outcome</th><th class="num">R</th><th>Note</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+function outc(o){ if(!o) return "—";
+  if(["WIN","PARTIAL_TP2","PARTIAL_TP2_BE","ok"].includes(o)) return `<span class="ok" style="padding:0 5px;border-radius:3px">${o}</span>`;
+  if(["LOSS","fetch_failed"].includes(o)) return `<span class="err" style="padding:0 5px;border-radius:3px">${o}</span>`;
+  return o; }
 
-  return `<div class="soak-head"><h2 style="border:none">${s.label} — Dashboard</h2></div>`+
-         banner+cardsHtml+donuts+`<div class="chart-row">${equity}</div>`+burstPanel;
-}
-function cardN(label, value, sub, statusCls, valCls){
-  return `<div class="kpi ${statusCls||''}"><div class="k-label">${label}</div>`+
-         `<div class="k-value ${valCls||''}">${value}</div><div class="k-sub">${sub||''}</div></div>`;
-}
-function pillJs(status){ return pill(status); }
-
-function renderDashboard(){
-  const soaks=(LAST_STATE&&LAST_STATE.soaks)||{};
-  let html = `<div class="controls">`+
-    `<div><span class="seg-label">Range</span><span class="seg" id="seg-range">`+
-      ["30D","90D","ALL"].map(r=>`<button data-range="${r}" class="${DASH_RANGE===r?'active':''}">${r}</button>`).join("")+`</span></div>`+
-    `<div><span class="seg-label">Soak</span><span class="seg" id="seg-soak">`+
-      [["B","Soak B (primary)"],["A","Soak A (bg)"],["Both","Both"]].map(([k,lbl])=>`<button data-soak="${k}" class="${DASH_SOAK===k?'active':''}">${lbl}</button>`).join("")+`</span></div>`+
-    `<div class="small">Range filters the KPI/chart view; the locked GATE verdict banner is always full-sample, per-soak, never blended.</div>`+
-  `</div>`;
-  if(DASH_SOAK==="Both"){ html += dashSoakBlock(soaks.B) + `<hr style="border-color:#30363d;margin:22px 0">` + dashSoakBlock(soaks.A); }
-  else { html += dashSoakBlock(soaks[DASH_SOAK]); }
-  document.getElementById("dash-body").innerHTML = html;
-  wireDashControls();
-}
-function wireDashControls(){
-  document.querySelectorAll('#seg-range button').forEach(b=>b.onclick=()=>{DASH_RANGE=b.dataset.range;renderDashboard();});
-  document.querySelectorAll('#seg-soak button').forEach(b=>b.onclick=()=>{DASH_SOAK=b.dataset.soak;renderDashboard();});
+// 8. OPEN TRADES
+function renderOpen(s){
+  let rows=[];
+  for(const k of ["A","B"]){
+    (s.soaks[k]||{}).open?.forEach(o=>{
+      rows.push(`<tr><td>Breakout ${k}</td><td>${o.token}</td><td>${o.direction}</td>`
+        +`<td class="mono" style="font-size:11px">${o.opened_ts}</td><td class="num mono">${fmt(o.entry_price,6)}</td>`
+        +`<td class="mono">SL ${fmt(o.sl,6)} / TP1 ${fmt(o.tp1,6)} / TP3 ${fmt(o.tp3,6)}</td>`
+        +`<td class="num">${o.age_minutes==null?"—":Math.round(o.age_minutes)+"m"}</td><td>${pill("INFO","OPEN")}</td></tr>`);
+    });
+  }
+  if(!rows.length){ document.getElementById("open").innerHTML='<div class="panel muted">No open trades.</div>'; return; }
+  document.getElementById("open").innerHTML=
+    `<div class="scroll"><table><thead><tr><th>Strategy</th><th>Token</th><th>Dir</th><th>Entry time</th>`
+    +`<th class="num">Entry</th><th>TP/SL levels</th><th class="num">Age</th><th>Status</th></tr></thead><tbody>${rows.join("")}</tbody></table></div>`
+    +`<div class="sub" style="margin-top:6px">Live current price and unrealized R are not shown in V1 (no live price fetch).</div>`;
 }
 
-// ── Reports tab ─────────────────────────────────────────────────────────
-function reportsBlock(s){
-  if(!s||s.error) return `<div class="small">${s?s.label:''}: ${s&&s.error?s.error:'no data'}</div>`;
-  const dash=s.dashboard||{}, bref=s.backtest_ref||{};
-  const drift=s.drift||[];
-  // Convergence: forward cum-avg-R vs backtest ref + gate floor
-  const convPts=drift.map(d=>({x:d.n,y:d.cum_avg_R}));
-  const conv = `<div class="chart-box" style="flex:1 1 100%"><div class="c-title">Convergence — forward cumulative avg_R vs backtest reference</div>`+
-    svgLine([{pts:convPts,color:"#58a6ff"}],{w:760,h:200,refs:[
-      {y:bref.avg_R||0.484,color:"#3fb950",label:"backtest +"+(bref.avg_R||0.484).toFixed(3)},
-      {y:0.40,color:"#d29922",label:"gate +0.40"}]})+
-    `<div class="c-note">Is forward avg_R trending toward the backtest reference, or staying negative-toward-zero? Needs many days — currently burst-dominated.</div></div>`;
-  // Exit-reason distribution
-  const er=dash.exit_reasons||{};
-  const erOrder=["WIN_TP3","PARTIAL_TP2","PARTIAL_TP2_BE","PARTIAL_TP1_BE","FULL_SL","LOSS_AFTER_TP1","EXPIRED","OTHER"];
-  const erItems=erOrder.filter(k=>er[k]).map(k=>({label:k,value:er[k],
-    color:k==="WIN_TP3"?"#1a5b1a":k==="PARTIAL_TP2"?"#4ade80":k==="PARTIAL_TP2_BE"?"#86efac":k==="PARTIAL_TP1_BE"?"#86efac":k==="FULL_SL"?"#7f1d1d":"#374151"}));
-  const exitDist = `<div class="chart-box" style="flex:1 1 420px"><div class="c-title">Exit-reason distribution</div>`+
-    svgBars(erItems.map(i=>({label:i.label,value:i.value,color:i.color})),{w:420,h:180})+`</div>`;
-  // Near-miss (lazy)
-  const nm = `<div class="chart-box" style="flex:1 1 300px"><div class="c-title">Near-miss analysis <span class="small">(FULL_SL that reached ≥50% to TP1)</span></div>`+
-    `<button class="btn" id="nm-btn" onclick="loadNearMiss('${s.key}')">Load near-miss (fetches price paths)</button>`+
-    `<div id="nm-result" class="small" style="margin-top:8px">Not loaded — network reconstruction, runs only on click (never on auto-refresh).</div></div>`;
-  // Backtest reference card
-  const refCard = `<div class="ref-card"><div class="rc-title">Backtest reference — Config 14 (720d, friction, BE-after-TP1)</div>`+
-    `<table><tr><th></th><th>TF</th><th>n</th><th>avg_R</th><th>WR</th><th>PF</th><th>DSR</th></tr>`+
-    `<tr><td>This soak (${s.key})</td><td>${bref.tf||'—'}</td><td>${bref.n||'—'}</td><td>+${(bref.avg_R||0).toFixed(4)}</td>`+
-    `<td>${bref.wr_pct||'—'}%</td><td>${bref.pf||'—'}</td><td>${bref.dsr||'—'}</td></tr></table>`+
-    `<div class="c-note">Forward soak is measured against this. avg_R/WR/PF computed read-only from backtest_signals (run 56 TF_A / 58 TF_B); DSR per PHASE_C_FULL_AUDIT_V2.md.</div></div>`;
-  return `<h2 style="border:none">${s.label} — Reports</h2><div class="chart-row">${conv}</div>`+
-         `<div class="chart-row">${exitDist}${nm}</div><div class="chart-row"><div style="flex:1 1 100%">${refCard}</div></div>`;
-}
-async function loadNearMiss(key){
-  const btn=document.getElementById("nm-btn"), out=document.getElementById("nm-result");
-  if(btn){btn.disabled=true;btn.textContent="Loading…";}
-  if(out)out.textContent="Fetching price paths from Binance (cached after first run)…";
-  try{
-    const resp=await fetch("/api/nearmiss?soak="+key,{cache:"no-store"});
-    const d=await resp.json();
-    if(d.error){ if(out)out.textContent="Error: "+d.error; }
-    else{
-      const b=d.buckets||{};
-      const tot=d.total_full_sl||0;
-      const rate=tot?((b.near_miss/tot)*100).toFixed(0):"0";
-      const byday=(d.by_day||[]).map(x=>`${x.day.slice(5)}: ${x.near_miss}/${x.full_sl}`).join(" · ");
-      if(out)out.innerHTML=`<b>${tot}</b> FULL_SL · near-miss(≥50%) <b>${b.near_miss||0}</b> (${rate}%) · `+
-        `mid(25-50%) ${b.mid||0} · wrong-dir(<25%) ${b.wrong_dir||0}`+(b.unknown?` · unknown ${b.unknown}`:``)+
-        `<br><span class="small">High near-miss rate = choppy stop-outs, not wrong-direction. By opened-day: ${byday||'—'}</span>`;
-    }
-  }catch(e){ if(out)out.textContent="Fetch error: "+e.message; }
-  if(btn){btn.disabled=false;btn.textContent="Reload near-miss";}
-}
-function renderReports(){
-  const soaks=(LAST_STATE&&LAST_STATE.soaks)||{};
-  document.getElementById("reports-body").innerHTML = reportsBlock(soaks.B) + `<hr style="border-color:#30363d;margin:22px 0">` + reportsBlock(soaks.A);
-}
-
-// ── Execution Quality Monitor (DISPLAY-ONLY; would_skip never gates) ──────
-function execPct(x){ return (x===null||x===undefined) ? "—" : (x>=0?"":"") + x.toFixed(3) + "%"; }
-function execRatio(x){ return (x===null||x===undefined) ? "—" : x.toFixed(1) + "×"; }
-function renderExecQuality(){
-  const e = (LAST_STATE && LAST_STATE.exec_quality) || null;
-  const warn = `<div class="tracking" style="border-style:solid;margin-bottom:14px">`
-    + `<div class="label">⚠ Observation only</div>`
-    + `<div class="value" style="font-size:13px;font-weight:500">This is observation-only. `
-    + `would_skip is logged for future analysis and does not affect entries/exits.</div></div>`;
-  if(!e){ return `<h2 style="border:none">Execution Quality Monitor</h2>${warn}<div class="small">Loading…</div>`; }
-  if(e.error){ return `<h2 style="border:none">Execution Quality Monitor</h2>${warn}`
-    + `<div class="card"><div class="label">Status</div><div class="value verdict-fail">ERROR</div>`
-    + `<div class="threshold mono">${e.error}</div></div>`; }
-
-  const wsRate = (e.would_skip_rate===null||e.would_skip_rate===undefined) ? "—" : e.would_skip_rate.toFixed(1)+"%";
-  const lt = e.latest;
-  // Summary cards
-  const summary = `<div class="row">`
-    + `<div class="card"><div class="label">Mode</div><div class="value" style="font-size:13px;color:#3fb950">${e.mode}</div></div>`
-    + `<div class="card"><div class="label">Total snapshots</div><div class="value">${e.total}</div></div>`
-    + `<div class="card"><div class="label">Fetch ok</div><div class="value">${e.fetch_ok}</div></div>`
-    + `<div class="card"><div class="label">Fetch failed</div><div class="value">${e.fetch_failed}</div></div>`
-    + `<div class="card"><div class="label">would_skip count</div><div class="value">${e.would_skip_count}</div></div>`
-    + `<div class="card"><div class="label">would_skip rate</div><div class="value">${wsRate}</div></div>`
-    + `<div class="card"><div class="label">Trade affected</div><div class="value verdict-pass">${e.trade_affected}</div>`
-    + `<div class="threshold">flag never consulted</div></div>`
-    + `</div>`;
-
-  // Latest snapshot detail
-  let latestBlock;
-  if(!lt){
-    latestBlock = `<div class="tracking"><div class="label">Latest snapshot</div>`
-      + `<div class="value" style="font-size:13px;font-weight:500">No snapshots yet — first row appears on the next breakout signal.</div></div>`;
+// 9. EXEC QUALITY
+function renderExec(s){
+  const e=s.exec_quality||{};
+  const lt=e.latest;
+  let html=`<div class="warnbox">Observation only. would_skip is logged for future analysis and does <b>not</b> affect entries/exits.</div>`;
+  html+=`<div class="grid g4">`
+    +card2("Mode",e.mode||"—")+card2("Snapshots",e.total??0)
+    +card2("Fetch ok / failed",(e.fetch_ok??0)+" / "+(e.fetch_failed??0))
+    +card2("would_skip",`${e.would_skip_count??0} (${e.would_skip_rate==null?"—":e.would_skip_rate+"%"})`)+`</div>`;
+  if(lt){
+    html+=`<div class="card" style="margin-top:10px"><h3>Latest snapshot <span class="sub">${lt.ts_utc} · soak ${lt.soak}</span></h3>`
+      +`<div class="grid g4">`
+      +card2("Token / dir",(lt.token||"—")+" "+(lt.direction||""))
+      +card2("Spread",lt.spread_pct==null?"—":lt.spread_pct.toFixed(3)+"%")
+      +card2("Exp. slippage",lt.est_slippage_pct==null?"—":lt.est_slippage_pct.toFixed(3)+"%")
+      +card2("Depth ratio",lt.depth_ratio==null?"—":lt.depth_ratio.toFixed(1)+"×")
+      +card2("would_skip",lt.would_skip===1?pill("FAIL","YES"):pill("PASS","NO"))
+      +card2("Reasons",lt.tripped_rules||"—")
+      +card2("Fetch",lt.fetch_status)
+      +card2("Trade affected",'<span class="ok" style="padding:0 6px;border-radius:4px">NO</span>')+`</div></div>`;
   } else {
-    const wsPill = lt.would_skip===1
-      ? `<span class="status-pill fail">YES</span>` : `<span class="status-pill ok">NO</span>`;
-    const fPill = lt.fetch_status==="ok"
-      ? `<span class="status-pill ok">ok</span>` : `<span class="status-pill fail">${lt.fetch_status}</span>`;
-    latestBlock = `<div class="row">`
-      + `<div class="card"><div class="label">Latest @ (UTC)</div><div class="value mono" style="font-size:13px">${lt.ts_utc||"—"}</div>`
-      + `<div class="threshold">soak ${lt.soak||"—"}</div></div>`
-      + `<div class="card"><div class="label">Token / Dir</div><div class="value">${lt.token||"—"} ${lt.direction||""}</div></div>`
-      + `<div class="card"><div class="label">Spread</div><div class="value mono">${execPct(lt.spread_pct)}</div></div>`
-      + `<div class="card"><div class="label">Exp. slippage</div><div class="value mono">${execPct(lt.est_slippage_pct)}</div></div>`
-      + `<div class="card"><div class="label">Depth ratio</div><div class="value mono">${execRatio(lt.depth_ratio)}</div>`
-      + `<div class="threshold">near-touch / size</div></div>`
-      + `<div class="card"><div class="label">would_skip</div><div class="value">${wsPill}</div></div>`
-      + `<div class="card"><div class="label">Reasons</div><div class="value mono" style="font-size:13px">${lt.tripped_rules||"—"}</div></div>`
-      + `<div class="card"><div class="label">Fetch</div><div class="value">${fPill}</div></div>`
-      + `</div>`;
+    html+=`<div class="panel muted" style="margin-top:10px">No snapshots yet — first row appears on the next breakout signal.</div>`;
   }
+  document.getElementById("exec").innerHTML=html;
+}
+function card2(k,v){ return `<div class="card"><div class="kv"><span class="k">${k}</span></div><div class="v" style="font-size:16px">${v}</div></div>`; }
 
-  // Recent snapshots table
-  let tableBlock;
-  if(!e.recent || e.recent.length===0){
-    tableBlock = `<div class="small" style="padding:10px 2px">No snapshots yet — first row appears on the next breakout signal.</div>`;
-  } else {
-    const rows = e.recent.map(r=>{
-      const failed = (r.fetch_status!=="ok");
-      const sp = failed ? "—" : execPct(r.spread_pct);
-      const sl = failed ? "—" : execPct(r.est_slippage_pct);
-      const dr = failed ? "—" : execRatio(r.depth_ratio);
-      const ws = (r.would_skip===1) ? `<span class="status-pill fail">YES</span>`
-               : (r.would_skip===0) ? `<span class="status-pill ok">NO</span>` : "—";
-      const reason = (r.tripped_rules && r.tripped_rules.length) ? r.tripped_rules : "—";
-      const fs = (r.fetch_status==="ok") ? `<span class="status-pill ok">ok</span>`
-                                         : `<span class="status-pill fail">${r.fetch_status}</span>`;
-      return `<tr><td class="mono">${r.ts_utc||"—"}</td><td>${r.soak||"—"}</td><td>${r.token||"—"}</td>`
-        + `<td>${r.direction||"—"}</td><td class="mono">${sp}</td><td class="mono">${sl}</td>`
-        + `<td class="mono">${dr}</td><td>${ws}</td><td class="mono">${reason}</td><td>${fs}</td></tr>`;
-    }).join("");
-    tableBlock = `<div class="closed-scroll"><table><thead><tr>`
-      + `<th>Timestamp (UTC)</th><th>Soak</th><th>Token</th><th>Dir</th><th>Spread</th>`
-      + `<th>Exp. slip</th><th>Depth×</th><th>would_skip</th><th>Reason</th><th>Fetch</th>`
-      + `</tr></thead><tbody>${rows}</tbody></table></div>`;
+// 10. BURST
+function renderBurst(s){
+  let html=`<div class="grid g2">`;
+  for(const k of ["A","B"]){
+    const d=(s.soaks[k]||{}).dashboard||{};
+    const ind=d.independent_event_count, bsig=d.burst_signal_count, bursts=d.bursts||[];
+    const big=bursts.length?bursts.reduce((a,b)=>Math.abs(b.sum_R)>Math.abs(a.sum_R)?b:a):null;
+    html+=`<div class="card"><h3>Soak ${k}</h3>`
+      +`<div class="kv"><span class="k">closed trades</span><span class="v">${((s.soaks[k]||{}).metrics||{}).n_closed??0}</span></div>`
+      +`<div class="kv"><span class="k">independent events</span><span class="v">${ind??"—"}</span></div>`
+      +`<div class="kv"><span class="k">burst groups (≥2 same bar)</span><span class="v">${bursts.length}</span></div>`
+      +`<div class="kv"><span class="k">signals in bursts</span><span class="v">${bsig??0}</span></div>`
+      +`<div class="kv"><span class="k">largest burst</span><span class="v">${big?(big.n+" sigs, "+sgn(big.sum_R)+"R"):"—"}</span></div>`
+      +`<div class="sub" style="margin-top:6px">${bursts.length?"Some trades occurred in the same market burst, so the independent sample is smaller than the trade count.":"No correlated bursts detected."}</div></div>`;
   }
-
-  return `<h2 style="border:none">Execution Quality Monitor</h2>`
-    + `<div class="small mono" style="margin-bottom:10px">Type-A order-book observation · read-only · would_skip is logged, never gates</div>`
-    + warn + summary
-    + `<h3 style="color:#fff;font-size:13px;margin:16px 0 4px">Latest snapshot</h3>` + latestBlock
-    + `<h3 style="color:#fff;font-size:13px;margin:18px 0 4px">Recent snapshots (newest first)</h3>` + tableBlock;
+  html+=`</div>`;
+  document.getElementById("burst").innerHTML=html;
 }
 
-// ── Tab navigation ──────────────────────────────────────────────────────
-let ACTIVE_TAB="dashboard";
-function showTab(tab){
-  ACTIVE_TAB=tab;
-  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.toggle('active', b.dataset.tab===tab));
-  document.querySelectorAll('.tab-panel').forEach(p=>p.classList.toggle('active', p.id==='panel-'+tab));
-  renderActive();
-}
-function renderActive(){
-  if(!LAST_STATE) return;
-  const soaks=LAST_STATE.soaks||{};
-  if(ACTIVE_TAB==="dashboard") renderDashboard();
-  else if(ACTIVE_TAB==="reports") renderReports();
-  else if(ACTIVE_TAB==="soakB") document.getElementById("col-B").innerHTML=renderSoak(soaks.B);
-  else if(ACTIVE_TAB==="soakA") document.getElementById("col-A").innerHTML=renderSoak(soaks.A);
-  else if(ACTIVE_TAB==="execq") document.getElementById("execq-body").innerHTML=renderExecQuality();
-}
-document.querySelectorAll('.tab-btn').forEach(b=>b.onclick=()=>showTab(b.dataset.tab));
-
-async function refresh() {
-  try {
-    const resp = await fetch("/api/state", { cache: "no-store" });
-    if (!resp.ok) {
-      document.getElementById("fetch-ts").textContent = "FETCH ERROR " + resp.status;
-      return;
-    }
-    LAST_STATE = await resp.json();
-    renderActive();
-    document.getElementById("fetch-ts").textContent = LAST_STATE.ts_utc + " UTC";
-  } catch (e) {
-    document.getElementById("fetch-ts").textContent = "FETCH ERROR: " + e.message;
+// 11. ERRORS / HEALTH
+function renderHealth(s){
+  const o=s.overall||{}; let rows=[];
+  for(const k of ["A","B"]){
+    const so=s.soaks[k]||{}, hb=so.soak_health||{}, pr=(s.processes||{})[k]||{};
+    rows.push(`<tr><td>Breakout ${k}</td><td>${pr.running?pill("running","running"):pill("stopped","stopped")}</td>`
+      +`<td class="mono" style="font-size:11px">${hb.heartbeat_ts_utc??"—"}</td><td>${ago(hb.heartbeat_age_s)} ago</td>`
+      +`<td>${hb.status==="STALE"?pill("WARNING","STALE"):pill("PASS",hb.status||"—")}</td>`
+      +`<td>${so.error?('<span class="err">'+so.error+'</span>'):"—"}</td></tr>`);
   }
+  const f=(s.processes||{}).FADE||{};
+  rows.push(`<tr><td>Production Fade</td><td>${f.running?pill("running","running"):pill("stopped","stopped")}</td>`
+    +`<td colspan="3" class="muted">heartbeat not read in V1 (process check only)</td><td>—</td></tr>`);
+  document.getElementById("health").innerHTML=
+    `<div class="panel ${o.level==="HEALTHY"?"":"decision "+o.level}"><b>Overall: ${pill(o.level,o.level)}</b>`
+    +(o.reasons||[]).map(r=>`<div>• ${r}</div>`).join("")
+    +`<div class="kv" style="margin-top:6px"><span class="k">DB read</span><span class="v">${s.db_read_only?"OK (mode=ro)":"?"}</span></div>`
+    +`<div class="kv"><span class="k">exec fetch failures</span><span class="v">${(s.exec_quality||{}).fetch_failed??0}</span></div></div>`
+    +`<table style="margin-top:10px"><thead><tr><th>Process</th><th>State</th><th>Last heartbeat</th><th>Age</th><th>HB status</th><th>Last error</th></tr></thead><tbody>${rows.join("")}</tbody></table>`;
 }
-refresh();
-setInterval(refresh, 30000);
+
+// 12. ADVANCED (collapsed)
+function renderAdvanced(s){
+  let html="";
+  for(const k of ["A","B"]){
+    const d=(s.soaks[k]||{}).dashboard||{}, oc=d.outcome_counts||{}, er=d.exit_reasons||{}, bursts=d.bursts||[];
+    const ocrows=Object.entries(oc).sort((a,b)=>b[1]-a[1]).map(([x,n])=>`<tr><td>${x}</td><td class="num">${n}</td></tr>`).join("")||'<tr><td class="muted" colspan=2>none</td></tr>';
+    const errows=Object.entries(er).sort((a,b)=>b[1]-a[1]).map(([x,n])=>`<tr><td>${x}</td><td class="num">${n}</td></tr>`).join("")||'<tr><td class="muted" colspan=2>none</td></tr>';
+    const brows=bursts.slice(-12).map(b=>`<tr><td class="mono" style="font-size:11px">${b.ts}</td><td>${b.dir}</td><td class="num">${b.n}</td><td class="num">${sgn(b.sum_R)}</td><td class="sub">${(b.tokens||[]).join(",")}</td></tr>`).join("")||'<tr><td class="muted" colspan=5>none</td></tr>';
+    html+=`<details><summary>Soak ${k} — exit-reason &amp; burst detail</summary>`
+      +`<div class="grid g2" style="margin-top:8px"><div><b>Outcome counts</b><table><tbody>${ocrows}</tbody></table></div>`
+      +`<div><b>Exit reasons</b><table><tbody>${errows}</tbody></table></div></div>`
+      +`<b>Burst groups (last 12)</b><table><thead><tr><th>bar (UTC)</th><th>dir</th><th class="num">n</th><th class="num">sum_R</th><th>tokens</th></tr></thead><tbody>${brows}</tbody></table>`
+      +`<div class="sub" style="margin-top:6px">best_R ${sgn(d.best_R)} · worst_R ${sgn(d.worst_R)}</div></details>`;
+  }
+  html+=`<details><summary>Backtest reference (720d, informational — NOT a gate)</summary>`
+    +`<table><thead><tr><th>Soak</th><th>clean avg_R</th><th>friction avg_R</th><th>haircut</th></tr></thead><tbody>`
+    +["A","B"].map(k=>{const g=((s.soaks[k]||{}).gate_eval||{}).avg_R||{};const m=(s.soaks[k]||{}).metrics||{};
+       return `<tr><td>${k}</td><td class="num na">backtest: see docs</td><td class="num">${(s.soaks[k]||{}).ref_avg_R??"—"}</td><td class="num">${m.friction_haircut??"—"}</td></tr>`;}).join("")
+    +`</tbody></table><div class="sub">Both friction refs are below +0.40 (validated-negative). Near-miss analysis is not available in V1 (requires a price fetch).</div></details>`;
+  document.getElementById("advanced").innerHTML=html;
+}
+
+function renderAll(){
+  if(!LAST) return;
+  try{ renderStatusBar(LAST); renderCards(LAST); renderDecision(LAST); renderGate(LAST);
+    renderPerf(LAST); renderEquity(LAST); renderRecent(LAST); renderOpen(LAST);
+    renderExec(LAST); renderBurst(LAST); renderHealth(LAST); renderAdvanced(LAST);
+    document.getElementById("foot").textContent="Last refresh: "+LAST.ts_utc+" UTC · read-only · breakout.db (mode=ro) + process checks · no live price fetch · no signals.db read";
+  }catch(e){ document.getElementById("foot").textContent="render error: "+e.message; }
+}
+document.querySelectorAll("#eqtoggle button").forEach(b=>b.onclick=()=>{
+  EQ_VIEW=b.dataset.eq;
+  document.querySelectorAll("#eqtoggle button").forEach(x=>x.classList.toggle("active",x===b));
+  if(LAST) renderEquity(LAST);
+});
+async function refresh(){
+  try{ const r=await fetch("/api/state",{cache:"no-store"});
+    if(!r.ok){ document.getElementById("foot").textContent="FETCH ERROR "+r.status; return; }
+    LAST=await r.json(); renderAll();
+  }catch(e){ document.getElementById("foot").textContent="FETCH ERROR: "+e.message; }
+}
+window.addEventListener("resize",()=>{ if(LAST) renderEquity(LAST); });
+refresh(); setInterval(refresh,30000);
 </script>
 </body>
 </html>
@@ -1959,15 +1484,8 @@ class ViewerHandler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 self._send_json({"error": str(e)}, status=500)
             return
-        if p.path == "/api/nearmiss":
-            # LAZY, read-only, button-triggered. Never on auto-refresh.
-            from urllib.parse import parse_qs
-            soak_key = (parse_qs(p.query).get("soak", ["B"])[0] or "B").upper()
-            try:
-                self._send_json(compute_nearmiss(soak_key))
-            except Exception as e:
-                self._send_json({"error": str(e)}, status=500)
-            return
+        # V1: /api/nearmiss REMOVED — it required a live Binance price fetch, which
+        # is forbidden in V1. Only /api/state (read-only DB + process checks) remains.
         self.send_response(404); self.end_headers()
 
     def do_POST(self):   self.send_error(405)
