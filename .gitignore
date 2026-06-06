@@ -97,4 +97,19 @@ Thumbs.db
 # Breakout paper soak runtime artifacts (process state, never commit)
 data/breakout_soak.pid
 data/breakout_soak_heartbeat.json
+data/breakout_soak_B.pid
+data/breakout_soak_B_heartbeat.json
 logs/
+data/cache_1m_90d/
+
+# Phase C-Breakout derived/operational data — never commit the live DB or its
+# backups/caches. Only an explicit VACUUM INTO snapshot (data/breakout_snapshot_*.db)
+# is ever committed, and even that is added by hand, never via `git add .`.
+data/*_bak.*
+data/breakout.db.*
+data/ohlcv_cache_720d/
+data/vol_cache_720d/
+data/exit_model_comparison_results.json
+data/tf_grid_results.json
+data/tf_metrics_results.json
+data/tpgeo_results.json

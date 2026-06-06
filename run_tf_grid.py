@@ -229,6 +229,97 @@ def _calc_realized_r(outcome: str, net_tp1: float, net_sl: float,
     return 0.0
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# V_FULLTP2 — backtest-only EXIT-MODEL VARIANT (2026-06-05, additive)
+#
+# Proposed fee-efficiency simplification. The FULL position targets TP2 only:
+#   * NO partial take-profit at TP1 or TP2.
+#   * NO TP3, NO runner.
+#   * BE-after-TP1 is KEPT: once TP1 is TOUCHED, the stop moves to ENTRY.
+# This is NOT the live model. The running soaks (V_ENTRY, hold_entry) are
+# untouched — check_outcome()/_calc_realized_r() above are unchanged.
+#
+# Outcome universe (single full exit):
+#   LOSS       — SL hit before TP1 (full position stopped pre-TP1)
+#   WIN        — full position reaches TP2 (single exit at TP2)
+#   BREAKEVEN  — TP1 touched, price returns to ENTRY (BE stop) → flat exit
+#   EXPIRED    — window ends with no terminal hit:
+#                  · TP1 never touched, no SL  → flat / mark-to-flat (R=0, mirrors
+#                    V_ENTRY EXPIRED). Position closed at window end with no edge.
+#                  · TP1 touched, hangs between entry and TP2 → modeled as
+#                    BREAKEVEN (close at ENTRY = where the BE stop sits): the
+#                    conservative symmetric choice vs V_ENTRY's PARTIAL_TP1
+#                    end-of-window treatment. Tagged "EXPIRED_BE" for attribution
+#                    but priced as BREAKEVEN.
+# ─────────────────────────────────────────────────────────────────────────────
+def check_outcome_fulltp2(direction: str, entry: float, sl: float,
+                          tp1: float, tp2: float, tp3: float,
+                          future_bars: list):
+    """Walk forward bars under V_FULLTP2 (full position, single target = TP2,
+    BE-after-TP1 kept). `tp3` is accepted but IGNORED (no runner) so the call
+    signature matches check_outcome() for drop-in pairing.
+
+    Returns (outcome, tp_reached). tp_reached: 0=LOSS/never-TP1, 1=TP1-only, 2=WIN.
+    """
+    tp1_hit = sl_hit = tp2_hit = be_stopped = False
+    for bar in future_bars:
+        h, l = bar["h"], bar["l"]
+        if direction == "BUY":
+            # Pre-TP1 SL
+            if not tp1_hit and not sl_hit and l <= sl:
+                sl_hit = True; break
+            # TP1 touched → arm BE stop; defer BE check to next bar (TP1-fills-first)
+            if not tp1_hit and h >= tp1:
+                tp1_hit = True; continue
+            # Post-TP1: BE stop at ENTRY (full position)
+            if tp1_hit and not tp2_hit and l <= entry:
+                be_stopped = True; break
+            # Post-TP1: full position target = TP2
+            if tp1_hit and h >= tp2:
+                tp2_hit = True; break
+        else:  # SELL — mirror
+            if not tp1_hit and not sl_hit and h >= sl:
+                sl_hit = True; break
+            if not tp1_hit and l <= tp1:
+                tp1_hit = True; continue
+            if tp1_hit and not tp2_hit and h >= entry:
+                be_stopped = True; break
+            if tp1_hit and l <= tp2:
+                tp2_hit = True; break
+
+    if sl_hit:      return "LOSS",      0
+    if tp2_hit:     return "WIN",       2
+    if be_stopped:  return "BREAKEVEN", 1
+    # Window ended with no terminal hit
+    if tp1_hit:     return "EXPIRED_BE", 1   # hung between entry and TP2 → priced as BE
+    return "EXPIRED", 0                        # never reached TP1 → flat (R=0)
+
+
+def _calc_realized_r_fulltp2(outcome: str, net_tp2: float, net_sl: float,
+                             rt_cost_pct: float) -> float:
+    """V_FULLTP2 realized R with friction — SINGLE exit (one round-trip cost).
+
+      LOSS       → net_sl / risk           (= -1.0 in this normalization; risk=|net_sl|)
+      WIN        → net_tp2 / risk          (TP2_RR minus single-exit friction)
+      BREAKEVEN  → -rt_cost_pct / risk     (flat at entry, one round-trip friction)
+      EXPIRED_BE → -rt_cost_pct / risk     (hung above entry; closed at BE entry)
+      EXPIRED    → 0.0                     (never armed; flat, mirrors V_ENTRY)
+
+    net_tp2/net_sl are already friction-deducted percentages; rt_cost_pct is the
+    same single round-trip cost (% of price) the scaled model uses. There is only
+    ONE exit, so friction is charged exactly once — that is the whole point of the
+    model vs V_ENTRY's two-leg booking.
+    """
+    risk = abs(net_sl) or 0.0001
+    if outcome == "LOSS":
+        return round(net_sl / risk, 4)
+    if outcome == "WIN":
+        return round(net_tp2 / risk, 4)
+    if outcome in ("BREAKEVEN", "EXPIRED_BE"):
+        return round((-rt_cost_pct) / risk, 4)
+    return 0.0
+
+
 def run_one_token(token: str, cfg: dict, detect, compute_sl_tp,
                   compute_econ, token_rt_cost: dict, fallback_rt: float) -> list:
     """Run the parametric backtest on one (token, config)."""

@@ -1,3 +1,110 @@
+# TradeAI — Project Overview (breakout-thesis branch)
+
+> Read-only project overview, generated from what is actually in the repo (the `*.md`
+> reports, configs, and commit history). Every number is cited from a report file —
+> nothing invented. This branch (`breakout-thesis`) layers the Phase-C breakout
+> exploration on top of the production ICT signal bot. The full production-bot
+> reference (the prior README) is retained verbatim in **Appendix A** below.
+
+---
+
+## 1. Purpose
+
+TradeAI is a **signal-only** ICT (Inner Circle Trader) crypto bot: it detects setups on
+12 large-cap tokens (BTC, ETH, XRP, HBAR, AVAX, LINK, BNB, ADA, POL, TON, ATOM, BCH),
+backtests them with honest statistics (Combinatorial Purged k-Fold CV + Deflated Sharpe
+Ratio), forward-validates in 24/7 PAPER soaks, and only sends Telegram alerts — the
+operator executes every trade manually, and **LIVE never auto-flips**. The Phase-C goal on
+this branch is to determine, with pre-registered, out-of-sample-honest discipline, whether
+an **H4 breakout / continuation** strategy ("Config 14") has a real, live-portable edge —
+and to understand the tokens' behaviour well enough to read the forward soaks correctly.
+
+---
+
+## 2. Strategy history (each line cites its report file)
+
+| Experiment | What was tested | Result (numbers) | Verdict |
+|---|---|---|---|
+| **Breakout Config 14 — Step 1 (clean grid)** `PHASE_C_BREAKOUT_REPORT.md` | Pre-registered TP/lookback grid, H4 break + 5M MSS + FVG/OB | Best cfg n=2511, avg_R **+0.682**, sum_R +1711, PF 3.19, DSR 1.00 | **PASS** (clean) |
+| **Step 2A — friction screen** `PHASE_C_STEP2A_FRICTION.md` | Does +0.72 survive spread/slippage/partial fills, 365d, run once | Friction-on avg_R clearly positive, PF > 1.5 | **PASS → paper soak authorized** |
+| **Timeframe comparison (A/B/C)** `PHASE_C_TIMEFRAME_COMPARISON.md` | 5M/4H vs 5M/1H vs 1M/1H, CPCV+DSR | A avg_R **+0.759**, PF 3.71, n=410, DSR 1.00; B +0.66 but 2.8× signals (+607 R); C middle | All **PASS**; **no live-switch recommended** |
+| **720d multi-regime stress** `PHASE_C_720D_BACKTEST.md` | Edge vs more data + per-regime | TF_B improved monotonically **+0.549 → +0.634 → +0.640**; most regimes above the +0.40 gate | **Validated (robust to regime)** |
+| **Exit-model divergence** `EXIT_MODEL_VERIFICATION.md` | Soak's premature-close vs backtest exit | Premature close would convert avg_R **+0.72 → +0.02** | **Bug — fixed** (commit `870c7f4`) |
+| **Runner-exit gap (post-TP1)** `RUNNER_EXIT_GAP.md` | Post-TP1 runner had no stop (unrealistic) | Moved SL→entry after TP1 (BE); drag −0.004 / −0.009 R | **Fixed** (BE-after-TP1, `ae46c1d`) |
+| **Post-TP2 trail-to-TP1** `EXIT_MODEL_VERIFICATION.md` / commit `a526ca5` | Add trailed stop to TP1 after TP2 (last runner gap) | Honest avg_R drops ~0.12 → TF_B **+0.484 → +0.3644**, TF_A → +0.3376 (now **below the +0.40 gate floor**) | **Shipped (live-portable); edge now marginal** |
+| **TP-geometry experiment (5 variants)** `TP_GEOMETRY_EXPERIMENT.md` | Pre-registered 5 TP-RR variants, OOS + deflated DSR | On primary TF_B **no variant cleared OOS test ≥ +0.40** (best 0.396) | **REJECTED — no qualifying geometry** |
+| **Regime / trend filter** `PHASE_C_REGIME_FILTER.md` | Filter counter-trend signals (1 pre-registered trial) | avg_R improves only **+0.013–0.018**; sum_R drops **27–29%** | **REJECTED — hypothesis fails** |
+| **Mean-reversion property** `MEAN_REVERSION_EXPLORATION.md` | Variance-ratio / autocorr, 12 tokens, 5m+1h | **1H = random walk (VR≈1.00)**; 5m VR<1 is microstructure (AVAX/TON) that vanishes at 1H | **No tradeable property; would duplicate the fade** |
+| **Volume bucketing** `VOLUME_BREAKDOWN.md` | avg_R by breakout-bar volume (causal) | **Inverted, OOS-robust**: LOW +0.469 > NORMAL +0.421 > HIGH +0.297 (TF_B) | **Information, but not a filter case** |
+| **Trend alignment** `TREND_ALIGNMENT_BREAKDOWN.md` | WITH vs AGAINST 1H/4H trend (causal) | WITH +0.415 > AGAINST +0.307 (TF_B, holds OOS) but **counter-trend still +0.30 R profitable** | **Not a filter case** |
+| **Session / VWAP** `SESSION_BREAKDOWN.md`, `SESSION_VWAP_BREAKDOWN.md` | avg_R by UTC session + entry-vs-VWAP | NY only +0.04 above mean, **decays OOS** (partly the volume effect); VWAP **AGAINST > ALIGNED** (inverted, OOS-robust) | **Session not robust; VWAP info but not a filter** |
+| **MSS quality** `MSS_QUALITY_BREAKDOWN.md` | avg_R by HIGH/MEDIUM/LOW MSS tag | Small, non-monotonic, **flips OOS** | **Noise — no information** |
+| **Fade (production CRT)** `FADE_CRT_DIAGNOSIS.md` | Why the live CRT/fade emits ~zero signals | All detected setups rejected downstream by gates (regime drag primary); gate reasons not logged | **Regime-drag + gate-tightening; diagnostic blind spot** |
+
+Recurring lesson across the filter/geometry experiments: the "worse" bucket is almost
+always still **net-profitable and the majority of signals**, so filtering raises avg_R but
+cuts total sum_R — the avg_R-vs-sum_R trap (first quantified by the regime filter, −28%).
+
+---
+
+## 3. Current state
+
+- **Active forward soaks (PAPER):** Soak A (5M/4H, PID 515231) and Soak B (5M/1H, PID
+  515230, **PRIMARY**), both running **Config 14 on the post-TP2 trail-to-TP1 exit model**.
+  They were **reset to n=0** after the post-TP2 change (old forward signals archived as
+  `_PRE_POSTTP2`); the gate is **PENDING until n ≥ 30** under the new model. Read-only
+  viewer on port 8890.
+- **Production fade bot:** `crypto_alert.py` (PID 512666) runs the CRT/fade in PAPER in the
+  separate `/home/tradeai/TradeAI/` deployment, writing `signals.db` — **untouched by this
+  branch's work**.
+- **Locked Soak B gate (binding):** avg_R ≥ **+0.40**, WR ≥ 0.58 (BE-after-TP1
+  recalibration), PF ≥ 2.0, max DD ≤ 20 R, n ≥ 30, no per-token blowup
+  (`TF_B_SOAK_PRE_REGISTER.md`).
+- **Open question:** under the honest post-TP2 exit, the breakout backtest avg_R is
+  **+0.34–0.36 — below the +0.40 gate floor**. The forward soaks are accumulating to test
+  whether the edge holds at realistic execution. Meanwhile **no descriptive signal**
+  (volume, trend, session, VWAP, MSS quality) qualified as an actionable filter, and the
+  TP-geometry experiment found no better geometry. The strategic question is whether
+  Config 14 clears the gate forward, or whether the realistic exit has eroded the edge.
+
+---
+
+## 4. Key constraints
+
+### Validation discipline (from the report headers themselves)
+- **Pre-registered, single-trial, run-once.** New variants declare their decision rule and
+  trial count *before* running ("run ONCE, no parameter sweep" — `PHASE_C_REGIME_FILTER.md`,
+  `TP_GEOMETRY_EXPERIMENT.md`). **"No edge" is an accepted outcome.**
+- **Out-of-sample honesty.** Descriptive checks use a chronological **70/30 OOS** split; the
+  formal **Held-Out Lockbox** reserves the most-recent 90 days, never touched during tuning,
+  for a one-shot verdict (`docs/held_out_protocol.md`, `walk_forward.py`).
+- **Honest metrics.** CPCV (Combinatorial Purged k-Fold) + **DSR deflated for the trial
+  count** (Bailey & López de Prado); avg_R is reported alongside sum_R / PF / maxDD so the
+  avg_R-vs-sum_R trap stays visible. A statistical property is never treated as a strategy
+  until a separate pre-registered experiment confirms it survives friction.
+
+### Isolation rules (followed throughout Phase-C)
+- All exploratory analyses run **in-memory, writing NO DB rows**; backtests use the separate
+  `data/breakout.db`, never the production `signals.db`.
+- The running soaks (A, B) and the production fade are **never interrupted** by analysis; the
+  **Run-3704 pin and `signals.db` live in the production `/home/tradeai/TradeAI/` deployment
+  and are left untouched**.
+- Work stays on the **`breakout-thesis`** branch — **`main` is untouched, not merged, not
+  pushed**; LIVE is never armed. Code changes are paired with unit tests and branch-isolated
+  when a soak is mid-run.
+
+*See `PROJECT_INVENTORY.md` for the file / data / convention inventory, and `CLAUDE.md` for
+the canonical project context.*
+
+---
+---
+
+# Appendix A — Production ICT Bot Reference (retained verbatim from the prior README)
+
+> The section below is the previous `README.md` (the production CRT/5M bot reference),
+> preserved unchanged so no documentation is lost. It describes the production deployment
+> in `/home/tradeai/TradeAI/`, not the Phase-C breakout work above.
+
 # TradeAI — ICT Crypto Signal Bot
 
 > **Signal-only.** Sends BUY / SELL alerts to Telegram. No order execution — the operator places every trade manually.
@@ -121,7 +228,7 @@ See `crypto_alert.py:generate_signal()` for the canonical 5M_SWEEP implementatio
  6. FVG or order block   — confluence at C1's swept-extreme half
  7. Killzone session     — liquid-hours filter
  8. 4H bias gate         — higher-timeframe directional alignment
- 9. 1H trend gate        — intermediate trend confirmation (optional)
+ 9. 1H trend gate         — intermediate trend confirmation (optional)
 10. Wyckoff context      — phase tag (informational by default)
 11. Trade economics      — SL / TP1 / TP2 / TP3 cascade + min RR
 12. Funding overlay      — confidence bonus on extreme funding rates
