@@ -135,7 +135,8 @@
       "/home/tradeai/TradeAI/.claude/reports/tradeai-audit",
       "/home/tradeai/TradeAI/.claude",
       "/tmp",
-      "/home/tradeai/TradeAI/.claude/agents/_bak_before_opus_sonnet_2026_05_30"
+      "/home/tradeai/TradeAI/.claude/agents/_bak_before_opus_sonnet_2026_05_30",
+      "/home/tradeai/breakout-work"
     ]
   },
   "mcpServers": {
